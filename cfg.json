@@ -1,0 +1,14 @@
+{
+  "agents": [
+    "local",
+    "remote"
+  ],
+  "areas": {
+    "ui/": "local",
+    "main.py": "local",
+    "config.py": "local",
+    "server/": "remote",
+    "prompts.py": "remote"
+  },
+  "note": "areas 是建议分工：认领别人地盘上的任务时 collab.py 会提醒一句，不会拦"
+}
