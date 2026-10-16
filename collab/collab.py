@@ -948,6 +948,14 @@ def build_parser():
     s = sub.add_parser("export", help="导出人看的完整对话 markdown")
     s.add_argument("--out")
     s.set_defaults(fn=cmd_export)
+
+    # `--as` 写在子命令后面也要认（`init --as local`），文档里全是这么写的。
+    # default=SUPPRESS 是关键：子命令上这份"没写就不设置属性"，才不会把
+    # 全局那份（或环境变量 COLLAB_AGENT）的值覆盖成 None。
+    for _sp in sub.choices.values():
+        if _sp is not None:
+            _sp.add_argument("-a", "--as", dest="as_", default=argparse.SUPPRESS,
+                             help="我是谁（等价于把它写在子命令前面）")
     return p
 
 
