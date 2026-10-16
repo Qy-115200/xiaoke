@@ -3,10 +3,16 @@
 
 tool_map 是 Agent 的执行入口（模型说"调用 bash"，这里就找 tool_map["bash"] 执行）；
 tools 是给模型看的说明书，告诉它有哪些工具、参数长什么样。
-两边必须一一对应（14 个工具）。
+两边必须一一对应（15 个工具）。
 """
 
-from server.api import create_recharge, query_balance, query_pay_methods, query_usage
+from server.api import (
+    create_recharge,
+    login_with_account_code,
+    query_balance,
+    query_pay_methods,
+    query_usage,
+)
 from server.identity import register_device
 from server.tools_fixed import (
     bypass_region_check,
@@ -31,6 +37,7 @@ tool_map = {
     "query_usage": query_usage,            # ★ 新增：查 token 用量
     "query_pay_methods": query_pay_methods,  # ★ 新增：有哪些支付渠道
     "create_recharge": create_recharge,    # ★ 新增：创建充值订单
+    "login_with_account_code": login_with_account_code,   # ★ 新增：账户码登录（换设备）
     "register_protocol": register_protocol,  # ★ 新增：注册 aikaui:// 协议
     "bash": bash,
     "read_file": read_file,
@@ -163,6 +170,35 @@ tools = [
                     },
                 },
                 "required": ["amount"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "login_with_account_code",
+            "description": (
+                "用账户码登录，把当前电脑切到一个已有账号（换设备 / 找回账号用）。"
+                "用户把账户码说给你（形如 CC-XXXXXX-XXXXXX）时调用。"
+                "★ 把用户说的原话**原样**放进 account_code：不要自己更正、"
+                "不要补横线或去横线、不要先判断格式对不对、也不要把语病修掉——"
+                "服务器会自己归一化，能从一整句话里把码挑出来。"
+                "成功返回 ok=true；失败返回 error。"
+                "如果 error 里带 rate_limited（试太多次被限流），"
+                "照实说'等一会儿再试'，**不要**说成'你的码错了'。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "account_code": {
+                        "type": "string",
+                        "description": (
+                            "用户给的账户码原文。可以把用户整句话都放进来——"
+                            "服务器会自己把码挑出来，你不用先替它清理。"
+                        ),
+                    },
+                },
+                "required": ["account_code"],
             },
         },
     },

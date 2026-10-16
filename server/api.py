@@ -19,8 +19,15 @@ from server.identity import (
     _ensure_account_code,
     _ensure_user_id,
     _save_identity,
+    adopt_identity,
+    bind_account,
     load_identity,
+    remember_account_code,
 )
+
+# 服务器限流时回的错误码。**它不是"出错了"**：意思是"你问得太勤，缓一缓再来"，
+# 界面上不该按"服务挂了"处理，更不该弹错误给用户（见 _account_get / refresh_balance）。
+RATE_LIMITED = "too_many_attempts"
 
 # ================= 服务器接口调用（余额 / 用量 / 充值） =================
 # 这几个接口统一走 https://aikaui.com，统一带 X-Agent-Key 鉴权。
@@ -28,7 +35,8 @@ from server.identity import (
 # 这样余额查不到也不会把整个程序搞崩。
 
 def _api_get(path: str, params: dict = None):
-    """GET 请求。返回 (数据, 错误说明)，两个里只有一个不是 None"""
+    """GET 请求。返回 (数据, 错误说明, 错误码, 建议等待秒数)，
+    失败时数据是 None，其余三个里至少错误说明不是空的。"""
     try:
         import requests                  # 延迟导入
         resp = requests.get(
@@ -38,22 +46,24 @@ def _api_get(path: str, params: dict = None):
             timeout=15,
         )
     except Exception as e:
-        return None, f"请求失败：{e}"
+        return None, f"请求失败：{e}", "", None
 
     if resp.status_code != 200:
-        return None, _api_error(resp)
+        return None, _api_error(resp), _api_code(resp), _api_wait(resp)
     try:
-        return resp.json(), None
+        return resp.json(), None, "", None
     except Exception:
-        return None, f"返回的不是 JSON：{resp.text[:200]}"
+        return None, f"返回的不是 JSON：{resp.text[:200]}", "", None
 
 
 def _api_post_ex(path: str, body: dict):
-    """POST 请求，额外把服务器的**错误码**带回来。返回 (数据, 错误说明, 错误码)。
+    """POST 请求，额外把服务器的**错误码**和**建议等待秒数**带回来。
+    返回 (数据, 错误说明, 错误码, 建议等待秒数)。
 
     为什么单开一条：有个错误码不是"出错了"而是"换一条路再试一次"
-    （`channel_unavailable` = 这个支付渠道现在用不了）。
-    把它压成一个给人看的字符串，就没法区分"失败了"和"换个渠道还能成"了。"""
+    （`channel_unavailable` = 这个支付渠道现在用不了）；
+    还有个是"你问得太勤"（`too_many_attempts`，带 retry_after）。
+    把它们压成一个给人看的字符串，就没法区分"失败了"和这两种情况了。"""
     try:
         import requests
         resp = requests.post(
@@ -63,14 +73,29 @@ def _api_post_ex(path: str, body: dict):
             timeout=15,
         )
     except Exception as e:
-        return None, f"请求失败：{e}", ""
+        return None, f"请求失败：{e}", "", None
 
     if resp.status_code != 200:
-        return None, _api_error(resp), _api_code(resp)
+        return None, _api_error(resp), _api_code(resp), _api_wait(resp)
     try:
-        return resp.json(), None, ""
+        return resp.json(), None, "", None
     except Exception:
-        return None, f"返回的不是 JSON：{resp.text[:200]}", ""
+        return None, f"返回的不是 JSON：{resp.text[:200]}", "", None
+
+
+def _api_wait(resp):
+    """服务器说要等几秒再来（429 的 retry_after / Retry-After 头），没有就 None。"""
+    try:
+        body = resp.json()
+    except Exception:
+        body = None
+    wait = body.get("retry_after") if isinstance(body, dict) else None
+    if wait is None:
+        wait = resp.headers.get("Retry-After")
+    try:
+        return int(wait) if wait is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _api_code(resp) -> str:
@@ -95,6 +120,8 @@ _ERROR_TEXT = {
     "invalid_channel": "支付渠道不对（客户端传了个服务器不认的值）",
     "channel_unavailable": "这个支付渠道现在用不了，换另一个试试",
     "user not found": "服务器找不到这个账号，请重启程序重新领取账号",
+    "account_code not found": "没找到这个账户码，检查一下有没有抄错",
+    "too_many_attempts": "试得太频繁了，等一会儿再试",
     "amount must be positive": "充值金额必须大于 0",
     "amount too small": "充值金额太小了，建议至少充 20 元",
     "amount too large": "充值金额超出限制，请分批充值",
@@ -129,25 +156,63 @@ def _api_error(resp) -> str:
     if detail and detail not in msg:
         msg = f"{msg}（{detail}）"
     return msg if raw or detail else f"HTTP {code}：{json.dumps(body, ensure_ascii=False)[:200]}"
+def _account_get(path: str):
+    """查一个"按账户码查"的接口（/api/balance、/api/usage）。
+
+    比 _api_get 多两件正事：
+      ① 服务器回 200 时，把它回显的**规范形态**账户码写回本地
+         （本地文件里那串可能早就过期了）；
+      ② 服务器说"这个账户码我不认"（account_code not found）时，**自动重领一次**
+         再查一遍——老机器上存的是旧形态的码，不重领会一直查不到。
+
+    返回 (数据, 错误说明, 错误码, 建议等待秒数)，跟 _api_get 同一套。"""
+    account_code, err = _ensure_account_code()
+    if account_code is None:
+        return None, err, "", None
+
+    last = (None, err, "", None)
+    for attempt in (1, 2):
+        data, err, code, wait = _api_get(path, {"account_code": account_code})
+        if data:
+            if isinstance(data, dict):
+                # 服务器没回显就补上我们发的那个，别让上层拿到 None
+                data["account_code"] = data.get("account_code") or account_code
+            remember_account_code(data.get("account_code"))
+            return data, None, "", None
+        last = (None, err, code, wait)
+        # 只有"码不认"才值得重领；限流、断网这些重领也没用
+        if code != "account_code not found" or attempt == 2:
+            break
+        fresh, _ = _ensure_account_code(refresh=True)
+        if not fresh or fresh == account_code:
+            break                      # 领回来的还是同一串：别再白试一次
+        account_code = fresh
+    return last
+
+
 def query_balance() -> str:
     """查余额。返回 JSON 字符串，形如
     {"user_id": 8, "account_code": "CC-F43D-5152", "yuan": "5.00", "quota": 2500000}
 
     服务器查不到时，退回本地凭证里存的余额（注册时服务器下发的那个），
     这样余额接口还没上线 / 暂时挂了，界面上也能显示一个大致数字。"""
-    account_code, err = _ensure_account_code()
-    if account_code is None:
-        return json.dumps({"error": err}, ensure_ascii=False)
+    data, err, code, wait = _account_get("/api/balance")
 
-    # ★ 服务器按账户码查，不是 user_id
-    data, err = _api_get("/api/balance", {"account_code": account_code})
     if data:
         # 只挑需要的字段返回，缺的用本地补上
         return json.dumps({
             "user_id": data.get("user_id"),
-            "account_code": data.get("account_code") or account_code,
+            "account_code": data.get("account_code"),
             "yuan": data.get("yuan"),
             "quota": data.get("quota"),
+        }, ensure_ascii=False)
+
+    # ★ 限流（429）不是"查不到"：余额还是刚才那个数，界面照着旧的显示就行。
+    #   打上 rate_limited 让上层别把它当错误弹出来，也别退回去显示注册时的快照
+    #   （那个数字更旧）。retry_after 是服务器让我们缓多久。
+    if code == RATE_LIMITED:
+        return json.dumps({
+            "error": err, "rate_limited": True, "retry_after": wait or 60,
         }, ensure_ascii=False)
 
     # ---------- 兜底：用注册时服务器给的余额 ----------
@@ -155,7 +220,7 @@ def query_balance() -> str:
     if ident.get("balance") is not None:
         return json.dumps({
             "user_id": ident.get("user_id"),
-            "account_code": account_code,
+            "account_code": ident.get("account_code"),
             "yuan": ident.get("balance"),
             "note": f"查询失败，这是注册时的余额快照（{err}）",
         }, ensure_ascii=False)
@@ -173,11 +238,8 @@ def query_usage() -> str:
     按模型的明细透传出去（键名 by_model / models 都认），细节见
     helpers._norm_by_model()。服务器还没给这个字段时，界面会自动退化成
     一根"全部模型"的柱子，不会白屏。"""
-    account_code, err = _ensure_account_code()
-    if account_code is None:
-        return json.dumps({"error": err}, ensure_ascii=False)
+    data, err, code, wait = _account_get("/api/usage")
 
-    data, err = _api_get("/api/usage", {"account_code": account_code})
     if data:
         today = data.get("today") or {}
         month = data.get("month") or {}
@@ -189,9 +251,15 @@ def query_usage() -> str:
         if isinstance(today, dict) and isinstance(data.get("by_model") or data.get("models"), dict):
             today.setdefault("by_model", data.get("by_model") or data.get("models"))
         return json.dumps({
-            "account_code": data.get("account_code") or account_code,
+            "account_code": data.get("account_code"),
             "today": today,
             "month": month,
+        }, ensure_ascii=False)
+
+    # 同上：限流不是出错，界面该保持原样（见 query_balance 里的说明）
+    if code == RATE_LIMITED:
+        return json.dumps({
+            "error": err, "rate_limited": True, "retry_after": wait or 60,
         }, ensure_ascii=False)
 
     return json.dumps({"error": err}, ensure_ascii=False)
@@ -229,7 +297,7 @@ def query_pay_methods() -> str:
       让用户还能照旧充值，比甩他一个空界面强。"""
     fallback = [{"channel": c, "name": CHANNEL_NAMES[c], "provider": "",
                  "ready": True, "reason": ""} for c in DEFAULT_CHANNELS]
-    data, _ = _api_get("/api/pay-methods")
+    data, _, _, _ = _api_get("/api/pay-methods")
     raw = data.get("methods") if isinstance(data, dict) else None
     methods = []
     if isinstance(raw, list):
@@ -298,14 +366,14 @@ def create_recharge(amount: int, channel: str = None, pay_type: str = None) -> s
         return json.dumps({"error": err}, ensure_ascii=False)
 
     body = {"user_id": user_id, "amount": amount, "channel": ch}
-    data, err, code = _api_post_ex("/api/create-order", body)
+    data, err, code, _wait = _api_post_ex("/api/create-order", body)
 
     # 这个渠道现在用不了 → 换另一个再试一次。用户点的是"充值"，不是"必须用微信"。
     switched_from = None
     if not data and code == "channel_unavailable":
         other = "wechat" if ch == "alipay" else "alipay"
-        data2, err2, _ = _api_post_ex("/api/create-order",
-                                      {"user_id": user_id, "amount": amount, "channel": other})
+        data2, err2, _c2, _w2 = _api_post_ex("/api/create-order",
+                                             {"user_id": user_id, "amount": amount, "channel": other})
         if data2:
             switched_from, ch, data, err = ch, other, data2, None
         else:
@@ -357,6 +425,61 @@ def last_order():
     """读最近一笔充值订单（没有就返回 None）"""
     ident = load_identity() or {}
     return ident.get("last_order")
+
+# ================= 账户码登录（换设备 / 找回账号） =================
+
+def login_with_account_code(account_code) -> str:
+    """用账户码把本机登录到一个已有账号。返回 JSON 字符串。
+
+    ★ 这是**换电脑**的唯一入口：同一份身份文件拷到新机器也能用，但用户手上
+      如果只有那串账户码（显示在「用量信息」页），就得靠这里。
+
+    ★ account_code **原样发给服务器，不做任何清洗**。服务器会归一化大小写、
+      横线、空格、全角，认 O↔0 / I↔1，甚至能把码从一整句话里挑出来。
+      在这里加正则校验或者"顺手帮用户改一下"，只会把打对了的人挡在外面。
+      所以下面除了"压根没给"以外，一个字符都不动。
+
+    成功时返回 {"ok": true, "account_code":..., "user_id":..., "balance":...,
+    "note":..., "next":...}；失败返回 {"error": "..."}。"""
+    raw = "" if account_code is None else str(account_code)
+    if not raw.strip():
+        return json.dumps({"error": "没收到账户码。把账户码发我，或者点「用量信息」页的「换设备登录」。"},
+                          ensure_ascii=False)
+
+    data, err, code, wait = bind_account(raw)      # ★ 原样透传
+
+    if data:
+        adopt_identity(data)                       # 合并进本地文件 + 丢掉旧 client
+        return json.dumps({
+            "ok": True,
+            "account_code": data.get("account_code"),
+            "user_id": data.get("user_id"),
+            "balance": data.get("balance"),
+            "note": "登录成功，这台电脑已经切到这个账号了。",
+            # ★ 必须说清楚：命令行里存的还是上一个账号的 token，不重装的话
+            #   Claude Code 烧的仍是旧账户。这一步要让用户自己决定，别替他改配置。
+            "next": ("要让命令行也用这个账号，得重新走一次「一键安装 Claude Code」"
+                     "（~/.claude.json 里存的还是上一个账号的 token）。"),
+        }, ensure_ascii=False)
+
+    if code == RATE_LIMITED:
+        # ★ 限流和"码错了"必须说成两回事，否则用户会以为自己抄错了码，
+        #   然后越试越多，越试越登不上。
+        return json.dumps({
+            "error": f"试得太多了，服务器让等 {wait or 60} 秒再试。"
+                     f"**这不是账户码打错了**，别改码，也别连着试。",
+            "rate_limited": True,
+            "retry_after": wait or 60,
+        }, ensure_ascii=False)
+
+    if code == "account_code not found":
+        return json.dumps({
+            "error": "没找到这个账户码。检查一下有没有抄错、有没有少几位——"
+                     "账户码就是「用量信息」页里显示的那串。",
+        }, ensure_ascii=False)
+
+    return json.dumps({"error": err}, ensure_ascii=False)
+
 
 # ================= 余额刷新（UI 用） =================
 # 和 query_balance() 的区别：那个是给模型看的工具（返回 JSON 字符串），

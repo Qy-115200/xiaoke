@@ -54,6 +54,9 @@ def poll_queue(gui):
             elif kind == "recharge_paid":
                 # 用户点了「我已完成付款」→ 后端查完余额回来了
                 gui.show_paid_result(data)
+            elif kind == "login_result":
+                # 用户点了「换设备登录」→ 绑定结果回来了
+                gui.show_login_result(data)
             elif kind == "ask":
                 # ask_user 带了选项 → 渲染成可点 / 可键盘选的列表
                 gui.show_options(data.get("options") or [])
