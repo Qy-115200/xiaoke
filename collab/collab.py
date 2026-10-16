@@ -36,6 +36,8 @@ import secrets
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -108,12 +110,29 @@ def git(*args, cwd=None):
     p = run_git(*args, cwd=cwd)
     if p.returncode != 0:
         msg = (p.stderr or p.stdout or "").strip()
-        raise GitError(msg or "git %s 失败" % " ".join(args))
+        # 把命令和目录一起报出来：不然"not a git repository"这种报错根本看不出是谁干的
+        raise GitError("%s\n    命令：git %s\n    目录：%s"
+                       % (msg, " ".join(args), cwd or MIRROR))
     return p.stdout or ""
 
 
 def git_ok(*args, cwd=None):
     return run_git(*args, cwd=cwd).returncode == 0
+
+
+def mirror_state():
+    """镜子目录到底能不能用：'ok' / 'absent'（当没建过，直接建）/ 'broken'（有东西但 git 不认）。
+
+    **别拿 `.git` 在不在当判据。** 目录被删了一半、上一次被 Ctrl-C 打断、
+    杀毒软件啃过一口，都会留下一个"看起来建过了"的镜子 —— 那时候 `git init`
+    被跳过，下一条命令就报 "not a git repository"，看着像 git 坏了，其实只是没人重来一次。
+    """
+    g = MIRROR / ".git"
+    if not g.exists():
+        return "absent"
+    if g.is_dir() and not any(g.iterdir()):
+        return "absent"        # 空壳：什么都没剩下，重来一次不用打招呼
+    return "ok" if run_git("rev-parse", "--git-dir").returncode == 0 else "broken"
 
 
 def write_text(path, text):
@@ -325,6 +344,7 @@ def push(quiet=False):
     for _ in range(5):
         p = run_git("push", "origin", "HEAD:refs/heads/%s" % BRANCH)
         if p.returncode == 0:
+            announce()                              # 快路：喊一声"变了"（失败无妨）
             return True, ""
         err = (p.stderr or p.stdout or "").strip()
         low = err.lower()
@@ -387,8 +407,8 @@ def withdraw_lost_claims(quiet=True):
 
 def sync(quiet=False, withdraw=True):
     """拉最新的、把自己的提交叠上去、必要时撤回认领。False = 离线。"""
-    if not (MIRROR / ".git").exists():
-        raise GitError("还没 init 过。先跑：python collab.py init --as %s" % ME)
+    if mirror_state() != "ok":
+        raise GitError("还没 init 过（或镜像坏了）。先跑：python collab.py init --as %s" % ME)
     online = fetch_and_rebase(quiet=quiet)
     if online and withdraw:
         withdraw_lost_claims(quiet=quiet)
@@ -404,6 +424,65 @@ def commit_and_push(subject, quiet=False):
         print("  ⚠ 已本地提交，但推不出去：%s" % (why.splitlines()[0][:120] or "原因不明"))
         print("    离线也能继续干活；下次 `python collab.py sync` 会自动补推。")
     return ok
+
+
+# ---------------------------------------------------------------- 通知通道
+#
+# 一个可选的"快路"：一条极小的 HTTPS 服务（见 notify_server.py）只回答
+# "远端变了吗"。消息本身还是走 git，这个通道**只传版本号**。
+#
+# 三条规矩，缺一不可：
+#   · 它只回版本号 —— 回自由文本就等于给了一个往 agent 上下文里写字的入口；
+#   · 它挂了不影响任何正确性 —— 读走 git 那条路兜底；
+#   · 它只在**读端**省事，不改变谁写什么。
+
+NOTIFY_CH = "default"
+
+
+def notify_cfg():
+    """(地址, 密钥)。没配就返回 (None, None) —— 一切照旧。"""
+    s = load_self()
+    url = (os.environ.get("COLLAB_NOTIFY_URL") or s.get("notify_url") or "").rstrip("/")
+    if not url:
+        return None, None
+    sec = os.environ.get("COLLAB_NOTIFY_SECRET") or s.get("notify_secret") or ""
+    return url, sec
+
+
+def notify_probe(url, timeout=3):
+    """问一句"远端变了吗"。返回版本号字符串；问不到返回 None（调用方回退到 git）。"""
+    try:
+        req = urllib.request.Request(
+            "%s/v?ch=%s" % (url, NOTIFY_CH), headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return str((json.loads(r.read().decode("utf-8")) or {}).get("v") or "")
+    except Exception:
+        return None
+
+
+def announce():
+    """推送成功后喊一声"变了"。喊不到就算了 —— 这是快路，不是正确性的一部分。"""
+    url, sec = notify_cfg()
+    if not url:
+        return False
+    try:
+        v = (run_git("rev-parse", "HEAD").stdout or "").strip()
+        if not re.match(r"^[0-9A-Za-z._:-]{1,80}$", v):
+            return False
+        body = json.dumps({"v": v}).encode("utf-8")
+        req = urllib.request.Request(
+            "%s/v?ch=%s" % (url, NOTIFY_CH), data=body, method="POST",
+            headers={"Content-Type": "application/json",
+                     "Authorization": "Bearer " + sec})
+        with urllib.request.urlopen(req, timeout=3) as r:
+            r.read()
+        # 喊成功的同时把"服务端现在是这个版本"记下来。
+        # 不记的话，下一次 digest 会拿自己刚推上去的 sha 去比对旧的 last_v，
+        # 得出的结论是"变了" —— 于是每次自己推完都要白拉一次。
+        save_self({"last_v": v})
+        return True
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------- 输出小工具
@@ -476,7 +555,24 @@ def cmd_init(a):
     print("镜像目录：%s" % MIRROR)
     print("我的身份：%s" % ME)
 
-    if not (MIRROR / ".git").exists():
+    st = mirror_state()
+    if st == "broken":
+        # `.git` 在，但 git 自己不认它 —— 最常见的是删了一半留下的空壳
+        # （git 的松散对象在 Windows 上是只读的，rmtree 之类删不干净，剩下的
+        #  objects/ 会让 `.git` 看起来"建过了"，可 HEAD/config 早没了）。
+        # 里面可能还压着没推上去的提交，所以不替你删 —— 把现场和命令给清楚。
+        print("✖ 镜像目录坏了：%s" % MIRROR)
+        print("  `.git` 在，但 git 读不出来（上次删了一半 / 中断过 / 被杀毒软件啃过都这样）。")
+        print("  先看一眼里面还剩什么：")
+        print("    ls -la \"%s/.git\"" % MIRROR)
+        print("  确认没有没推上去的东西，删干净再重来：")
+        if os.name == "nt":
+            print("    PowerShell: Remove-Item -Recurse -Force \"%s\"" % MIRROR)
+        else:
+            print("    rm -rf \"%s\"" % MIRROR)
+        return 2
+    if st == "absent":
+        MIRROR.mkdir(parents=True, exist_ok=True)
         git("init", "-q", str(MIRROR), cwd=home)
     if not git_ok("remote", "get-url", "origin"):
         git("remote", "add", "origin", a.repo)
@@ -877,28 +973,60 @@ def cmd_digest(a):
     "只增不改"那套到这里正好合适：看一眼是纯读操作，两边同时看不会互相影响。
     """
     try:
-        if not (MIRROR / ".git").exists():
-            print("[collab] 还没 init：python collab/collab.py init --as <名字>")
+        if mirror_state() != "ok":
+            print("[collab] 协作镜像没准备好：python collab/collab.py init --as <名字>")
             return 0
         # —— 该不该这次去问远端 ——
+        #
+        # 两层：
+        #   ① 快路（配了通知通道才走）—— 一条极小的 HTTPS GET 问"变了吗"。
+        #      变了一次就拉；没变就跳过，能把兜底周期放长到 --backstop。
+        #   ② 兜底 —— 不管快路说什么，超过预算就必须真去 fetch 一次。
+        #      快路挂了、撒谎了、被人重放了，最多让同步晚一个兜底周期，不会错。
         mark = collab_home() / FETCH_MARK
         try:
             age = time.time() - float(mark.read_text(encoding="utf-8").strip())
         except Exception:
             age = 1e9
-        offline = False
-        if age > a.fetch_max_age:
-            if run_git("fetch", "origin", timeout=a.timeout).returncode == 0:
+
+        url, _ = notify_cfg()
+        budget = max(a.fetch_max_age, a.backstop) if url else a.fetch_max_age
+        do_fetch, why, offline = age > budget, "", False
+        if url and not do_fetch:
+            now_v = notify_probe(url, timeout=min(3, a.timeout))
+            if now_v is None:
+                why = "通知通道问不到"                # 问不到就按原来的短周期走
+                do_fetch = age > a.fetch_max_age
+            elif now_v != (load_self().get("last_v") or ""):
+                do_fetch, why = True, "通知通道说变了"
+            else:
+                why = "通知通道说没变"
+            if now_v is not None:
+                save_self({"last_v": now_v})
+
+        if do_fetch:
+            p = run_git("fetch", "origin", timeout=a.timeout)
+            if p.returncode == 0:
                 # 自己没有待推的提交时顺手快进工作区：fetch 只动 ref，
                 # 不动文件，不补这一步就会一直盯着自己那份旧的看
                 if not pending_count():
                     run_git("merge", "--ff-only", "origin/%s" % BRANCH)
+                if url:
+                    sha = (run_git("rev-parse", "origin/%s" % BRANCH).stdout or "").strip()
+                    if sha:
+                        save_self({"last_v": sha})
             else:
+                # 拉不到就明说拉不到：网络抖动和"真没有新东西"长得一模一样，
+                # 不区分的话，用户看到的就是"对端明明写了这边却不知道"。
                 offline = True
+                why = "拉不动 git（%s）" % " ".join(
+                    (p.stderr or "").strip().splitlines()[:1])
             try:
                 write_text(mark, "%.0f\n" % time.time())
             except Exception:
                 pass
+        if os.environ.get("COLLAB_DEBUG") and why:
+            sys.stderr.write("[collab] fetch=%s (%s, age=%.0fs)\n" % (do_fetch, why, age))
 
         evs = derive()
         ib, td, mn = inbox(evs), todo(evs), mine(evs)
@@ -932,8 +1060,51 @@ def cmd_digest(a):
         return 0
 
 
-HOOK_EVENTS = ("SessionStart", "UserPromptSubmit")
+def cmd_notify(a):
+    """配那条可选的快路。不配，一切照旧走 git。"""
+    if a.clear:
+        save_self({"notify_url": "", "notify_secret": "", "last_v": ""})
+        print("✔ 已取消。回到纯 git 轮询。")
+        return 0
 
+    if a.set:
+        url = a.set.rstrip("/")
+        if not url.startswith(("http://", "https://")):
+            print("✖ 地址要以 http:// 或 https:// 开头")
+            return 2
+        s = {"notify_url": url}
+        if a.secret:
+            s["notify_secret"] = a.secret
+        save_self(s)
+        print("✔ 通知通道 = %s" % url)
+
+    url, sec = notify_cfg()
+    if not url:
+        print("现在没配通知通道。当前行为：digest 到点就走 git fetch，也就是原来的样子。")
+        print("配的方法：python %s notify --set https://<你的服务器>/collab --secret <密钥>"
+              % Path(sys.argv[0]).name)
+        return 0
+
+    print("通知通道 = %s" % url)
+    print("密钥     = %s" % ("已配（%d 位）" % len(sec) if sec else "**没配，只能读不能写**"))
+    print("上次记的版本 = %s" % (load_self().get("last_v") or "(还没问过)"))
+
+    if a.test:
+        print("\n--- 问一次（读，不需要密钥）---")
+        v = notify_probe(url, timeout=6)
+        if v is None:
+            print("✖ 问不到。检查地址、服务在不在、网络通不通。")
+            return 1
+        print("✔ 拿到版本号：%s" % (v or "(空)"))
+        print("\n--- 喊一声（写，需要密钥）---")
+        if not sec:
+            print("跳过：没配密钥。")
+            return 0
+        print("✔ 喊通了。" if announce() else "✖ 喊不通：密钥不对，或者服务端拒了。")
+    return 0
+
+
+HOOK_EVENTS = ("SessionStart", "UserPromptSubmit")
 
 def hook_command(script, args=""):
     """拼出 hook 要跑的那行命令。
@@ -1042,8 +1213,17 @@ def build_parser():
     s.add_argument("--long", action="store_true", help="再带上最近几条消息")
     s.add_argument("--fetch-max-age", type=int, default=60,
                    help="距上次问远端超过这么多秒才再问一次（默认 60）")
+    s.add_argument("--backstop", type=int, default=1800,
+                   help="配了通知通道时，无条件真 fetch 的最长间隔（默认 1800 秒）")
     s.add_argument("--timeout", type=int, default=6, help="单次 git 网络操作硬超时（秒）")
     s.set_defaults(fn=cmd_digest)
+
+    s = sub.add_parser("notify", help="配通知通道（可选的快路，不配也能用）")
+    s.add_argument("--set", metavar="URL", help="设成这个地址，例如 https://host/collab")
+    s.add_argument("--secret", help="写操作密钥（也可以走环境变量 COLLAB_NOTIFY_SECRET）")
+    s.add_argument("--clear", action="store_true", help="取消配置，回到纯 git")
+    s.add_argument("--test", action="store_true", help="当场问一次、再喊一次，看通不通")
+    s.set_defaults(fn=cmd_notify)
 
     s = sub.add_parser("hooks", help="把「每次自动看一眼 git」装成本机 hook")
     s.add_argument("--write", action="store_true", help="真的写进去（不加只预览）")
@@ -1123,11 +1303,12 @@ def main(argv=None):
         # 分两种情形：① 输出被重定向 / 进了管道（Claude Code、> 文件）—— 一律按 UTF-8 写，
         # 这是绝大多数情况，管道另一头都是按 UTF-8 读的；
         # ② 直接怼着一个老控制台 —— 保留它自己的编码，只把编不出来的字符降级成 ?。
-        enc = (sys.stdout.encoding or "").lower()
-        if "utf" not in enc and not sys.stdout.isatty():
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace", newline="\n")
-        else:
-            sys.stdout.reconfigure(errors="replace", newline="\n")
+        for f in (sys.stdout, sys.stderr):
+            enc = (f.encoding or "").lower()
+            if "utf" not in enc and not f.isatty():
+                f.reconfigure(encoding="utf-8", errors="replace", newline="\n")
+            else:
+                f.reconfigure(errors="replace", newline="\n")
     except Exception:
         pass
     p = build_parser()

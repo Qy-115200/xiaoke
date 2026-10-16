@@ -110,7 +110,7 @@
 > **全世界都能看到**，而且会永久留在 GitHub 的历史（以及各家 fork / 镜像）里，删不掉。
 > 二选一：
 > - 把仓库改成 private（Settings → General → 最下面的 Danger Zone → Change visibility）；
-> - 或者另建一个**私有**仓库专门放协作数据：`init --repo <私有仓库地址>`，见第 10 节。
+> - 或者另建一个**私有**仓库专门放协作数据：`init --repo <私有仓库地址>`，见第 12 节。
 >
 > 私有仓库要两台机器各有写权限（PAT 或部署密钥）——**这个东西由人各自放上去，不要经过聊天记录**。
 
@@ -258,6 +258,7 @@ python3 collab/collab.py log [-n 20] [--kind ask] [-v]
 python3 collab/collab.py show <id>                     # 某条消息/任务全文
 python3 collab/collab.py digest                        # 几行态势（给 hook 用的）
 python3 collab/collab.py hooks [--write]               # 装/看"自动查 git"的 hook
+python3 collab/collab.py notify [--set URL --secret K|--test|--clear]   # 可选快路，见第 9 节
 python3 collab/collab.py export [--out 文件]           # 导出人看的完整记录
 ```
 
@@ -270,6 +271,7 @@ python3 collab/collab.py export [--out 文件]           # 导出人看的完整
 |---|---|
 | `COLLAB_AGENT` | 我是谁（`local` / `remote` / …） |
 | `COLLAB_HOME` | 镜像仓库和本地游标放哪。默认 `~/.claude-collab`。一台机器一个身份，同机要跑两个身份就设两个值 |
+| `COLLAB_NOTIFY_URL` / `COLLAB_NOTIFY_SECRET` | 第 9 节那条可选快路。不设就纯走 git，功能一样，只是慢一点 |
 
 **退出码**：`0` 成功；`1` 抢任务输了（正常情况，不是错误）；`2` 用法/环境问题（没 init、连不上、id 找不到）。
 
@@ -340,7 +342,58 @@ python3 collab/collab.py hooks --write    # 写入 .claude/settings.local.json
 
 ---
 
-## 9. 人怎么看
+## 9. 可选的快路：只回一个版本号的通知通道
+
+到第 8 节为止，同步的天花板是 `--fetch-max-age`。对方刚好在你查完之后写了东西，
+你最多要等一整个周期才知道。想更近实时，就得有人**主动告诉你"变了"**。
+
+`collab/notify_server.py` 只干这一件事。它**不传消息**，只回答一个问题：
+
+```
+GET  /v?ch=default            → {"v": "6af2f55b9688…"}   变了没有，看这个字符串
+POST /v?ch=default   Bearer   → 更新版本号（谁推完谁喊一声）
+```
+
+于是 `digest` 变成两层：
+
+| 层 | 触发条件 | 作用 |
+|---|---|---|
+| ① 快路 | 通道说"变了" | 立刻 fetch，不用等 |
+| ② 兜底 | 距上次真 fetch 超过 `--backstop` | 不管快路说什么，到点必须真拉一次 |
+
+> **兜底那一层才是这套设计能成立的原因。** 有了它，快路可以是第三方的、可以撒谎、
+> 可以随时挂掉、可以被人重放 —— 最坏结果只是同步晚一个兜底周期，**不会错**。
+> 所以这条通道"拔掉"是零损失的：`notify --clear` 之后一切退回第 8 节的样子。
+
+三条硬规矩，都是为了**别让它变成一个往模型脑子里写字的入口**：
+
+1. **它回不了自由文本。** 版本号被限死成 `^[0-9A-Za-z._:-]{1,80}$` —— 装不下任何句子。
+   `digest` 的 stdout 会被原样塞进上下文，一条能回任意字符串的通道，就是一个提示词注入接口。
+   服务端对超长和带中文的输入一律 400，这一条是测过的。
+2. **读不要鉴权，写要密钥。** 读到的只是"变没变"，泄露了不值钱；写要密钥，免得有人乱按喇叭。
+3. **它挂了不影响协作。** 问不到就退回按 `--fetch-max-age` 的老节奏，`digest` 照样退出 0。
+
+服务端只用标准库，跑起来：
+
+```bash
+COLLAB_NOTIFY_SECRET=$(openssl rand -hex 16) python3 notify_server.py --port 8787
+```
+
+默认只绑 `127.0.0.1`。**要对外就在前面放 nginx/caddy 收 TLS**，并且只转发 `/v`；
+这个服务自己说的是 plain HTTP，别直接对着公网。
+
+两边各配各的（配置存在各自的 `self.json` 里，谁也替不了谁 —— 没配的那边推完不喊）：
+
+```bash
+python3 collab/collab.py notify --set https://notify.example.com --secret <密钥>
+python3 collab/collab.py notify --test        # 当场喊一声试试
+```
+
+也可以用环境变量 `COLLAB_NOTIFY_URL` / `COLLAB_NOTIFY_SECRET`，优先级高于 `self.json`。
+
+---
+
+## 10. 人怎么看
 
 - `python3 collab/collab.py status --all` —— 当前态势 + 全部任务
 - `python3 collab/collab.py export` —— 生成一份从头到尾的 Markdown 对话记录
@@ -348,7 +401,7 @@ python3 collab/collab.py hooks --write    # 写入 .claude/settings.local.json
 
 ---
 
-## 10. 边界：这套东西不做什么
+## 11. 边界：这套东西不做什么
 
 | 不做 | 原因 |
 |---|---|
@@ -360,7 +413,7 @@ python3 collab/collab.py hooks --write    # 写入 .claude/settings.local.json
 
 ---
 
-## 11. 想换一个仓库？
+## 12. 想换一个仓库？
 
 完全支持——协作仓库不必是代码仓库：
 
