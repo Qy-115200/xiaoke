@@ -1,4 +1,18 @@
+# ---- Python ----
 .venv/
 .env
-sandbox/
 __pycache__/
+*.py[cod]
+
+# ---- PyInstaller 产物 ----
+build/
+dist/
+
+# ---- Agent 干活用的临时目录（旧 demo 留下的，现在由 bash 工具自己管）----
+sandbox/
+
+# ---- Claude Code ----
+# settings.local.json 由 collab.py hooks --write 按机器生成（里面有绝对路径和
+# 平台相关的解释器名），提交上去只会让两台机器互相覆盖。协作约定写 CLAUDE.md。
+.claude/settings.local.json
+.claude/settings.local.json.bak-collab

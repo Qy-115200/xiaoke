@@ -35,6 +35,7 @@ import re
 import secrets
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -861,6 +862,149 @@ def cmd_sync(a):
     return 0
 
 
+FETCH_MARK = "last-fetch"
+
+
+def cmd_digest(a):
+    """给 hook 用的：每次开口之前，自动把 git 上的态势看一眼。
+
+    这条命令的纪律和别的命令不一样 —— 它挂在每一次提示词上，所以：
+
+      · **永远退出 0**。hook 非零退出会打断用户，这条路绝不能把会话搞挂。
+      · **输出最多四五行**。它的 stdout 会原样进上下文，长了就是每轮都在烧 token。
+      · **网络最多每 fetch_max_age 秒碰一次**，单次硬超时。不然每打一句话都卡一下。
+
+    "只增不改"那套到这里正好合适：看一眼是纯读操作，两边同时看不会互相影响。
+    """
+    try:
+        if not (MIRROR / ".git").exists():
+            print("[collab] 还没 init：python collab/collab.py init --as <名字>")
+            return 0
+        # —— 该不该这次去问远端 ——
+        mark = collab_home() / FETCH_MARK
+        try:
+            age = time.time() - float(mark.read_text(encoding="utf-8").strip())
+        except Exception:
+            age = 1e9
+        offline = False
+        if age > a.fetch_max_age:
+            if run_git("fetch", "origin", timeout=a.timeout).returncode == 0:
+                # 自己没有待推的提交时顺手快进工作区：fetch 只动 ref，
+                # 不动文件，不补这一步就会一直盯着自己那份旧的看
+                if not pending_count():
+                    run_git("merge", "--ff-only", "origin/%s" % BRANCH)
+            else:
+                offline = True
+            try:
+                write_text(mark, "%.0f\n" % time.time())
+            except Exception:
+                pass
+
+        evs = derive()
+        ib, td, mn = inbox(evs), todo(evs), mine(evs)
+        pend = pending_count()
+        tag = " · 离线" if offline else ""
+
+        if not (ib or td or mn or pend):
+            done = sum(1 for t in evs["tasks"].values() if t["state"] == "已完成")
+            print("[collab] 无待办（任务 %d 个，%d 已完成）%s"
+                  % (len(evs["tasks"]), done, tag))
+            return 0
+
+        print("[collab] 我=%s · 待回 %d · 待领 %d · 手上 %d · 待推 %d%s"
+              % (ME, len(ib), len(td), len(mn), pend, tag))
+        for m in ib[:3]:
+            print("[collab] 待回复 %s %s：「%s」→ answer %s -m \"...\""
+                  % (handle(m["id"]), m["from"],
+                     re.sub(r"\s+", " ", m.get("subject") or m.get("body") or "")[:50],
+                     handle(m["id"])))
+        for t in td[:4]:
+            print("[collab] 待认领 %s %s" % (t["id"], t["title"]))
+        for t in mn[:4]:
+            print("[collab] 我手上 %s %s" % (t["id"], t["title"]))
+        if a.long:
+            for m in evs["msgs"][-4:]:
+                print("[collab] 近况 " + fmt_msg(m, maxlen=70))
+        return 0
+    except Exception as e:                          # 兜底：hook 不能成为故障源
+        if os.environ.get("COLLAB_DEBUG"):
+            print("[collab] digest 出错：%r" % (e,))
+        return 0
+
+
+HOOK_EVENTS = ("SessionStart", "UserPromptSubmit")
+
+
+def hook_command(script, args=""):
+    """拼出 hook 要跑的那行命令。
+
+    两个刻意的选择：
+
+    · **绝对路径**。不依赖 shell 去展开 `$CLAUDE_PROJECT_DIR` / `%CLAUDE_PROJECT_DIR%`，
+      也不依赖 hook 的工作目录在哪 —— cmd.exe 和 sh 的变量语法不一样，避开它最省事。
+    · **用 `sys.executable` 而不是猜 `python` / `python3`**。这台机器上 `python`
+      指的是 anaconda 那个解释器，不是项目虚拟环境里的；远端又普遍只有 `python3`。
+      而我们**正在**用它跑 collab.py，所以它就是"已知能跑"的那个解释器。
+    """
+    py = sys.executable or ("python" if os.name == "nt" else "python3")
+    return ('"%s" "%s" digest%s' % (py, script, (" " + args if args else ""))).strip()
+
+
+def cmd_hooks(a):
+    """把「每次自动看一眼 git」装成本机的 hook。
+
+    写的是 `.claude/settings.local.json`（**机器本地、不进 git**），不是
+    `.claude/settings.json`：那行命令里含绝对路径和平台相关的解释器名，
+    提交上去会让两台机器互相覆盖。一份配置两边通用这件事，靠
+    `collab.py hooks --write` 各跑一次来实现，不靠提交同一个文件。
+
+    两个事件的分工是有意的：
+      · `SessionStart` —— 会话开始，肯等。fetch-max-age=0 就是"一定要问一次远端"。
+      · `UserPromptSubmit` —— 挂在**每一次**你开口上，所以改成 180 秒才问一次、
+        单次 6 秒硬超时。不然网络一抖，你每打一句话都要卡几秒。
+    """
+    script = Path(__file__).resolve()
+    cfg = {
+        "hooks": {
+            "SessionStart": [{"hooks": [
+                {"type": "command", "command": hook_command(script, "--long --fetch-max-age 0 --timeout 15")}]}],
+            "UserPromptSubmit": [{"hooks": [
+                {"type": "command", "command": hook_command(script, "--fetch-max-age 180 --timeout 6")}]}],
+        }
+    }
+    dest = Path(a.settings or (Path.cwd() / ".claude" / "settings.local.json"))
+    print("目标文件：%s" % dest)
+    print("将要写入：")
+    print(json.dumps(cfg, ensure_ascii=False, indent=2))
+    if not a.write:
+        print("\n（这是预览。加 --write 才会真的写进去）")
+        print("  装好之后：SessionStart 每次开会话、UserPromptSubmit 每次你开口，")
+        print("  都会自动跑一遍 digest，把 git 上的最新态势塞进上下文。")
+        return 0
+
+    cur = {}
+    if dest.exists():
+        try:
+            cur = json.loads(dest.read_text(encoding="utf-8"))
+        except Exception:
+            print("✖ %s 不是合法 JSON，先自己看一眼再装，别让我把它覆盖了。" % dest)
+            return 2
+        if not a.force and (cur.get("hooks") or {}):
+            print("\n✖ 这个文件里已经有 hooks 了，不动它。确认要覆盖就加 --force。")
+            print("  现有：%s" % "、".join(cur["hooks"].keys()))
+            return 2
+        backup = dest.with_suffix(".json.bak-collab")
+        write_text(backup, json.dumps(cur, ensure_ascii=False, indent=2) + "\n")
+        print("\n原文件已备份到 %s" % backup)
+    cur.setdefault("hooks", {}).update(cfg["hooks"])
+    write_text(dest, json.dumps(cur, ensure_ascii=False, indent=2) + "\n")
+    print("✔ 装好了。")
+    print("  ⚠ 项目里的 hook 会被 Claude Code 当成「要执行的东西」拦一次让你确认 ——")
+    print("    这是防「克隆个仓库就被执行任意命令」的保护，点同意就行。")
+    print("  ⚠ 想撤掉：把 %s 里的 hooks 一节删掉即可。" % dest)
+    return 0
+
+
 # ---------------------------------------------------------------- 入口
 
 def build_parser():
@@ -893,6 +1037,19 @@ def build_parser():
 
     s = sub.add_parser("sync", help="拉取 + 补推，并收拾掉赢不了/没意义的认领")
     s.set_defaults(fn=cmd_sync)
+
+    s = sub.add_parser("digest", help="给 hook 用：几行话说清现在该知道什么（永远退出 0）")
+    s.add_argument("--long", action="store_true", help="再带上最近几条消息")
+    s.add_argument("--fetch-max-age", type=int, default=60,
+                   help="距上次问远端超过这么多秒才再问一次（默认 60）")
+    s.add_argument("--timeout", type=int, default=6, help="单次 git 网络操作硬超时（秒）")
+    s.set_defaults(fn=cmd_digest)
+
+    s = sub.add_parser("hooks", help="把「每次自动看一眼 git」装成本机 hook")
+    s.add_argument("--write", action="store_true", help="真的写进去（不加只预览）")
+    s.add_argument("--force", action="store_true", help="文件里已有 hooks 也覆盖")
+    s.add_argument("--settings", help="写到别的路径（默认 .claude/settings.local.json）")
+    s.set_defaults(fn=cmd_hooks)
 
     s = sub.add_parser("send", help="说一句")
     add_body(s)
@@ -968,9 +1125,9 @@ def main(argv=None):
         # ② 直接怼着一个老控制台 —— 保留它自己的编码，只把编不出来的字符降级成 ?。
         enc = (sys.stdout.encoding or "").lower()
         if "utf" not in enc and not sys.stdout.isatty():
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace", newline="\n")
         else:
-            sys.stdout.reconfigure(errors="replace")
+            sys.stdout.reconfigure(errors="replace", newline="\n")
     except Exception:
         pass
     p = build_parser()
