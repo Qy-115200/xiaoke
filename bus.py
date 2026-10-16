@@ -48,6 +48,9 @@ def poll_queue(gui):
             elif kind == "recharge_methods":
                 # 服务器给了当前开了哪些支付渠道 → 充值窗照着画按钮
                 gui.show_recharge_methods(data)
+            elif kind == "recharge_qr":
+                # 用户点了「重新加载二维码」，图重新下回来了
+                gui.show_qr_image(data)
             elif kind == "recharge_paid":
                 # 用户点了「我已完成付款」→ 后端查完余额回来了
                 gui.show_paid_result(data)

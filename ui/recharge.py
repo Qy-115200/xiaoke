@@ -308,13 +308,24 @@ class RechargeMixin:
         self._qr_image = info.get("_image")
         if self._qr_image is not None:
             self._qr_box.configure(image=self._qr_image, text="")
+        elif info.get("pay_url"):
+            # 没图但有支付页链接 → 还有路可走，告诉用户走哪条
+            self._qr_box.configure(text="二维码没加载出来\n点下面「打开支付页」继续付款")
         else:
-            # 二维码图没拿到。能不能继续付款，取决于这单有没有别的入口——
-            # 微信直连这条常常没有 pay_url，那就只能如实说"没拿到"，别让用户干等。
-            if info.get("pay_url"):
-                self._qr_box.configure(text="二维码没加载出来\n点下面「打开支付页」继续付款")
-            else:
-                self._qr_box.configure(text="二维码图片没取到\n稍等一下重开充值窗，或联系客服")
+            # 微信直连这条常常没有 pay_url（现在就是这么返回的），图没拿到就真没别的路了，
+            # 那就如实说，别让用户对着空框干等。下面会给一个"重新加载"的按钮。
+            self._qr_box.configure(text="二维码图片没取到")
+
+        # 图没取到多半是拿图那一下网络抖了（订单本身是好的），所以给一条**重试**的路。
+        # 没有这个按钮，用户只能关掉重来——那会白白多开一笔订单，
+        # 而且这单的二维码本来好好的，只是没下下来。
+        if self._qr_image is None and info.get("img"):
+            ctk.CTkButton(
+                box, text="🔄 重新加载二维码", width=150, height=30,
+                font=font(S_SMALL),
+                fg_color="#3a3a3a", hover_color="#4a4a4a",
+                command=self._reload_qr_image,
+            ).pack(pady=(6, 0))
 
         ctk.CTkLabel(
             box, text=f"订单号：{info.get('order_no') or '—'}",
@@ -339,12 +350,15 @@ class RechargeMixin:
 
         row = ctk.CTkFrame(box, fg_color="transparent")
         row.pack(pady=(0, 10))
-        ctk.CTkButton(
-            row, text="打开支付页", width=116, height=32,
-            font=font(S_SMALL),
-            fg_color="#3a3a3a", hover_color="#4a4a4a",
-            command=self._open_pay_url,
-        ).pack(side=tk.LEFT, padx=4)
+        # 微信直连那条（现在的一等公民）没有 pay_url，这个按钮点了只会弹一句
+        # "这单没有支付链接"。与其摆个永远点不动的按钮，不如不画。
+        if info.get("pay_url"):
+            ctk.CTkButton(
+                row, text="打开支付页", width=116, height=32,
+                font=font(S_SMALL),
+                fg_color="#3a3a3a", hover_color="#4a4a4a",
+                command=self._open_pay_url,
+            ).pack(side=tk.LEFT, padx=4)
         ctk.CTkButton(
             row, text="重新选择", width=116, height=32,
             font=font(S_SMALL),
@@ -365,6 +379,38 @@ class RechargeMixin:
             webbrowser.open(url)
         else:
             self._set_dlg_status("这单没有支付链接，请直接用二维码付款", RED)
+
+    def _reload_qr_image(self):
+        """重新下一遍二维码图。订单不用重开——重开就等于多下一笔单。"""
+        info = self._pay_info or {}
+        url = info.get("img")
+        if not url:
+            self._set_dlg_status("这单没有二维码图片地址，重开充值窗试试", ORANGE)
+            return
+        self._set_dlg_status("正在重新加载二维码…", DIM)
+        threading.Thread(target=self._reload_qr_worker, args=(url,), daemon=True).start()
+
+    @staticmethod
+    def _reload_qr_worker(url):
+        try:
+            img = _load_qr_image(url)
+        except Exception:
+            img = None
+        msg_queue.put(("recharge_qr", {"image": img}))
+
+    def show_qr_image(self, payload):
+        """主线程：重试的结果回来了"""
+        img = (payload or {}).get("image")
+        if img is None:
+            self._set_dlg_status("还是没取到。网络恢复后再点一次「重新加载二维码」", ORANGE)
+            return
+        self._qr_image = img
+        if self._qr_box is not None:
+            try:
+                self._qr_box.configure(image=img, text="")
+            except Exception:
+                return
+        self._set_dlg_status("二维码加载好了，扫一下就行", GREEN)
 
     def _set_dlg_status(self, text, color=DIM):
         if self._dlg_status is not None:
