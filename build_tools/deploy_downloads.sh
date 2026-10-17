@@ -39,6 +39,7 @@ declare -a FILES=(
 )
 
 file_args=()
+srcs=()
 for item in "${FILES[@]}"; do
   key="${item%%:*}"
   name="${item#*:}"
@@ -47,6 +48,7 @@ for item in "${FILES[@]}"; do
     exit 1
   fi
   file_args+=(--file "$key=$SRC/$name")
+  srcs+=("$SRC/$name")
 done
 
 echo "▶ 生成清单 latest.json（v$VERSION）"
@@ -60,13 +62,15 @@ echo "▶ 建目录 $TARGET"
 "${SSH[@]}" "mkdir -p '$TARGET'"
 
 echo "▶ 上传产物"
+# 只传清单里点名的四个文件。不要用 ClaudeCodeAssistant-* 通配：
+# 用 API 下载 artifact 时目录里会多出 *.zip 外壳，通配会把它们一起传上去。
 if command -v rsync >/dev/null 2>&1; then
   rsync -av -e "$RSYNC_SSH" --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r \
-    "$SRC"/ClaudeCodeAssistant-* "$USER_NAME@$HOST:$TARGET/"
+    "${srcs[@]}" "$USER_NAME@$HOST:$TARGET/"
 else
   # Git Bash（Windows）通常没有 rsync；scp 效果一样，只是没有增量。
   echo "（没有 rsync，改用 scp）"
-  scp -q "${KEY_OPTS[@]}" "$SRC"/ClaudeCodeAssistant-* "$USER_NAME@$HOST:$TARGET/"
+  scp -q "${KEY_OPTS[@]}" "${srcs[@]}" "$USER_NAME@$HOST:$TARGET/"
   "${SSH[@]}" "chmod 644 '$TARGET'/*"
 fi
 
