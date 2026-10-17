@@ -7,17 +7,20 @@ offer_recharge），用户点了才会弹充值窗。
 
 图表是直接画在 tk.Canvas 上的柱状图，几个刻意的决定：
 
-- **单色**。柱子表达的是"每个模型用了多少 token"，模型名就写在轴线下面，
-  颜色不承担区分职责 —— 所以只用一种蓝（config.SERIES），也就不需要图例。
+- **单色**。柱子表达的是"每个时间桶 / 每个模型用了多少 token"，刻度就写在
+  轴线下面，颜色不承担区分职责 —— 所以只用一种蓝（config.SERIES），不需要图例。
+- **图表按时间分布**：今日按小时（00:00…当前小时）、本月按天（10-01…今天）。
+  服务端没给 series 时退回按模型画，老接口也不白屏。
 - **柱顶直接标数值**，读图不用去对 Y 轴；鼠标悬停还会出一个提示框。
-- **下面配一张明细表**：所有数字不靠悬停也拿得到（截图、读屏都不吃亏）。
-- 最多 8 根柱子，多出来的折进「其他」，不为了塞更多数据去造新颜色。
+- **下面配一张按模型的明细表**：所有数字不靠悬停也拿得到（截图、读屏都不吃亏）。
+- 时间桶多时只每隔几个画一个刻度；明细表最多 8 行，多出来的折进「其他」。
 
 配色按 dataviz 规范选过：蓝 #3987e5 在卡片底色 #1f1f1f 上通过色带、彩度、
 对比度三项校验（≥3:1）；悬停用同色阶提亮一档 #5598e7。
 """
 
 import threading
+import time
 import tkinter as tk
 
 import customtkinter as ctk
@@ -44,13 +47,13 @@ from helpers import (
     _fmt_yuan,
     _nice_ticks,
     _norm_by_model,
+    _norm_series,
     _text_width,
     _to_float,
 )
 from server.identity import load_identity
 from ui.fonts import (
     S_AXIS,
-    S_BODY,
     S_CANVAS,
     S_HEAD,
     S_HERO,
@@ -63,7 +66,6 @@ from ui.fonts import (
     spec,
 )
 
-MAX_BARS = 8          # 图表最多画几根柱子，多出来的折进「其他」
 _ROUND = 4            # 柱顶圆角半径：4px 圆角 + 基线那头直角
 _LABEL_LIFT = 13      # 柱顶那行数值离柱顶的距离（字号涨了，比原来多让 1px）
 _CAP_GAP = 22         # 提示框至少要抬离柱顶这么高，否则会压住柱顶那行数值
@@ -78,9 +80,9 @@ class UsageMixin:
         self.usage_view = view
         self._usage_data = {}          # 最近一次拿到的 {"balance":…, "usage":…}
         self._account_code = ""        # 当前账号的账户码（复制按钮用）
-        self._rows = []                # 当前期间的柱子数据（已折过「其他」）
-        self._bars = []                # 画布上每根柱子的位置，悬停时用来命中
-        self._hover = -1               # 当前悬停的柱子下标（-1 = 没有）
+        self._rows = []                # 当前期间的模型明细（挑模型 / 算合计用）
+        self._charts = []              # 两张图：flash / pro，各一份画布和状态
+        self._usage_stamp = ""         # 用量数据的到达时间（HH:MM），图表右上角用
         self._range = "today"          # 当前期间：today / month
 
         # ---------- 标题行：标题 + 充值 + 刷新 ----------
@@ -160,7 +162,7 @@ class UsageMixin:
         ctrl.pack(fill=tk.X, padx=18, pady=(0, 6))
 
         ctk.CTkLabel(
-            ctrl, text="各模型 token 用量",
+            ctrl, text="各模型 token 用量（按时间）",
             font=font(S_HEAD, "bold"),
             text_color=TEXT,
         ).pack(side=tk.LEFT)
@@ -183,26 +185,43 @@ class UsageMixin:
             btn.pack(side=tk.LEFT, padx=(8, 0))
             self._range_buttons[key] = btn
 
-        # ---------- 图表卡片（画布跟着卡片一起伸缩）----------
-        chart_card = ctk.CTkFrame(view, fg_color=SURFACE, corner_radius=10)
-        chart_card.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 10))
+        # ---------- 两张图：flash / pro 各一张时间分布图 ----------
+        # 上下各占一半；每张卡片标题就是模型名，右边写本期间的合计。
+        for idx in range(2):
+            self._charts.append(self._build_chart_card(view, idx))
 
-        self.chart = tk.Canvas(chart_card, bg=SURFACE, highlightthickness=0, bd=0)
-        self.chart.pack(fill=tk.BOTH, expand=True, padx=4, pady=(6, 4))
-        self.chart.bind("<Configure>", lambda e: self._draw_chart())
-        self.chart.bind("<Motion>", self._on_chart_motion)
-        self.chart.bind("<Leave>", lambda e: self._set_hover(-1))
-
-        # ---------- 明细表 ----------
-        table = ctk.CTkFrame(view, fg_color=SURFACE, corner_radius=10)
-        table.pack(fill=tk.X, padx=18, pady=(0, 16))
-        self.table_rows = ctk.CTkFrame(table, fg_color="transparent")
-        self.table_rows.pack(fill=tk.X, padx=16, pady=12)
-        self.table_rows.grid_columnconfigure(0, weight=1)     # 模型名那一列吃掉多余宽度
-
-        self._render_table()
         self._paint_range_buttons()
         return view
+
+    def _build_chart_card(self, parent, idx):
+        """建一张图表卡：模型名 + 合计 + 画布（上下两张共用这个函数）"""
+        card = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=10)
+        card.pack(fill=tk.BOTH, expand=True, padx=18,
+                  pady=(0, 8 if idx == 0 else 16))
+
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.pack(fill=tk.X, padx=14, pady=(8, 0))
+        title = ctk.CTkLabel(
+            head, text="—", font=font(S_HEAD, "bold"), text_color=TEXT,
+        )
+        title.pack(side=tk.LEFT)
+        total = ctk.CTkLabel(
+            head, text="", font=font(S_SMALL, mono=True), text_color=DIM,
+        )
+        total.pack(side=tk.RIGHT)
+
+        canvas = tk.Canvas(card, bg=SURFACE, highlightthickness=0, bd=0)
+        canvas.pack(fill=tk.BOTH, expand=True, padx=4, pady=(2, 4))
+
+        chart = {
+            "canvas": canvas, "title": title, "total": total,
+            "model": "", "series": [], "series_is_time": False,
+            "bars": [], "hover": -1,
+        }
+        canvas.bind("<Configure>", lambda e, c=chart: self._draw_chart(c))
+        canvas.bind("<Motion>", lambda e, c=chart: self._on_chart_motion(c, e))
+        canvas.bind("<Leave>", lambda e, c=chart: self._set_hover(c, -1))
+        return chart
 
     def _stat_tile(self, parent, title):
         """一个小方块：标题 + 金额 + 底下那行 token 数"""
@@ -245,6 +264,7 @@ class UsageMixin:
             merged["balance"] = bal
         if not usage.get("rate_limited"):
             merged["usage"] = usage
+            self._usage_stamp = time.strftime("%H:%M")   # 记的是"数据到达时间"
         self._usage_data = merged
 
         if not bal.get("rate_limited"):
@@ -298,33 +318,76 @@ class UsageMixin:
         self._render_usage()
 
     def _render_usage(self):
-        """按当前期间重取柱子数据 → 重画图表和明细表"""
+        """按当前期间重取两个模型的序列 → 重画两张图"""
         self._paint_range_buttons()
 
         block = (self._usage_data.get("usage") or {}).get(self._range) or {}
-        rows = _norm_by_model(block)
+        self._rows = _norm_by_model(block)
 
-        # 柱子太多就折「其他」：不造新颜色，也不让柱子细到看不见
-        if len(rows) > MAX_BARS:
-            head_rows = rows[: MAX_BARS - 1]
-            rest = rows[MAX_BARS - 1:]
-            head_rows.append({
-                "model": "其他",
-                "tokens": sum(r["tokens"] for r in rest),
-                "yuan": sum(r["yuan"] or 0 for r in rest) or None,
-            })
-            rows = head_rows
-        self._rows = rows
+        flash, pro = self._pick_models(block)
+        for chart, model in zip(self._charts, (flash, pro)):
+            self._fill_chart(chart, model, block)
 
-        # 服务器没给按模型的明细时（by_model 缺失或为空），明说一句，
-        # 别让用户以为"只有一个模型"。正常情况下走不到这里。
-        if rows and rows[0]["model"] == "全部模型":
-            self.chart_note.configure(text="（服务器暂未按模型拆分，先看总量）")
+        note = f"更新于 {self._usage_stamp}" if self._usage_stamp else ""
+        # 老服务端只给总量序列、没给按模型的序列 → 两张图会退化成各一根柱子，
+        # 明说一句，别让人以为时间轴坏了。
+        if note and not any(c["series_is_time"] for c in self._charts):
+            note += " · 服务器暂未按模型拆分时间"
+        self.chart_note.configure(text=note)
+
+    def _pick_models(self, block):
+        """挑出 flash / pro 两个模型名。
+
+        优先用本次数据里真实出现的模型名；某个模型这个期间没用量时，
+        用身份文件里的 fast_model / model 补上，保证两张图始终都在。"""
+        ident = load_identity() or {}
+        series_map = block.get("series_by_model") or {}
+        names = list(dict.fromkeys(
+            list(series_map.keys())
+            + [r["model"] for r in self._rows]
+            + [ident.get("fast_model"), ident.get("model")]
+        ))
+        names = [n for n in names if n]
+
+        def pick(word, fallback):
+            for n in names:
+                if word in n.lower():
+                    return n
+            return fallback
+
+        flash = pick("flash", ident.get("fast_model") or "deepseek-flash")
+        pro = pick("pro", ident.get("model") or "deepseek-v4-pro")
+        if pro == flash:                       # 只有一个模型名时别让两张图重名
+            pro = next((n for n in names if n != flash), pro + "（pro）")
+        return flash, pro
+
+    def _fill_chart(self, chart, model, block):
+        """把一个模型在当前期间的数据塞进它的图表卡"""
+        raw = (block.get("series_by_model") or {}).get(model)
+        series = _norm_series({"series": raw}) if raw else []
+
+        # 老服务端没给按模型的时间序列 → 退回该模型的一根总量柱子，不白屏
+        if not series:
+            bm = (block.get("by_model") or {}).get(model) or {}
+            if bm:
+                series = [{
+                    "label": model,
+                    "tokens": int(_to_float(bm.get("tokens")) or 0),
+                    "yuan": _to_float(bm.get("yuan")),
+                }]
+
+        chart["model"] = model
+        chart["series"] = series
+        chart["series_is_time"] = bool(raw and series)
+        chart["title"].configure(text=model)
+
+        if series:
+            tokens = sum(r["tokens"] for r in series)
+            yuan = sum(r["yuan"] for r in series if r.get("yuan") is not None)
+            chart["total"].configure(text=f"{_fmt_tokens(tokens)} token · {_fmt_yuan(yuan)}")
         else:
-            self.chart_note.configure(text="")
-
-        self._render_table()
-        self._draw_chart()
+            chart["total"].configure(text="暂无数据")
+        self._draw_chart(chart)
 
     def _paint_range_buttons(self):
         for key, btn in self._range_buttons.items():
@@ -335,78 +398,37 @@ class UsageMixin:
                 text_color="#ffffff" if active else DIM,
             )
 
-    # ---------- 明细表 ----------
-
-    def _render_table(self):
-        """明细表：不靠悬停也能看到每个模型的数字"""
-        for child in self.table_rows.winfo_children():
-            child.destroy()
-
-        for col, title in enumerate(("模型", "Token", "花费")):
-            ctk.CTkLabel(
-                self.table_rows, text=title, anchor="w" if col == 0 else "e",
-                font=font(S_SMALL), text_color=DIM,
-            ).grid(row=0, column=col, sticky="ew" if col == 0 else "e", padx=(0, 12))
-
-        # 发丝分隔线：一条 1px 的实心细线，比画框线轻
-        ctk.CTkFrame(self.table_rows, height=1, fg_color=GRID).grid(
-            row=1, column=0, columnspan=3, sticky="ew", pady=(8, 8)
-        )
-
-        if not self._rows:
-            ctk.CTkLabel(
-                self.table_rows, text="暂时没有数据", anchor="w",
-                font=font(S_SMALL), text_color=DIM,
-            ).grid(row=2, column=0, columnspan=3, sticky="ew")
-            return
-
-        for i, row in enumerate(self._rows):
-            r = i + 2
-            ctk.CTkLabel(
-                self.table_rows, text=row["model"], anchor="w",
-                font=font(S_BODY), text_color=TEXT,
-            ).grid(row=r, column=0, sticky="ew", pady=3)
-            ctk.CTkLabel(
-                self.table_rows, text=f"{row['tokens']:,}", anchor="e", width=124,
-                font=font(S_BODY, mono=True), text_color=DIM,
-            ).grid(row=r, column=1, sticky="e", pady=3, padx=(0, 12))
-            ctk.CTkLabel(
-                self.table_rows,
-                text=_fmt_yuan(row["yuan"]) if row.get("yuan") is not None else "—",
-                anchor="e", width=96,
-                font=font(S_BODY, mono=True), text_color=DIM,
-            ).grid(row=r, column=2, sticky="e", pady=3)
-
     # ---------- 图表 ----------
 
-    def _draw_chart(self):
-        """重画整个图表（数据变了、窗口大小变了都走这里）
+    def _draw_chart(self, chart):
+        """重画一张图表（数据变了、窗口大小变了都走这里）
 
         ★ 画布上的长度一律按"逻辑像素"写，画之前统一乘 k = canvas_scale()。
           画布是 tk.Canvas，CTk 不会替它缩放；屏幕 150% 时控件都放大了 1.5 倍，
           不乘这一下，图上的字和线会明显比旁边小一圈。字号那部分由 fonts.spec()
           自己乘（负数=像素），这里只管留白、粗细、间距这些长度。"""
-        c = self.chart
+        c = chart["canvas"]
         try:
             c.delete("all")
         except Exception:
             return
-        self._bars = []
-        self._hover = -1
+        chart["bars"] = []
+        chart["hover"] = -1
 
         w, h = c.winfo_width(), c.winfo_height()
         if w <= 1 or h <= 1:
             return                        # 还没排版好，Configure 会再叫一次
 
         k = canvas_scale()
-        if not self._rows:
+        series = chart["series"]
+        if not series:
             c.create_text(
                 w / 2, h / 2, text="暂时没有用量数据", fill=DIM,
                 font=spec(S_CANVAS),
             )
             return
 
-        # 四边留白：左边给 Y 轴刻度，下面留一行放模型名
+        # 四边留白：左边给 Y 轴刻度，下面留一行放时间刻度 / 模型名
         pad_l, pad_r = int(66 * k), int(20 * k)
         pad_t, pad_b = int(30 * k), int(48 * k)
         label_lift = int(_LABEL_LIFT * k)
@@ -414,7 +436,7 @@ class UsageMixin:
         plot_h = max(20, h - pad_t - pad_b)
         base = pad_t + plot_h
 
-        vmax = max(r["tokens"] for r in self._rows)
+        vmax = max(r["tokens"] for r in series)
         step, top = _nice_ticks(vmax, 4)
 
         # --- 网格线 + Y 轴刻度（圆整数，等宽字体对齐）---
@@ -432,38 +454,56 @@ class UsageMixin:
         # --- 柱子：最多 24px 粗，而且不铺满整个宽度 ---
         # 只有两三根柱子时，如果按"平均分配"画，它们会被拉得很开很难看。
         # 所以每个槽最多 120px，整组居中；剩下的宽度留给留白。
-        band = min(plot_w / len(self._rows), 120.0 * k)
-        group_w = band * len(self._rows)
+        band = min(plot_w / len(series), 120.0 * k)
+        group_w = band * len(series)
         x0 = pad_l + (plot_w - group_w) / 2
         bw = max(6 * k, min(24 * k, band * 0.46))
-        for idx, row in enumerate(self._rows):
+        n_series = len(series)
+        for idx, row in enumerate(series):
             cx = x0 + band * (idx + 0.5)
             x1, x2 = cx - bw / 2, cx + bw / 2
             y1 = base - plot_h * (row["tokens"] / top if top else 0)
 
-            self._draw_bar(x1, y1, x2, base, f"bar{idx}", int(_ROUND * k), k)
-            c.create_text(
-                cx, max(y1 - label_lift, 12 * k), text=_fmt_tokens_short(row["tokens"]),
-                fill=TEXT, font=spec(S_CANVAS, mono=True), tags=f"cap{idx}",
-            )
-            # 模型名按"槽有多宽"截断，不是按字符数 —— 中英混排长度差太多
-            c.create_text(
-                cx, base + 12 * k,
-                text=_fit_text(row["model"], band - 12 * k, csize(S_AXIS)), anchor="n",
-                fill=DIM, font=spec(S_AXIS),
-            )
-            self._bars.append({
+            # 时间轴：桶多（24 小时 / 31 天）时只画一部分刻度，别挤成一团；
+            # 退回按模型时仍然每根都标（模型数量已经折到 ≤8）。
+            # ★ 从**最后一根**往回数，保证当前小时 / 今天一定有标签。
+            draw_label = True
+            label_step = 1
+            label_slot = band - 12 * k
+            if chart["series_is_time"]:
+                label_step = max(1, (n_series + 7) // 8)     # 最多约 8 个刻度
+                draw_label = ((n_series - 1 - idx) % label_step == 0)
+                # 标签是隔几个槽才画一个的，可以借用中间空着的槽宽，
+                # "10-01" 这种 5 个字符就不会被截成 "10…"。
+                label_slot = band * label_step - 12 * k
+
+            self._draw_bar(c, x1, y1, x2, base, f"bar{idx}", int(_ROUND * k), k)
+            # 桶多的时候柱顶数值也只标在刻度那几根上，否则 24/31 个数字会叠在一起；
+            # 其余桶的准确值靠悬停提示，卡片右上角也有期间总量。
+            if (not chart["series_is_time"]) or n_series <= 12 or draw_label:
+                c.create_text(
+                    cx, max(y1 - label_lift, 12 * k), text=_fmt_tokens_short(row["tokens"]),
+                    fill=TEXT, font=spec(S_CANVAS, mono=True), tags=f"cap{idx}",
+                )
+            if draw_label:
+                # 标签按"槽有多宽"截断，不是按字符数 —— 中英混排长度差太多
+                c.create_text(
+                    cx, base + 12 * k,
+                    text=_fit_text(row["label"], label_slot, csize(S_AXIS)), anchor="n",
+                    fill=DIM, font=spec(S_AXIS),
+                )
+            chart["bars"].append({
                 "i": idx, "cx": cx, "y1": y1, "row": row,
                 # 命中区按整个"槽"算，不是按 24px 的柱子算 —— 鼠标不用瞄得很准
                 "hit1": x0 + band * idx, "hit2": x0 + band * (idx + 1),
             })
 
-    def _draw_bar(self, x1, y1, x2, y2, tag, radius, k=1.0):
+    def _draw_bar(self, canvas, x1, y1, x2, y2, tag, radius, k=1.0):
         """一根柱子：柱顶 4px 圆角，贴着基线那头是直角。
 
         ★ 柱子太矮（不到 10px）时直接画平头方块 —— 否则那点高度全被圆角吃掉，
         看起来像颗药丸，反而把 900 token 这种小数值画夸张了。"""
-        c = self.chart
+        c = canvas
         h = y2 - y1
         if h < 10 * k:
             c.create_rectangle(x1, min(y1, y2 - 2 * k), x2, y2,
@@ -479,35 +519,35 @@ class UsageMixin:
 
     # ---------- 悬停提示 ----------
 
-    def _on_chart_motion(self, event):
+    def _on_chart_motion(self, chart, event):
         hit = -1
-        for b in self._bars:
+        for b in chart["bars"]:
             if b["hit1"] <= event.x <= b["hit2"]:
                 hit = b["i"]
                 break
-        self._set_hover(hit)
+        self._set_hover(chart, hit)
 
-    def _set_hover(self, idx):
+    def _set_hover(self, chart, idx):
         """悬停：那根柱子提亮一档 + 出提示框（值在前，名字在后）"""
-        if idx == self._hover:
+        if idx == chart["hover"]:
             return
-        self._hover = idx
+        chart["hover"] = idx
         try:
-            for b in self._bars:
-                self.chart.itemconfig(
+            for b in chart["bars"]:
+                chart["canvas"].itemconfig(
                     f"bar{b['i']}", fill=SERIES_HOVER if b["i"] == idx else SERIES
                 )
-            self.chart.delete("tip")
+            chart["canvas"].delete("tip")
         except Exception:
             return
-        if 0 <= idx < len(self._bars):
-            self._draw_tip(self._bars[idx])
+        if 0 <= idx < len(chart["bars"]):
+            self._draw_tip(chart, chart["bars"][idx])
 
-    def _draw_tip(self, bar):
+    def _draw_tip(self, chart, bar):
         row = bar["row"]
         value = f"{row['tokens']:,} token"
         money = _fmt_yuan(row["yuan"]) if row.get("yuan") is not None else None
-        label = row["model"] + (f" · {money}" if money else "")
+        label = row["label"] + (f" · {money}" if money else "")
 
         # 框的尺寸全部从字号和缩放推出来 —— 换字号、换屏幕 DPI，提示框自己跟着长，
         # 不会把文字切掉（_text_width / csize 是同一套像素口径）
@@ -518,7 +558,7 @@ class UsageMixin:
         box_h = row2 + pad + int(6 * k)
         box_w = max(_text_width(value, csize(S_CANVAS)),
                     _text_width(label, csize(S_AXIS))) + pad * 2 + int(20 * k)
-        w, h = self.chart.winfo_width(), self.chart.winfo_height()
+        w, h = chart["canvas"].winfo_width(), chart["canvas"].winfo_height()
         edge = int(6 * k)
 
         x = min(max(bar["cx"] - box_w / 2, edge), max(edge, w - box_w - edge))
@@ -527,7 +567,7 @@ class UsageMixin:
             y = bar["y1"] + int(_CAP_GAP * k) - int(6 * k)
         y = min(y, max(edge, h - box_h - edge))
 
-        c = self.chart
+        c = chart["canvas"]
         c.create_rectangle(x, y, x + box_w, y + box_h, fill=TIP_BG, outline=AXIS, tags="tip")
         # 系列色小线段做 key（提示框里不用整块色块，太重）
         c.create_line(x + pad, y + row1, x + pad + int(10 * k), y + row1,

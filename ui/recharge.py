@@ -106,11 +106,59 @@ class RechargeMixin:
         dlg.minsize(460, 560)
         dlg.configure(fg_color=BG)
         dlg.transient(self.root)                 # 跟随主窗
+        if getattr(self, "_recharge_only", False):
+            self._place_dialog_beside_main(dlg)
         dlg.after(150, lambda: self._safe_grab(dlg))   # 直接 grab_set 有时会失效
 
         # 页面容器：切页就是清掉这里面的东西重画
         self._dlg_body = ctk.CTkFrame(dlg, fg_color="transparent")
         self._dlg_body.pack(fill=tk.BOTH, expand=True)
+
+    def _place_dialog_beside_main(self, dlg):
+        """把充值窗放在主窗右边，别一上来就把用量页的图表整个盖住。
+
+        屏幕右边放不下（小屏 / 主窗靠右）就压在主窗右侧 —— 左边的余额卡
+        和图表左半仍然看得见。定位失败就让系统自己摆，不影响充值。
+
+        ★ CTkToplevel.geometry 只把宽高乘 DPI 缩放，x/y 原样交给系统。
+          所以尺寸用逻辑像素算，位置 / 屏幕边界用实际像素算，两套单位别混
+          —— 混了在 150% 缩放的屏幕上弹窗会跑到屏幕外。
+        """
+        try:
+            self.root.update_idletasks()
+            try:
+                scale = ctk.ScalingTracker.get_window_scaling(self.root) or 1.0
+            except Exception:
+                scale = 1.0
+
+            rx, ry = self.root.winfo_x(), self.root.winfo_y()
+            rw = self.root.winfo_width()
+            if rw <= 1:                                 # 还没排版好就按请求宽度算
+                rw = self.root.winfo_reqwidth()
+            sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+
+            dw_log, dh_log = 460, 620
+            gap = int(8 * scale)
+            bottom = int(48 * scale)                    # 任务栏
+
+            # 屏幕矮（高 DPI 笔记本常见）时先把弹窗压低到放得下，
+            # 别让最下面的付款按钮掉出屏幕；560 是弹窗自己的 minsize。
+            avail = sh - bottom - int(32 * scale)       # 再给标题栏留一点
+            if dh_log * scale > avail:
+                dh_log = max(560, int(avail / scale))
+
+            dw = int(dw_log * scale)
+            x = rx + rw + gap
+            if x + dw > sw - gap:
+                x = rx + rw - dw
+            # 主窗自己都可能有一部分在屏幕外（高 DPI 下窗口比屏幕还大），
+            # 最后再夹一次，保证弹窗至少完整落在屏幕内。
+            x = max(gap, min(x, sw - gap - dw))
+            y = min(max(gap, ry), max(gap, sh - int(dh_log * scale) - bottom))
+
+            dlg.geometry(f"{dw_log}x{dh_log}+{x}+{y}")
+        except Exception:
+            pass
 
     def _clear_dialog_body(self):
         """清空当前页的所有控件（切页用）"""

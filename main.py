@@ -14,7 +14,7 @@ import threading
 
 import customtkinter as ctk
 
-from agent_core import agent_worker, balance_worker
+from agent_core import agent_worker, balance_worker, refresh_balance
 from bus import poll_queue
 from server.tools_fixed import parse_protocol_arg, register_protocol
 from server.ui_bridge import set_ui
@@ -42,18 +42,33 @@ def main():
 
     # ---------- 只办充值的启动方式 ----------
     # 用户在终端里点服务器给的 aikaui://recharge 链接 → 这里被唤起。
-    # 这种时候只弹充值窗：不建托盘、不起 Agent 线程，关掉弹窗就退出。
+    # 不建托盘、不起 Agent 线程，关掉窗口就退出。
+    #
+    # 展示顺序是刻意的：**先用量页、再充值窗**。
+    # 余额不足的人第一反应是"钱花在哪了"，所以主窗口直接切到用量页，
+    # 后台拉一次余额 + 用量；数据一回来（最多等 3 秒）再自动弹充值窗。
+    # 充值窗会停在主窗右边，不把刚看到的图表整个盖住。
     # ★ 别在这里起 tray / agent_worker —— 用户装完就想让助手消失，
     #   不能再留一个常驻进程。
     if auto_recharge:
         gui._recharge_only = True
         gui._quit_on_close = True
-        root.withdraw()                  # 主窗口不显示，只给充值弹窗
         root.protocol("WM_DELETE_WINDOW", gui.quit_app)
-        root.after(300, lambda: gui.show_recharge_dialog(
-            title="充值", body="请选择充值金额，付款后余额会自动到账。", force=True,
-        ))
-        root.after(100, lambda: poll_queue(gui))   # 充值结果也要靠队列回到主线程
+        gui.show_view("usage")
+        threading.Thread(target=refresh_balance, daemon=True).start()
+
+        def _open_recharge_when_ready(attempt=0):
+            """等第一次余额/用量回来再弹充值窗；网络差也不卡住流程。"""
+            ready = bool(gui._usage_payload.get("balance"))
+            if ready or attempt >= 30:      # 3 秒兜底
+                gui.show_recharge_dialog(
+                    title="充值", body="请选择充值金额，付款后余额会自动到账。", force=True,
+                )
+            else:
+                root.after(100, lambda: _open_recharge_when_ready(attempt + 1))
+
+        root.after(300, _open_recharge_when_ready)   # 先让窗口画出来
+        root.after(100, lambda: poll_queue(gui))     # 充值结果也要靠队列回到主线程
         root.mainloop()
         return
 

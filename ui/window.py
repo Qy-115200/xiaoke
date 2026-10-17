@@ -293,11 +293,29 @@ class WindowMixin:
 
     # ---------- 日志 ----------
 
+    def scroll_log_to_end(self):
+        """把对话区滚到最底。
+
+        ★ 不能 insert 完立刻 see(END) 就算完：紧接着的布局变化会把滚好的位置
+          顶掉——典型的就是 ask_user：先写问题、再冒出选项面板，面板把日志框
+          压矮，问题就掉到可视区下面去了。所以放到 after_idle 里再滚一次，
+          并补一个稍晚的兜底（窗口刚从托盘恢复时，控件还没真正映射）。"""
+        def _see():
+            try:
+                self.log.see(tk.END)
+            except Exception:
+                pass
+        try:
+            self.log.after_idle(_see)
+            self.log.after(80, _see)            # 布局稳定后再补一次
+        except Exception:
+            _see()
+
     def write(self, text):
         """往日志区追加一行文字（只能在主线程调）"""
         self.log.configure(state=tk.NORMAL)     # 解锁才能写
         self.log.insert(tk.END, text + "\n")
-        self.log.see(tk.END)                    # 滚到最底
+        self.scroll_log_to_end()                # 滚到最底（见上面的说明）
         self.log.configure(state=tk.DISABLED)   # 再锁上，防止用户手改
 
     # ---------- 用户操作 ----------
@@ -384,13 +402,17 @@ class WindowMixin:
         payload = payload or {}
         self._usage_payload = payload
 
-        # ★ 只办充值的启动方式（点终端里服务器给的 aikaui://recharge 链接进来）：
-        #   主窗是藏着的，别在这时候弹托盘告警 / 系统通知 / 底部询问条——
-        #   用户已经在充值窗里了，再弹一遍就是噪音。
-        if self._recharge_only:
-            return
-
         bal = payload.get("balance") or {}
+
+        # ★ 只办充值的启动方式（点终端里服务器给的 aikaui://recharge 链接进来）：
+        #   要把数据画到用量页——用户先看到"钱花在哪了"，充值窗随后才弹。
+        #   但别在这时候弹托盘告警 / 系统通知 / 底部询问条：
+        #   用户已经在充值流程里了，再弹一遍就是噪音。
+        if self._recharge_only:
+            if not bal.get("rate_limited"):
+                self._last_yuan = _to_float(bal.get("yuan"))
+            self.usage_view_update(payload)
+            return
 
         # ★ 余额那块被服务器限流（429）时，**什么都别动**：
         #   这不是"余额变成 0 了"，也不是"服务挂了"。要是照旧往下走，

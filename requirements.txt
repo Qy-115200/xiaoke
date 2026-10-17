@@ -1,0 +1,8 @@
+openai>=1.0.0
+python-dotenv
+pywin32
+requests
+customtkinter
+pystray
+Pillow
+win10toast
