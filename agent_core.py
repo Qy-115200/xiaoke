@@ -139,8 +139,9 @@ def run_one_task(messages, task_text):
             except Exception as e:
                 result = f"错误: {e}"             # 工具执行出错，把错误当结果返回
 
-            # 记录安装流程走到哪了（只用于收尾时判断要不要自动退出）
-            if name == "register_device":
+            # 记录安装流程走到哪了（只用于收尾时判断要不要自动退出）。
+            # register_device 成功时回的是 JSON（带 note/api_base），失败回"领取失败…"。
+            if name == "register_device" and str(result).startswith("{"):
                 installing = True
             elif name == "launch_claude" and str(result).startswith("已打开新终端"):
                 launched = True
