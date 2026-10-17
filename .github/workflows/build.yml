@@ -132,7 +132,23 @@ jobs:
       - name: Show artifacts
         run: ls -lR release
 
+      # 没配 secrets 时明确跳过，而不是让整个 release 变红；
+      # 这种情况可以手动跑 build_tools/deploy_downloads.sh。
+      - name: Check deploy secrets
+        id: cfg
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          set -euo pipefail
+          if [ -n "$DEPLOY_HOST" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::未配置 DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY，跳过自动发布（可手动跑 deploy_downloads.sh）"
+          fi
+
       - name: Configure SSH
+        if: steps.cfg.outputs.ok == 'true'
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
@@ -144,6 +160,7 @@ jobs:
           ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Publish
+        if: steps.cfg.outputs.ok == 'true'
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}

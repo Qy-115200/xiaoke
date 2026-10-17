@@ -60,8 +60,15 @@ echo "▶ 建目录 $TARGET"
 "${SSH[@]}" "mkdir -p '$TARGET'"
 
 echo "▶ 上传产物"
-rsync -av -e "$RSYNC_SSH" --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r \
-  "$SRC"/ClaudeCodeAssistant-* "$USER_NAME@$HOST:$TARGET/"
+if command -v rsync >/dev/null 2>&1; then
+  rsync -av -e "$RSYNC_SSH" --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r \
+    "$SRC"/ClaudeCodeAssistant-* "$USER_NAME@$HOST:$TARGET/"
+else
+  # Git Bash（Windows）通常没有 rsync；scp 效果一样，只是没有增量。
+  echo "（没有 rsync，改用 scp）"
+  scp -q "${KEY_OPTS[@]}" "$SRC"/ClaudeCodeAssistant-* "$USER_NAME@$HOST:$TARGET/"
+  "${SSH[@]}" "chmod 644 '$TARGET'/*"
+fi
 
 echo "▶ 原子替换清单"
 scp -q "${KEY_OPTS[@]}" "$SRC/latest.json" "$USER_NAME@$HOST:$REMOTE_BASE/latest.json.tmp"
