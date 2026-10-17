@@ -59,8 +59,9 @@ def run_one_task(messages, task_text):
                 model=model, messages=messages, tools=tools
             )
         except Exception as e:
-            # 账户没钱了：New API 回的是 403 insufficient_user_quota（老约定是 402），
-            # 两种都认。这时候不能只打一句"调用模型失败"——用户根本看不出是余额的事，
+            # 账户没钱了：上游 New API 回 403 insufficient_user_quota，代理层会先把它
+            # 归一成 **402 + 一句中文**（非额度类 403 原样透传）。两种形状都认。
+            # 这时候不能只打一句"调用模型失败"——用户根本看不出是余额的事，
             # 得把话说明白，并让主线程把底部那条"是否立即充值"冒出来。
             reason = insufficient_balance(e)
             if reason:

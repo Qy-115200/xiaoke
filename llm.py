@@ -42,14 +42,22 @@ def reset_client():
 
 
 # ================= 余额不足的判定 =================
-# 模型通道是 New API，用户额度用完时它回的是 **403 insufficient_user_quota**
-# （正文："预扣费额度失败, 用户剩余额度: …, 需要预扣费额度: …"），
-# 老写法里的 402 反而不常见。只认 402 的话，钱花光了界面上只会打一句
-# "调用模型失败"，用户既不知道是没钱了，也不会被提示充值——这就是那个一直没解决的
-# "余额不足不提示"的问题。
+# 线上实际链路（2026-10-17 由对端核实，源码 src/routes/chat.js）：
 #
-# ★ 但 403 不能一律当成没钱：封号、权限不足、模型没开放也都是 403。
+#   上游 New API 回 403 + code=insufficient_user_quota（正文"预扣费额度失败, …"）
+#     ↓
+#   api 代理看到 402/403 且正文匹配 /quota|额度|insufficient/ → **改写成 402**，
+#   body 只剩一句中文 message（"余额已用完。…账户码：…"），没有 error.code。
+#   非额度相关的 403（封号、鉴权、模型未开放）原样透传。
+#
+# 所以客户端实际拿到的是 **402 + 一句中文正文**，而不是 403 + 机器码。
+# 403/机器码那两条判定留着当保险：代理哪天改回透传 403 也还能认出来。
+#
+# ★ 但状态码不能一概而论：封号、权限不足、模型没开放也可能是 403。
 #   所以先认机器码（insufficient_user_quota 这类），再退回到正文里的特征串。
+#
+# ★ 代理的 402 正文里带**账户码明文**：这里只用来做判断，绝不把原文写进日志/
+#   文件/上报，对外只说"账户余额不足"。
 
 INSUFFICIENT_CODES = {
     "insufficient_user_quota",          # New API：用户额度不足 / 预扣费失败
@@ -58,6 +66,7 @@ INSUFFICIENT_CODES = {
     "quota_exceeded",
 }
 INSUFFICIENT_TEXTS = (
+    "余额已用完",          # ★ 代理把 403 改写成 402 时用的就是这句（实测口径）
     "预扣费额度失败",
     "用户额度不足",
     "额度不足",
@@ -101,8 +110,8 @@ def insufficient_balance(e):
 
     if code in INSUFFICIENT_CODES:
         return "账户余额不足"
-    if status == 402:                       # 老约定的"余额不足"
+    if status == 402:                       # ★ 线上实际走这条：代理把额度错误归一成 402
         return "账户余额不足"
     if status in (403, 429) and any(t in text for t in INSUFFICIENT_TEXTS):
-        return "账户余额不足"
+        return "账户余额不足"                # 代理改回透传 403 时的保险
     return None

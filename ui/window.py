@@ -249,8 +249,8 @@ class WindowMixin:
     def offer_recharge(self, yuan=None, reason="", force=False):
         """余额见底时**只问一句**，不自己弹充值窗。
 
-        reason 非空表示是服务器直接说"余额不足"（老约定是 402，New API 实际回
-        403 insufficient_user_quota），那种情况 force=True，
+        reason 非空表示是服务器直接说"余额不足"（代理层把上游额度错误归一成 402），
+        那种情况 force=True，
         不然"一个会话只问一次"的限制会让用户看不到任何提示。"""
         if self._prompt_shown and not force:
             return
