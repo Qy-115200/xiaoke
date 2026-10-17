@@ -15,6 +15,7 @@ query_balance / query_usage / query_pay_methods / create_recharge 的返回值�
 import json
 
 from config import AGENT_KEY, SERVER_URL
+from server.claude_config import sync_from_identity_file
 from server.identity import (
     _ensure_account_code,
     _ensure_user_id,
@@ -450,16 +451,22 @@ def login_with_account_code(account_code) -> str:
 
     if data:
         adopt_identity(data)                       # 合并进本地文件 + 丢掉旧 client
+        # ★ 换账号必须同时改 Claude Code 自己的配置（~/.claude.json 和
+        #   ~/.claude/settings.json）。只改 identity.json 的话，界面显示的是新账号，
+        #   终端里的 Claude Code 还在烧旧账号的 token——用户看到"余额没变"。
+        synced, sync_note = sync_from_identity_file()
         return json.dumps({
             "ok": True,
             "account_code": data.get("account_code"),
             "user_id": data.get("user_id"),
             "balance": data.get("balance"),
             "note": "登录成功，这台电脑已经切到这个账号了。",
-            # ★ 必须说清楚：命令行里存的还是上一个账号的 token，不重装的话
-            #   Claude Code 烧的仍是旧账户。这一步要让用户自己决定，别替他改配置。
-            "next": ("要让命令行也用这个账号，得重新走一次「一键安装 Claude Code」"
-                     "（~/.claude.json 里存的还是上一个账号的 token）。"),
+            "commands_synced": synced,
+            "commands_note": sync_note,
+            "next": ("命令行配置也一起换好了，终端里重开一次 Claude Code 就用新账号。"
+                     if synced else
+                     f"命令行配置没改成功（{sync_note}），"
+                     "要让终端也用这个账号，再点一次「一键安装 Claude Code」。"),
         }, ensure_ascii=False)
 
     if code == RATE_LIMITED:

@@ -20,16 +20,11 @@ from pathlib import Path
 from urllib.parse import parse_qsl
 
 from config import CLAUDE_CONFIG, CLAUDE_SETTINGS, HOME, IDENTITY_FILE
+from server.claude_config import (
+    apply as apply_identity_config,
+    normalize_base as _normalize_base,
+)
 
-def _normalize_base(base: str) -> str:
-    """规范化 base URL：
-    Claude Code 会自己拼 /v1/messages，
-    如果 base 以 /v1 结尾，会拼成 /v1/v1/messages → 404。
-    所以这里统一去掉尾部 /v1。"""
-    base = base.rstrip("/")              # 先去掉所有尾部斜杠
-    if base.endswith("/v1"):             # 如果以 /v1 结尾
-        base = base[:-3]                 # 去掉最后 3 个字符（也就是 "/v1"）
-    return base
 # ================= Windows 自定义协议 aikaui:// =================
 # 支付页面付完款后，会打开 aikaui://recharge?user_id=7 这样的链接，
 # Windows 靠注册表里的这个协议，把这个链接转成"启动我们的 exe 并带上参数"。
@@ -101,8 +96,11 @@ def bypass_region_check() -> str:
 
 
 def set_model_config() -> str:
-    """把中转地址 / token / 模型配置写进 ~/.claude.json 和 ~/.claude/settings.json。
+    """把中转地址 / token / 模型配置写进 ~/.claude.json **和** ~/.claude/settings.json。
     从 identity.json 读取 token（register_device 存的）。
+
+    ★ 两个文件都要写：settings.json 的 env 优先级更高，只写 ~/.claude.json
+      会出现"界面上换了账号、终端还在烧旧账号"（见 server/claude_config.py）。
 
     ★ 模型档位怎么分的（别改错，改错了用户会莫名其妙被计费到贵模型上）：
       · 默认层 = fast_model（便宜快）。Claude Code 没被明确指定模型时走的是
@@ -125,44 +123,9 @@ def set_model_config() -> str:
 
     api_base = _normalize_base(api_base)           # 去掉 /v1 后缀（防路径重复）
 
-    # 读现有 Claude 配置（保留用户其他字段）
-    data = {}
-    if CLAUDE_CONFIG.exists():
-        try:
-            data = json.loads(CLAUDE_CONFIG.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-
-    # ★ 合并 env（不整体覆盖，保留用户可能设的其他 env 变量）
-    env = data.get("env") or {}
-    env["ANTHROPIC_BASE_URL"] = api_base            # 中转地址
-    env["ANTHROPIC_AUTH_TOKEN"] = api_key           # ★ 注意：是 AUTH_TOKEN，不是 API_KEY
-
-    # --- 默认层：全部指向快模型 ---
-    env["ANTHROPIC_MODEL"] = fast_model              # 新会话的主模型
-    env["ANTHROPIC_SMALL_FAST_MODEL"] = fast_model   # 后台小任务
-    env["ANTHROPIC_DEFAULT_MODEL"] = fast_model      # 新会话的起始默认（比 settings 低一级）
-    # ★ Claude Code 的默认档就是 sonnet 档。这一行原来映射的是强模型，
-    #   导致用户没主动选模型时也会打到 pro 上——这就是"偷偷调用 pro"的来源。
-    env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = fast_model
-    env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = fast_model
-
-    # --- 显式层：只有用户自己 /model 选 opus 时才落到强模型 ---
-    env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
-
-    data["env"] = env                              # 写回 env 字段
-    data["hasCompletedOnboarding"] = True          # 顺便再保证一次绕过地区
-
-    CLAUDE_CONFIG.write_text(                       # 写文件
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
-
-    # ★ 双保险：再钉一次 settings.json 的 "model" 字段。
-    #   ~/.claude/settings.json 里的 model 是"持久化的默认模型"，优先级低于
-    #   用户在 /model 里的显式选择 —— 所以钉住它 = 默认走 flash，
-    #   但用户显式选 opus 依然能切到 pro，正好是我们想要的语义。
-    settings_note = _pin_settings_model(fast_model)
+    ok, settings_note = apply_identity_config(identity)
+    if not ok:
+        return f"错误：{settings_note}"
 
     # 返回"人话版"配置总结给 Agent（token 只显示前 12 位，避免泄露）
     return (
@@ -173,37 +136,6 @@ def set_model_config() -> str:
         f"  显式 opus 时  = {model}\n"
         f"  {settings_note}"
     )
-
-
-def _pin_settings_model(fast_model: str) -> str:
-    """把 ~/.claude/settings.json 的 "model" 钉成 fast_model（保留其它字段）。
-
-    ★ 用完整模型名而不是别名：别名还要再走一遍 ANTHROPIC_DEFAULT_* 映射，
-    直接写完整名可以完全绕开别名解析。
-
-    写不进去不算致命错误（env 那一层已经生效了），所以这里吞掉异常只回一句说明。
-    """
-    try:
-        s = {}
-        if CLAUDE_SETTINGS.exists():
-            try:
-                s = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))
-            except Exception:
-                s = {}                       # 文件损坏就当空的重建
-        if not isinstance(s, dict):
-            s = {}
-
-        if s.get("model") == fast_model:
-            return f"默认模型已钉住（{CLAUDE_SETTINGS}，无需改动）"
-
-        s["model"] = fast_model              # ★ 只动这一个键，modelSettings 等原样保留
-        CLAUDE_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-        CLAUDE_SETTINGS.write_text(
-            json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        return f"已把默认模型钉进 settings.json（{CLAUDE_SETTINGS}）"
-    except Exception as e:
-        return f"（settings.json 写入失败，env 已生效：{e}）"
 
 
 def create_shortcut() -> str:

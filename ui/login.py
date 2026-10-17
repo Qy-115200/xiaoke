@@ -15,9 +15,11 @@
      把它说成"账户码不对"，用户就会开始改码、反复重试，越试越登不上。
      所以这里限流要显示成"等 N 秒"，并且按钮也真的锁 N 秒。
 
-登录成功后还要说清楚：命令行（~/.claude.json）里存的仍是**上一个账号**的
-token，要让 Claude Code 也用新账号得重走一次「一键安装」。这一步交给用户决定，
-这里只如实提示，不替他改配置。
+登录成功后，后台会**同时**把新账号的 token 写进 Claude Code 的两个配置文件
+（~/.claude.json 和 ~/.claude/settings.json），不用再走一次「一键安装」。
+只改 identity.json 不够——settings.json 的 env 优先级更高，漏了它终端里
+Claude Code 会继续烧上一个账号（2026-10-17 修的就是这个 bug）。
+写入失败时如实说，并让用户重走一键安装。
 """
 
 import threading
@@ -169,11 +171,19 @@ class LoginMixin:
                 pass
 
         if res.get("ok"):
+            synced = bool(res.get("commands_synced"))
             self._set_login_status(
-                "登录成功，这台电脑已经切到这个账号了。", GREEN)
+                "登录成功，这台电脑已经切到这个账号了。" if synced else
+                "登录成功，但命令行配置没改成功，终端里可能还是旧账号。",
+                GREEN if synced else ORANGE)
             self.write("[系统] 已登录：%s" % (res.get("account_code") or ""))
-            self.write("[系统] 注意：命令行里存的还是上一个账号的 token。"
-                       "要让 Claude Code 也用这个账号，重新点一次「一键安装 Claude Code」。")
+            if synced:
+                self.write("[系统] 命令行配置已同步（~/.claude.json 和 "
+                           "~/.claude/settings.json），重开一次 Claude Code 就用新账号。")
+            else:
+                self.write("[系统] 命令行配置没改成功：%s" % (res.get("commands_note") or ""))
+                self.write("[系统] 要让 Claude Code 也用这个账号，"
+                           "重新点一次「一键安装 Claude Code」。")
             # 账号变了 → 余额/用量要按新账号重查（后台线程，别卡界面）
             threading.Thread(target=refresh_balance, daemon=True).start()
             return
