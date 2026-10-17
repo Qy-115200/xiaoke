@@ -3,10 +3,9 @@
 
 为什么要单独一个模块：
 
-1. **默认字体看着"廉价"**。CustomTkinter 默认走系统兜底字体，中英混排时标点忽宽忽窄；
-   而 `微软雅黑`（Microsoft YaHei）是给正文排版设计的，小字号下偏松、偏糊。
-   这里优先用 **Microsoft YaHei UI** —— 同一套字形的界面版，字距更紧、更端正，
-   是 Windows 自己画设置面板用的那一款。
+1. **默认字体看着"廉价"**。CustomTkinter 默认走系统兜底字体，中英混排时标点忽宽忽窄。
+   候选表按平台分开：Windows 优先 **Microsoft YaHei UI**（设置面板用的界面版，
+   字距更紧）、macOS 优先 **PingFang SC**、Linux 优先 **Noto Sans CJK SC**。
 
 2. **发到别人机器上不能变形**。字体是运行时问 Tk 要的（`tkfont.families()`），
    候选表按优先级排，命中第一个就用。老 Win10 没有 YaHei UI 就退到普通雅黑，
@@ -29,23 +28,56 @@ import tkinter.font as tkfont
 
 import customtkinter as ctk
 
-# ---------- 字体候选（按优先级）----------
+import platform_support
 
-_UI_CANDIDATES = (
-    "Microsoft YaHei UI",     # 微软雅黑界面版：首选
-    "微软雅黑",
-    "Microsoft YaHei",
-    "Segoe UI",               # 实在是没中文雅黑时的兜底
-    "Noto Sans SC",
-)
+# ---------- 字体候选（按优先级，按平台分开）----------
+# 候选表里排的是"这台机器上最有可能装了的名字"，_resolve 会挑第一个真有的。
 
-_MONO_CANDIDATES = (
-    "Cascadia Mono",          # Win11 自带，无连字，最适合读数字
-    "Cascadia Code",
-    "Consolas",               # Win7 起都有，稳
-    "JetBrains Mono",
-    "Courier New",
-)
+if platform_support.is_windows():
+    _UI_CANDIDATES = (
+        "Microsoft YaHei UI",     # 微软雅黑界面版：首选
+        "微软雅黑",
+        "Microsoft YaHei",
+        "Segoe UI",               # 实在是没中文雅黑时的兜底
+        "Noto Sans SC",
+    )
+    _MONO_CANDIDATES = (
+        "Cascadia Mono",          # Win11 自带，无连字，最适合读数字
+        "Cascadia Code",
+        "Consolas",               # Win7 起都有，稳
+        "JetBrains Mono",
+        "Courier New",
+    )
+elif platform_support.is_macos():
+    _UI_CANDIDATES = (
+        "PingFang SC",            # 苹方：macOS 中文正文默认字体
+        "Hiragino Sans GB",       # 老系统里的冬青黑体
+        "Heiti SC",
+        "Helvetica Neue",
+        "Noto Sans SC",
+    )
+    _MONO_CANDIDATES = (
+        "SF Mono",                # 系统等宽
+        "Menlo",                  # 一直都在
+        "Monaco",
+        "JetBrains Mono",
+        "Courier New",
+    )
+else:
+    _UI_CANDIDATES = (
+        "Noto Sans CJK SC",       # 多数发行版的中文默认字体
+        "Noto Sans SC",
+        "Source Han Sans SC",
+        "WenQuanYi Micro Hei",    # 文泉驿：老发行版兜底
+        "DejaVu Sans",
+    )
+    _MONO_CANDIDATES = (
+        "JetBrains Mono",
+        "DejaVu Sans Mono",       # 几乎所有 Linux 都有
+        "Noto Sans Mono",
+        "Liberation Mono",
+        "Courier New",
+    )
 
 # ---------- 字号表 ----------
 

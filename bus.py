@@ -19,7 +19,7 @@ import tkinter as tk
 # ================= 通信队列 =================
 # 多线程环境下的"信箱"：一个线程往里面放东西，另一个线程取
 
-msg_queue = queue.Queue()           # Agent / 托盘 / 刷新线程 → GUI 主线程
+msg_queue = queue.Queue()           # Agent / 余额刷新线程 → GUI 主线程
 user_input_queue = queue.Queue()    # GUI 主线程 → Agent 线程：传用户输入
 input_event = threading.Event()     # 用于 ask_user：GUI 唤醒 Agent 的"闹钟"
 input_holder = {"value": None}      # 存 ask_user 的回答

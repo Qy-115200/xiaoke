@@ -1,8 +1,13 @@
 openai>=1.0.0
 python-dotenv
-pywin32
 requests
 customtkinter
-pystray
 Pillow
-win10toast
+
+# ---- Windows 专属 ----
+pywin32; sys_platform == "win32"
+win10toast; sys_platform == "win32"
+
+# ---- macOS 专属：接收 aikaui:// 的 Apple Event（kAEGetURL）----
+pyobjc-core; sys_platform == "darwin"
+pyobjc-framework-Cocoa; sys_platform == "darwin"

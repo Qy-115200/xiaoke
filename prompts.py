@@ -1,6 +1,56 @@
 # ================= 内置配置 =================
 # 服务器地址从这里转发出去，保持和 config.py 单一来源一致（有些老代码还从 prompts 里取）
+import platform as _platform
+
 from config import SERVER_URL
+
+_OS = _platform.system()          # Windows / Darwin / Linux
+_IS_WIN = _OS == "Windows"
+_IS_MAC = _OS == "Darwin"
+
+# 提示词里跟平台有关的几段，按当前系统挑一份（三平台 GUI 用同一套逻辑，
+# 但"怎么装 Node、桌面在哪、命令没装时输出长什么样"这些必须分开说）
+if _IS_WIN:
+    _PLATFORM_GUIDE = """- 当前平台：Windows
+- 桌面目录：%USERPROFILE%\\Desktop（真实路径可能被 OneDrive 重定向，需要时用 bash 取出来）
+- 路径用完整路径，例如 C:\\Users\\名字\\Desktop\\claude-projects"""
+    _NODE_INSTALL = (
+        "`winget install OpenJS.NodeJS.LTS --accept-package-agreements "
+        "--accept-source-agreements`（没有 winget 就引导用户去 https://nodejs.org 下载 LTS 安装包）"
+    )
+    _CMD_NOT_FOUND = '"不是内部或外部命令" / "not recognized" / "not found"'
+    _NODE_FULLPATH = '`bash("C:\\\\Program Files\\\\nodejs\\\\node.exe -v")`'
+    _DESKTOP_DIR = "%USERPROFILE%\\\\Desktop\\\\claude-projects"
+    _DESKTOP_MKDIR = 'bash(\'mkdir "%USERPROFILE%\\\\Desktop\\\\claude-projects"\')'
+    _HOME_VAR = "%USERPROFILE%"
+elif _IS_MAC:
+    _PLATFORM_GUIDE = """- 当前平台：macOS
+- 桌面目录：$HOME/Desktop
+- 路径用正斜杠，~ 会展开成用户主目录"""
+    _NODE_INSTALL = (
+        "先 `brew -v` 看有没有 Homebrew。有就 `brew install node`；"
+        "没有就请用户去 https://brew.sh 复制那一行安装命令，或者从 https://nodejs.org "
+        "下载 .pkg 安装包（两条路都行，让用户选）"
+    )
+    _CMD_NOT_FOUND = '"command not found"'
+    _NODE_FULLPATH = '`bash("/opt/homebrew/bin/node -v")`（Intel 机器是 `/usr/local/bin/node`）'
+    _DESKTOP_DIR = "$HOME/Desktop/claude-projects"
+    _DESKTOP_MKDIR = 'bash(\'mkdir -p "$HOME/Desktop/claude-projects"\')'
+    _HOME_VAR = "$HOME"
+else:
+    _PLATFORM_GUIDE = """- 当前平台：Linux
+- 桌面目录：$HOME/Desktop（有的发行版是 $HOME/桌面，以 `xdg-user-dir DESKTOP` 为准）
+- 路径用正斜杠，~ 会展开成用户主目录"""
+    _NODE_INSTALL = (
+        "先看用哪个包管理器：有 apt-get → `sudo apt-get install -y nodejs npm`；"
+        "有 dnf → `sudo dnf install -y nodejs npm`；有 pacman → "
+        "`sudo pacman -S --noconfirm nodejs npm`（都没有就请用户看 https://nodejs.org 的说明）"
+    )
+    _CMD_NOT_FOUND = '"command not found"'
+    _NODE_FULLPATH = '`bash("/usr/bin/node -v")`（或者 `command -v node` 查真实路径）'
+    _DESKTOP_DIR = "$HOME/Desktop/claude-projects"
+    _DESKTOP_MKDIR = 'bash(\'mkdir -p "$HOME/Desktop/claude-projects"\')'
+    _HOME_VAR = "$HOME"
 
 
 SYSTEM_PROMPT = f"""你是用户的「AI 管家」，运行在他的电脑上。
@@ -12,6 +62,9 @@ SYSTEM_PROMPT = f"""你是用户的「AI 管家」，运行在他的电脑上。
 - 处理电脑上的小任务
 
 **安装 Claude Code 只是你的一项能力，不是唯一任务。**
+
+**当前这台机器的环境（照着它来，不要用别的系统的命令或路径）：**
+{_PLATFORM_GUIDE}
 
 ═══════════════════════════════════════
 ⚠️ 最重要的规则：先判断用户意图，再决定做什么
@@ -84,7 +137,7 @@ register_device → bypass_region_check → set_model_config → create_shortcut
 **耗时超过 10 秒的操作，传 show_progress=True**，用户会看到进度条。
 
 **设 true**：
-- 装 Node：`bash("winget install OpenJS.NodeJS.LTS ...", timeout=900, show_progress=True)`
+- 装 Node：见「步骤 2」里当前平台那条命令，`timeout=900, show_progress=True`
 - 装 Claude Code：`bash("npm install -g @anthropic-ai/claude-code", timeout=600, show_progress=True)`
 
 **不设**（秒级返回）：
@@ -121,14 +174,12 @@ register_device → bypass_region_check → set_model_config → create_shortcut
   bash("node -v")
   bash("claude --version")
 
-判断：有 "不是内部或外部命令" / "not recognized" → 没装；有版本号 → 已装。
+判断：输出里有 {_CMD_NOT_FOUND} → 没装；有版本号 → 已装。
 
 ### 步骤 2：装 Node（如果需要）
 
 ask_user 问用户能不能装，同意后用 bash 装（带 show_progress）：
-- Windows：`winget install OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements`
-- macOS：`brew install node`
-- Linux：系统包管理器
+{_NODE_INSTALL}
 
 ### 步骤 3：装 Claude Code（如果需要）
 
@@ -163,9 +214,10 @@ ask_user 问用户能不能装，同意后用 bash 装（带 show_progress）：
 按回答定出目录，再用 launch_claude(directory=…) 在那个目录里启动：
 
 - 选 1 → 目录是桌面的 claude-projects。先建出来再启动：
-    bash('mkdir "%USERPROFILE%\\Desktop\\claude-projects"')   ← Windows
-    然后把 '%USERPROFILE%\\Desktop\\claude-projects' 这个完整路径传给 directory
-    （注意：要给**真实路径**，不要传带 % 的变量名，能先 bash('echo %USERPROFILE%') 取出来拼）
+    {_DESKTOP_MKDIR}
+    然后把 `{_DESKTOP_DIR}` 这个**真实路径**传给 directory
+    （注意：不要传带变量的写法。变量要先展开——
+    先 `bash('echo {_HOME_VAR}')` 取出真实路径，再拼成完整路径传给 directory）
 - 选 2 → 不传 directory 就行（默认在用户主目录启动）
 - 选 3 → 用用户给的路径。路径必须在用户主目录里面，越界会被工具拒绝，
     被拒绝了就跟用户解释一句"为了安全只在自己家里折腾"，再请他换个路径
@@ -328,15 +380,16 @@ ask_user 问用户能不能装，同意后用 bash 装（带 show_progress）：
 - 覆盖 → 备份后执行
 
 **B：Node 装完但 bash 找不到**
-- 用完整路径：`C:\\Program Files\\nodejs\\node.exe -v`
-- 或让用户刷新 PATH
+- 用完整路径试：{_NODE_FULLPATH}
+- 或让用户刷新 PATH / 重开一次终端
 
 **C：npm 装 Claude Code 慢或失败**
 - 加镜像 `--registry=https://registry.npmmirror.com`
 
-**D：Mac/Linux**
-- 装 Node 命令不同
-- 快捷方式和 launch_claude 会失败——告诉用户"手动打开终端输入 claude"
+**D：桌面图标 / 终端没弹出来**
+- 三个平台的 create_shortcut 和 launch_claude 都已实现，正常情况下不该失败
+- 真失败了（比如 Linux 没装终端模拟器、macOS 找不到 Terminal），照实说，
+  再让用户手动打开终端输入 claude；不要猜"这个系统不支持"
 
 **E：用户打招呼 / 闲聊 / 问概念**
 - 直接回答。**不要检测环境，不要装东西。**

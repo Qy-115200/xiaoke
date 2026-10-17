@@ -8,36 +8,49 @@
 
 这几个工具都是"有 GUI 就顺手更新界面"：进度条和提问都靠 server/ui_bridge 里
 注入的对象，取的时候一律走 get_ui()。
+
+平台差异（补 PATH、用哪个 shell、怎么解码）都在 platform_support 里，
+这里只负责"跑命令 + 把输出交回去"。
 """
 
+import locale
 import os
-import platform
 import subprocess
 from pathlib import Path
 
+import platform_support
 from config import HOME
 from server.ui_bridge import get_ui
 
 # ================= 通用工具 =================
 
+def _decode_with(b: bytes, encoding: str) -> str | None:
+    """按指定编码解，解出替换字符就当失败（返回 None）。"""
+    try:
+        s = b.decode(encoding)
+    except (UnicodeDecodeError, LookupError):
+        return None
+    return None if "�" in s else s
+
+
 def _smart_decode(b: bytes) -> str:
-    """智能解码：先试 UTF-8，失败回退 GBK。
-    Windows 的 cmd.exe 内置错误信息是 GBK，其他程序输出可能是 UTF-8，
-    所以要"猜"编码。"""
+    """智能解码：先试 UTF-8，失败再试系统本地编码。
+
+    Windows 的 cmd.exe 内置错误信息是 GBK（中文系统）或别的 ANSI 代码页，
+    其它程序输出又可能是 UTF-8，所以要"猜"编码；macOS/Linux 的本地编码
+    通常就是 UTF-8，这一步直接跳过。"""
     if not b:
         return ""
-    # 优先 UTF-8
-    try:
-        s = b.decode("utf-8")
-        if "\ufffd" not in s:              # \ufffd 是"替换字符"，出现说明解错了
-            return s
-    except UnicodeDecodeError:             # 不是合法 UTF-8
-        pass
-    # 回退 GBK
-    try:
-        return b.decode("gbk", errors="replace")   # errors="replace" 让解不出的字符变 ?
-    except Exception:
-        return b.decode("utf-8", errors="replace")  # 兜底
+    s = _decode_with(b, "utf-8")           # 优先 UTF-8
+    if s is not None:
+        return s
+    local = locale.getpreferredencoding(False) or "utf-8"
+    if local.lower() in ("utf-8", "utf8"):
+        return b.decode("utf-8", errors="replace")
+    s = _decode_with(b, local)             # 中文 Windows 上这里就是 GBK/CP936
+    if s is not None:
+        return s
+    return b.decode(local, errors="replace")   # 兜底，解不出的变 ?
 
 
 def bash(cmd: str, timeout: int = 600, show_progress: bool = False) -> str:
@@ -55,18 +68,16 @@ def bash(cmd: str, timeout: int = 600, show_progress: bool = False) -> str:
     # ---------- 环境变量：补 PATH ----------
     # 刚装完 Node，需要手动把安装目录加进 PATH
     env = os.environ.copy()               # 复制当前环境变量
-    for p in [
-        r"C:\Program Files\nodejs",       # Node 的默认安装目录
-        str(HOME / "AppData" / "Roaming" / "npm"),   # npm 全局包目录
-    ]:
+    for p in platform_support.path_dirs():
+        p = str(p)
         if Path(p).exists() and p not in env.get("PATH", ""):
             env["PATH"] = p + os.pathsep + env.get("PATH", "")   # 前置到 PATH
             # os.pathsep 在 Windows 是 ;，Linux/macOS 是 :
 
-    # ---------- 编码处理 ----------
-    if platform.system() == "Windows":
-        cmd = f'chcp 65001 >nul && {cmd}'    # 强制 UTF-8 输出（对程序输出有效）
-                                             # >nul 是重定向，把 chcp 的提示吞掉
+    # ---------- 交给平台的 shell ----------
+    # Windows: "chcp 65001 >nul && xxx" + shell=True
+    # macOS/Linux: [$SHELL, "-lc", xxx] + shell=False（登录 shell 才拿得到 brew/npm 的 PATH）
+    argv, use_shell = platform_support.shell_command(cmd)
 
     # ---------- 显示进度条 ----------
     u = get_ui()
@@ -78,8 +89,8 @@ def bash(cmd: str, timeout: int = 600, show_progress: bool = False) -> str:
         # ★ 关键：不加 text=True，拿 bytes（原始字节）
         # 因为 Windows 的 cmd 输出编码不确定，拿 bytes 自己解码更稳
         r = subprocess.run(
-            cmd,
-            shell=True,                  # 通过系统 shell 执行（支持管道、&& 等）
+            argv,
+            shell=use_shell,             # 通过系统 shell 执行（支持管道、&& 等）
             capture_output=True,         # 捕获 stdout 和 stderr
             timeout=timeout,
             env=env,                     # 传入补了 PATH 的环境变量

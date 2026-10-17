@@ -22,6 +22,7 @@ import webbrowser
 
 import customtkinter as ctk
 
+import platform_support
 from agent_core import refresh_balance
 from bus import msg_queue
 from config import BG, BLUE, BORDER, DIM, GREEN, ORANGE, RED, SERVER_URL, TEXT
@@ -139,7 +140,7 @@ class RechargeMixin:
 
             dw_log, dh_log = 460, 620
             gap = int(8 * scale)
-            bottom = int(48 * scale)                    # 任务栏
+            bottom = int(platform_support.taskbar_reserve_px() * scale)   # 任务栏/面板
 
             # 屏幕矮（高 DPI 笔记本常见）时先把弹窗压低到放得下，
             # 别让最下面的付款按钮掉出屏幕；560 是弹窗自己的 minsize。
@@ -489,8 +490,8 @@ class RechargeMixin:
             except Exception:
                 pass
         # 「只办充值」的启动方式（aikaui://recharge）：关掉弹窗就没别的事可做了，
-        # 直接退出，别留下一个空的主窗口或托盘图标。
-        if getattr(self, "_quit_on_close", False):
+        # 直接退出，别留下一个空的主窗口。
+        if getattr(self, "_recharge_only", False):
             self.quit_app()
 
     def _start_recharge(self, amount):

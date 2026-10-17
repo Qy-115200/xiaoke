@@ -10,6 +10,14 @@
 
 from pathlib import Path
 
+# ================= 版本 =================
+
+# 唯一真源：git tag、Windows 文件版本、macOS Info.plist、更新清单都用它。
+# 只允许 X.Y.Z 三个数字段（自动更新按数字比较，不要写 beta/日期）。
+APP_VERSION = "1.0.0"
+APP_NAME = "Claude Code 助手"
+APP_ID = "com.aikaui.claudeassistant"
+
 # ================= 服务器 =================
 
 SERVER_URL = "https://aikaui.com"           # 服务器根地址（领 token / 查余额 / 生成订单）

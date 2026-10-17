@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """固定工具：Agent 必须按顺序调用，不能自己用 bash 实现的那几个。
 
-  register_protocol / parse_protocol_arg   aikaui:// 自定义协议
+  register_protocol / parse_protocol_url / parse_protocol_arg   aikaui:// 自定义协议
   bypass_region_check                      绕过地区检查
   set_model_config                         把中转地址和 token 写进 ~/.claude.json
   create_shortcut                          桌面快捷方式
@@ -12,14 +12,11 @@
 """
 
 import json
-import platform
-import subprocess
 import sys
-import winreg
-from pathlib import Path
 from urllib.parse import parse_qsl
 
-from config import CLAUDE_CONFIG, CLAUDE_SETTINGS, HOME, IDENTITY_FILE
+import platform_support
+from config import CLAUDE_CONFIG, IDENTITY_FILE
 from server.claude_config import (
     apply as apply_identity_config,
     normalize_base as _normalize_base,
@@ -30,51 +27,40 @@ from server.claude_config import (
 # Windows 靠注册表里的这个协议，把这个链接转成"启动我们的 exe 并带上参数"。
 
 def register_protocol() -> str:
-    """注册 aikaui:// 自定义协议（Windows）。已注册则覆盖成当前 exe 路径。"""
-    if platform.system() != "Windows":
-        return "非 Windows 系统，跳过"
+    """注册 aikaui:// 自定义协议（具体怎么做交给 platform_support）。
 
-    # ---------- 找出"要启动什么" ----------
-    if getattr(sys, "frozen", False):
-        # 打包成 exe 后：直接启动自己，把 URL 当参数传进去
-        command = f'"{Path(sys.executable).resolve()}" "%1"'
-    else:
-        # 开发环境（python main.py）：带上解释器和脚本路径，方便本地调试
-        script = Path(sys.argv[0]).resolve()
-        command = f'"{Path(sys.executable).resolve()}" "{script}" "%1"'
+    Windows 写注册表；Linux 写 .desktop + xdg-mime；macOS 由 Info.plist 声明。"""
+    return platform_support.register_url_protocol()
 
-    try:
-        # HKEY_CURRENT_USER\Software\Classes\aikaui
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\aikaui") as key:
-            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "URL:AI 管家")   # 描述
-            winreg.SetValueEx(key, "URL Protocol", 0, winreg.REG_SZ, "")  # ★ 有这行才被认成协议
-        # ...\aikaui\shell\open\command
-        with winreg.CreateKey(
-            winreg.HKEY_CURRENT_USER, r"Software\Classes\aikaui\shell\open\command"
-        ) as key:
-            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, command)
-    except Exception as e:
-        return f"注册协议失败：{e}"
 
-    return "已注册协议 aikaui://"
+def parse_protocol_url(url: str) -> dict:
+    """解析一条 aikaui:// 链接。
+    例："aikaui://recharge?user_id=7" → {"action": "recharge", "user_id": "7"}
+    不是 aikaui:// 开头就返回 {}。
+
+    ★ macOS 的 Apple Event 处理器（platform_support.macos）也复用这个函数，
+      保证三平台解析规则完全一致。"""
+    prefix = "aikaui://"
+    # 协议名按 RFC 3986 是大小写不敏感的，别因为系统把链接写成 AIKaui:// 就认不出来
+    if not isinstance(url, str) or url[:len(prefix)].lower() != prefix:
+        return {}
+    rest = url[len(prefix):]                 # "recharge?user_id=7"
+    action, _, query = rest.partition("?")   # action="recharge", query="user_id=7"
+    # Windows 把链接交给协议处理程序时，末尾常常多一个斜杠（aikaui://recharge/），
+    # 不剥掉的话 action 会变成 "recharge/"，认不出来。
+    action = action.strip().rstrip("/").lower()
+    out = {"action": action}
+    for k, v in parse_qsl(query):            # 解析查询串
+        out[k] = v
+    return out
 
 
 def parse_protocol_arg() -> dict:
-    """从 sys.argv 解析 aikaui:// 协议参数。
-    例：sys.argv[1] = "aikaui://recharge?user_id=7"
-    返回：{"action": "recharge", "user_id": "7"}；没有参数返回 {}"""
+    """从 sys.argv 解析 aikaui:// 协议参数；没有参数返回 {}。"""
     for arg in sys.argv[1:]:
-        if not arg.startswith("aikaui://"):
-            continue
-        rest = arg[len("aikaui://"):]            # "recharge?user_id=7"
-        action, _, query = rest.partition("?")   # action="recharge", query="user_id=7"
-        # Windows 把链接交给协议处理程序时，末尾常常多一个斜杠（aikaui://recharge/），
-        # 不剥掉的话 action 会变成 "recharge/"，认不出来。
-        action = action.strip().rstrip("/").lower()
-        out = {"action": action}
-        for k, v in parse_qsl(query):            # 解析查询串
-            out[k] = v
-        return out
+        out = parse_protocol_url(arg)
+        if out:
+            return out
     return {}
 def bypass_region_check() -> str:
     """绕过 Claude Code 的地区检查。
@@ -139,60 +125,12 @@ def set_model_config() -> str:
 
 
 def create_shortcut() -> str:
-    """在桌面创建 Claude Code 快捷方式（Windows 专属）"""
-    if platform.system() != "Windows":          # 只支持 Windows
-        return "非 Windows 系统，跳过"
-
-    try:
-        import win32com.client                  # Windows COM 接口（创建 .lnk 用）
-    except ImportError:
-        return "缺少 pywin32，无法创建快捷方式"
-
-    # ---------- 找 claude 可执行文件 ----------
-    claude_path = None
-    for p in [
-        HOME / "AppData" / "Roaming" / "npm" / "claude.cmd",                  # npm 装的
-        HOME / "AppData" / "Local" / "Programs" / "claude" / "claude.exe",    # 官方原生装的
-        Path("C:/Program Files/claude/claude.exe"),                            # 系统级装的
-    ]:
-        if p.exists():
-            claude_path = str(p)
-            break
-    if not claude_path:                          # 都没找到
-        import shutil
-        claude_path = shutil.which("claude")     # 从 PATH 里找
-    if not claude_path:
-        return "找不到 claude 命令，可能没装好"
-
-    # ---------- 查真实桌面路径 ----------
-    # 不能直接用 Path.home()/"Desktop"，因为可能被 OneDrive 重定向
-    # 查注册表拿到真实桌面路径（兼容所有情况）
-    key = winreg.OpenKey(
-        winreg.HKEY_CURRENT_USER,
-        r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders",
-    )
-    desktop = Path(winreg.QueryValueEx(key, "Desktop")[0])
-    # QueryValueEx 返回 (值, 类型) 的元组，[0] 取值
-
-    # ---------- 创建快捷方式 ----------
-    shell = win32com.client.Dispatch("WScript.Shell")   # 创建 COM 对象
-    lnk_path = desktop / "Claude Code.lnk"              # 快捷方式路径
-    lnk = shell.CreateShortCut(str(lnk_path))           # 创建快捷方式对象
-
-    if claude_path.endswith((".cmd", ".bat")):          # .cmd/.bat 要通过 cmd.exe 运行
-        lnk.TargetPath = "cmd.exe"                       # 目标：cmd.exe
-        lnk.Arguments = f'/k "{claude_path}"'            # /k = 执行完后保留窗口
-    else:
-        lnk.TargetPath = claude_path                     # 直接指向 exe
-
-    lnk.WorkingDirectory = str(HOME)                     # 工作目录设为用户主目录
-    lnk.Description = "启动 Claude Code"                 # 备注
-    lnk.Save()                                           # 保存
-    return f"已创建桌面快捷方式：{lnk_path}"
+    """在桌面创建 Claude Code 快捷方式（Windows: .lnk / macOS: 符号链接 / Linux: .desktop）"""
+    return platform_support.create_shortcut()
 
 
 def launch_claude(directory: str = "") -> str:
-    """打开新终端窗口，在指定目录里启动 Claude Code（Windows 专属）。
+    """打开新终端窗口，在指定目录里启动 Claude Code。
 
     directory —— 工作目录。Claude Code 只看得到这一个目录里的文件，
                  所以启动前应该先问用户"以后在哪个文件夹里干活"，
@@ -200,50 +138,6 @@ def launch_claude(directory: str = "") -> str:
                  留空 = 用户主目录。
 
     ★ 只接受用户主目录里的路径：越界的一律拒绝，退回主目录并说明原因
-      —— 跟 read_file / write_file 用的是同一条安全规则。"""
-    if platform.system() != "Windows":
-        return "非 Windows 系统，跳过"
-
-    # 找 claude（同上）
-    claude_path = None
-    for p in [
-        HOME / "AppData" / "Roaming" / "npm" / "claude.cmd",
-        HOME / "AppData" / "Local" / "Programs" / "claude" / "claude.exe",
-    ]:
-        if p.exists():
-            claude_path = str(p)
-            break
-    if not claude_path:
-        import shutil
-        claude_path = shutil.which("claude")
-    if not claude_path:
-        return "找不到 claude 命令，无法启动"
-
-    # ---------- 定工作目录 ----------
-    note = ""
-    cwd = HOME
-    if directory and str(directory).strip():
-        try:
-            cand = Path(str(directory).strip()).expanduser()
-            cand.resolve().relative_to(HOME.resolve())    # ★ 越界检查
-            cand.mkdir(parents=True, exist_ok=True)       # 目录不存在就建出来
-            cwd = cand
-        except ValueError:
-            note = f"（{directory} 不在用户主目录里，为了安全改在主目录启动）"
-        except Exception as e:
-            note = f"（目录 {directory} 用不了：{e}，改在主目录启动）"
-
-    try:
-        # ★ subprocess.Popen：非阻塞启动（立即返回，不等待进程结束）
-        # start "Claude Code" cmd /k "xxx" 是 Windows 命令：
-        #   start = 打开新窗口
-        #   "Claude Code" = 窗口标题
-        #   cmd /k = 执行完命令后保留窗口
-        subprocess.Popen(
-            f'start "Claude Code" cmd /k "{claude_path}"',
-            shell=True,
-            cwd=str(cwd),                   # ★ 工作目录 = 用户选的那个文件夹
-        )
-        return f"已打开新终端启动 Claude Code（{claude_path}），工作目录：{cwd}{note}"
-    except Exception as e:
-        return f"启动失败：{e}"
+      —— 跟 read_file / write_file 用的是同一条安全规则。
+    ★ 返回值必须以「已打开新终端」开头：agent_core 靠这个前缀判断安装完成。"""
+    return platform_support.launch_claude(directory)

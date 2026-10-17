@@ -69,20 +69,21 @@ Agent 需要你拿主意时，不是把 "1. xxx 2. xxx" 打在日志里，而是
 **点一下就直接当答案提交**（没有"先选、再点确定"那一步），也可以 ↑↓ 移动选中、回车提交，
 或者直接打序号。Esc 跳到自由输入。最后一行永远是「✏️ 输入点别的」。
 
-**系统托盘**
+**关闭窗口 = 退出程序**
 
-关窗口不退出，缩到托盘。托盘菜单能打开主窗口、跳到「用量信息」页、退出。余额告警时图标变红。
+三个平台都**不做托盘**。点右上角 X 就是真的退出，不会留一个找不到的常驻进程。
+（以前 Windows 上"关窗缩到托盘"的行为已删除。）
 
 **字体是一处定义的**
 
-界面字体用 **Microsoft YaHei UI**（Windows 自己画设置面板用的那一款，比普通雅黑字距更紧），
-数字和订单号走等宽（Cascadia Mono），这样 token 数、金额、日志列与列之间是对齐的。
-字体是运行时按优先级问 Tk 要的，老 Win10 上没有 YaHei UI 就退到普通雅黑，**不会突然变成宋体**。
-字号全在 `ui/fonts.py` 一张表里，改一处整个界面跟着变。
+界面字体按平台挑：Windows 用 **Microsoft YaHei UI**（设置面板用的那一款，比普通雅黑字距更紧）、
+macOS 用 **PingFang SC**、Linux 用 **Noto Sans CJK SC**；数字和订单号走等宽，
+这样 token 数、金额、日志列与列之间是对齐的。字体是运行时按优先级问 Tk 要的，
+一个都找不到才退到系统兜底字体。字号全在 `ui/fonts.py` 一张表里，改一处整个界面跟着变。
 
 ## 快速开始
 
-需要 Windows + Python 3（开发环境用的是 3.12.4）。
+需要 Python 3（开发环境用的是 3.12.4），Windows / macOS / Linux 都行。
 
 ```bash
 pip install -r requirements.txt
@@ -91,54 +92,86 @@ python main.py
 
 首次运行会自动向服务器领一份设备凭证，存到 `~/.claude-agent/identity.json`。
 
-## 打包成 exe
+离线测试（不需要联网，也不需要 GUI）：
 
 ```bash
-python -m PyInstaller "ClaudeCode安装助手.spec"
+python -m unittest discover -s tests
 ```
 
-产物在 `dist/ClaudeCode安装助手.exe`，单文件、无控制台窗口。用 `pip install pyinstaller`
-装打包工具即可；`.spec` 里的入口只写了 `main.py`，PyInstaller 会顺着 import 图自己把
-`ui/` 和 `server/` 两个子包收进去，不用手工维护模块清单。`agent.ico` 是唯一要手工列的
-数据文件（`datas`），它同时还是 exe 自己的图标（`icon=`）。
+## 打包
+
+三平台共用一份 [`agent.spec`](agent.spec)（文件名用 ASCII，CI 和命令行都能直接引用）：
+
+```bash
+python -m PyInstaller agent.spec --noconfirm --clean
+```
+
+| 平台 | 产物 | 说明 |
+|---|---|---|
+| Windows | `dist/ClaudeCode安装助手.exe` | 单文件、无控制台；先跑 `python build_tools/make_version_info.py` 才有文件版本信息 |
+| macOS | `dist/ClaudeCodeAssistant.app` | 未签名；Info.plist 里声明了 `aikaui://` |
+| Linux | `dist/ClaudeCodeAssistant` | 单文件；发行时和 `packaging/claude-code-assistant.desktop`、`agent.png` 一起打 tar.gz |
+
+`.spec` 里的入口只写了 `main.py`，PyInstaller 会顺着 import 图自己把 `ui/`、`server/`、
+`platform_support/` 收进去，不用手工维护模块清单。要手工列的数据文件只有图标
+（Windows 的 `agent.ico`、macOS/Linux 的 `agent.png`）和 macOS 的 `agent.icns`。
+
+**CI**：打 `v*` tag（或手动触发）时 [`.github/workflows/build.yml`](.github/workflows/build.yml)
+在四个 runner 上并行构建（windows-x64 / macos-arm64 / macos-x64 / linux-x64），产物传到
+Actions artifact。macOS 两个包都**没有签名**：首次打开要右键 →「打开」，
+或者终端跑 `xattr -dr com.apple.quarantine /Applications/ClaudeCodeAssistant.app`。
 
 ## 目录结构
 
 ```
 agent_demo/
 │
-├── main.py                       100   程序入口：建窗口 → 起线程 → 欢迎信息 → 事件循环
+├── main.py                       110   程序入口：建窗口 → 起线程 → 欢迎信息 → 事件循环
 │
-├── config.py                      72   唯一的常量源：服务器地址、凭证、路径、配色、MAX_STEPS
-├── deps.py                        26   可选依赖探测：pystray / Pillow 在不在
+├── config.py                      80   唯一的常量源：版本、服务器地址、凭证、路径、配色、MAX_STEPS
+├── deps.py                        19   可选依赖探测：Pillow 在不在
 ├── helpers.py                    217   数字金额格式化 + 用量取数（按模型 / 时间序列）+ 刻度 + 文字宽度估算 + 选项清洗
-├── images.py                      87   托盘图标（运行时现画）+ 付款二维码下载
-├── notify.py                      79   桌面通知三级兜底：win10toast → plyer → PowerShell
-├── bus.py                         65   线程间队列 + poll_queue（每 100ms 把消息翻译成界面操作）
-├── llm.py                         41   大模型客户端（走 aikaui.com 代理，带 X-Device-Id）
-├── agent_core.py                 184   Agent 主循环：run_one_task / agent_worker / balance_worker
-├── prompts.py                    332   系统提示词（含工作目录 + VSCode 推荐 + 余额分寸）
+├── images.py                     138   窗口图标（打包资源优先，缺了现画）+ 付款二维码下载
+├── notify.py                      26   桌面通知薄封装（各平台实现在 platform_support）
+├── bus.py                         79   线程间队列 + poll_queue（每 100ms 把消息翻译成界面操作）
+├── llm.py                        117   大模型客户端（走 aikaui.com 代理，带 X-Device-Id）
+├── agent_core.py                 221   Agent 主循环：run_one_task / agent_worker / balance_worker
+├── prompts.py                    415   系统提示词（按平台给安装指令 + 工作目录 + VSCode 推荐 + 余额分寸）
+│
+├── platform_support/                  三平台差异（调用方只 import 这个包）
+│   ├── __init__.py                93   按 sys.platform 延迟加载并转发
+│   ├── common.py                  59   safe_cwd（HOME 越界检查）、find_claude
+│   ├── windows.py                208   注册表协议 / .lnk / cmd / WinRT toast
+│   ├── macos.py                  182   Info.plist 协议 + Apple Event / 符号链接 / Terminal.app
+│   └── linux.py                  222   .desktop + xdg-mime / 终端探测 / notify-send
 │
 ├── server/                            服务端与工具层（不 import 界面）
 │   ├── ui_bridge.py               31   GUI 注入桥：set_ui / get_ui
-│   ├── identity.py               216   设备指纹、本地凭证、领 token、_ensure_account_code / _ensure_user_id
-│   ├── api.py                    272   余额 / 用量 / 充值 HTTP 层（永远不抛异常）
-│   ├── tools_fixed.py            314   五个固定工具 + aikaui:// 协议注册
-│   ├── tools_general.py          145   bash / read_file / write_file / ask_user
-│   └── tool_specs.py             236   工具说明书：tools[] + tool_map（13 个工具）
+│   ├── identity.py               332   设备指纹、本地凭证、领 token、_ensure_account_code / _ensure_user_id
+│   ├── api.py                    504   余额 / 用量 / 充值 HTTP 层（永远不抛异常）
+│   ├── claude_config.py          124   把身份写进 ~/.claude.json 和 ~/.claude/settings.json
+│   ├── tools_fixed.py            141   五个固定工具 + aikaui:// 协议注册（转发 platform_support）
+│   ├── tools_general.py          156   bash / read_file / write_file / ask_user
+│   └── tool_specs.py             286   工具说明书：tools[] + tool_map（13 个工具）
 │
 ├── ui/                                界面层
-│   ├── fonts.py                  147   全界面字体表：字体解析 + 字号常量 + 画布缩放
-│   ├── gui.py                     24   class GUI(WindowMixin, OptionsMixin, RechargeMixin, UsageMixin)
-│   ├── window.py                 500   WindowMixin：窗口壳、左侧导航、对话页、底部询问条、余额回流
+│   ├── fonts.py                  179   全界面字体表：按平台选字体 + 字号常量 + 画布缩放
+│   ├── gui.py                     26   class GUI(WindowMixin, OptionsMixin, RechargeMixin, UsageMixin, LoginMixin)
+│   ├── window.py                 479   WindowMixin：窗口壳、左侧导航、对话页、底部询问条、余额回流
 │   ├── usage.py                  625   UsageMixin：用量信息页（余额卡 + 两张按模型的时间分布图 + 充值入口）
-│   ├── options.py                217   OptionsMixin：ask_user 选项面板（点击 / ↑↓ / 回车 / Esc）
-│   ├── recharge.py               626   RechargeMixin：充值弹窗两页 + 创单 + 付款后刷新 + 只办充值时的靠右定位
-│   └── tray.py                    91   系统托盘
+│   ├── options.py                219   OptionsMixin：ask_user 选项面板（点击 / ↑↓ / 回车 / Esc）
+│   ├── recharge.py               627   RechargeMixin：充值弹窗两页 + 创单 + 付款后刷新 + 只办充值时的靠右定位
+│   └── login.py                  230   LoginMixin：换设备登录弹窗（账户码）
 │
-├── ClaudeCode安装助手.spec             PyInstaller 打包配置
-├── requirements.txt                    第三方依赖
-├── agent.ico                           窗口 / 托盘图标
+├── build_tools/
+│   └── make_version_info.py       80   生成 Windows 文件版本信息（build/version_info.txt）
+├── packaging/
+│   └── claude-code-assistant.desktop   Linux 启动器（tar.gz 里一起发）
+├── .github/workflows/build.yml        四平台 CI 构建
+│
+├── agent.spec                          PyInstaller 打包配置（三平台共用）
+├── requirements.txt                    第三方依赖（按平台带 marker）
+├── agent.ico / agent.png / agent.icns  窗口 / 应用图标
 ├── 文件执行或调用顺序.md                一次对话里各模块的出场顺序
 └── README.md
 ```
@@ -158,14 +191,13 @@ main.py ─→ ui/ ─→ agent_core ─→ llm / server/ ─→ config
   也没有一个调 `super()`，所以 MRO 顺序不影响行为。
 - 工具层（`server/`）**不 import 界面**。
 
-### 线程模型：5 条线程，全靠队列说话
+### 线程模型：4 条线程，全靠队列说话
 
 | 线程 | 起点 | 周期 | 干什么 |
 |---|---|---|---|
 | 主线程 | `mainloop()` | `poll_queue` 每 100ms | **唯一**能碰 tkinter 的地方 |
 | Agent 线程 | `agent_core.py` | 阻塞在 `user_input_queue.get()` | 跑模型、调工具 |
 | 余额线程 | `agent_core.py` | 每 30 秒 | 查余额 / 用量 → 丢进 `msg_queue` |
-| 托盘线程 | `Tray.start()` | pystray 自己阻塞 | 菜单回调一律 `root.after(0, fn)` 丢回主线程 |
 | 协议线程 | `main.py` | 一次性 | 注册 `aikaui://`，注册完就结束 |
 
 线程之间没有任何直接调用，全靠 `bus.py` 里那四个东西连着：`msg_queue`（工作线程 → 界面）、
@@ -313,8 +345,12 @@ from server.api import refresh_balance as fetch_balance   # 查完返回 dict，
 
 ## 已知限制
 
-- **只支持 Windows**。托盘、快捷方式、`aikaui://` 协议注册都依赖 Windows API；
-  `bash` 和 `read_file` / `write_file` 倒是跨平台的，非 Windows 上会跳过那几个功能。
+- **三平台功能一致，但细节依赖系统**。Windows 的快捷方式是 `.lnk`、协议写注册表；
+  macOS 的协议写在 Info.plist 里、链接靠 pyobjc 收 Apple Event、快捷方式是桌面符号链接；
+  Linux 的协议靠 `.desktop` + `xdg-mime`、快捷方式也是 `.desktop`。桌面图标和终端启动
+  各平台的实现见 `platform_support/`；Linux 没装终端模拟器时会明确报失败，不会假装成功。
+- **macOS 包没有签名**。首次打开要右键 →「打开」，或 `xattr -dr com.apple.quarantine`；
+  从 Downloads 直接运行时 App Translocation 会让"覆盖自身"失败（更新会在下次启动时跳过）。
 - **文件操作限制在用户主目录内**。`read_file` / `write_file` / `launch_claude` 的 `directory`
   都会做路径越界检查，越界直接拒绝或退回主目录。
 - **余额是个"测试大数"**。当前这个测试账号服务器给的余额是 8 位数的量级，看起来不像真钱；

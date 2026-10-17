@@ -60,10 +60,12 @@ class OptionsMixin:
         """显示可点击的选项（主线程调用）"""
         self.clear_options()                     # 先清掉上一轮的
 
-        # 窗口缩在托盘里的话先弹出来——Agent 正卡着等回答，看不见就没法继续
+        # 窗口被最小化/隐藏的话先提出来——Agent 正卡着等回答，看不见就没法继续
         try:
-            if str(self.root.state()) == "withdrawn":
-                self.show_window()
+            if str(self.root.state()) in ("withdrawn", "iconic"):
+                self.root.deiconify()
+                self.root.lift()
+                self.root.focus_force()
         except Exception:
             pass
 

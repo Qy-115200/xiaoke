@@ -10,8 +10,11 @@
 只有余额真的见底时，底部会冒出一条"是否立即充值"的询问条（offer_recharge），
 用户点了才会弹充值窗。
 
-对外（Agent / 托盘）暴露的方法还是那几个：
+对外（Agent）暴露的方法还是那几个：
 ui_log / ui_ask / ui_progress_start / ui_progress_stop / update_balance。
+
+**三个平台都不做托盘**：点右上角 X 就是退出程序。以前 Windows 上"关窗缩到托盘"
+的行为已删除——远端/跨平台用户找不到托盘图标时，程序会变成关不掉的幽灵进程。
 
 线程约束：所有组件操作必须在主线程，其它线程通过 msg_queue 发消息，
 poll_queue 每 100ms 取一次并在这里更新界面。
@@ -36,9 +39,8 @@ from config import (
     TEXT,
     WARN_BG,
 )
-from deps import HAVE_TRAY
 from helpers import _fmt_yuan, _to_float
-from images import ensure_icon_file
+from images import apply_window_icon
 from llm import reset_client
 from notify import _notify
 from ui.fonts import (
@@ -61,7 +63,6 @@ class WindowMixin:
     def __init__(self, root):
         self.root = root                        # tkinter 主窗口
         self.waiting_for_answer = False          # 是否正处于 ask_user 等待状态
-        self.tray = None                         # 托盘对象（main() 里注入）
         self._dlg = None                         # 充值弹窗
         self._dlg_status = None                  # 充值弹窗里的状态文字
         self._recharge_shown = False             # 充值引导是否已经弹过（避免反复弹）
@@ -72,24 +73,19 @@ class WindowMixin:
         self._pay_info = None                    # 当前充值订单信息
         self._qr_image = None                    # 二维码图片对象（得留着，不然会被回收）
         self._qr_box = None                      # 显示二维码的控件
-        self._quit_on_close = False              # 充值弹窗关了就直接退出（aikaui://recharge 用）
-        self._recharge_only = False              # 这次启动只办充值，不起托盘/Agent
+        self._recharge_only = False              # 这次启动只办充值，不起 Agent
         self._auto_quit_id = None                # 安装完成后"几秒后自动退出"的 after id
+        self._quitting = False                   # 防止连点 X / 自动退出重复 destroy
 
         root.title("Claude Code 助手")
         root.geometry("960x780")
         root.minsize(860, 660)
         root.configure(fg_color=BG)
 
-        # 点右上角 X → 隐藏到托盘，不退出
-        root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
+        # 点右上角 X → 退出程序（三平台一致，没有托盘）
+        root.protocol("WM_DELETE_WINDOW", self.quit_app)
 
-        ico = ensure_icon_file()
-        if ico:
-            try:
-                root.iconbitmap(ico)
-            except Exception:
-                pass                            # 图标设不上不影响运行
+        apply_window_icon(root)                   # Windows .ico / mac+linux iconphoto
 
         self._build_rail()
 
@@ -395,8 +391,8 @@ class WindowMixin:
         """余额 / 用量回来了（主线程调用）。
 
         数据和显示是分开的：**数字全给"用量信息"页**（usage_view_update），
-        主窗口只在余额见底时冒一条询问条。低额提醒按三档来：
-          ¥2 以下 → 托盘图标变橙、系统通知一次
+        主窗口只在余额见底时冒一条询问条。低额提醒按两档来：
+          ¥2 以下 → 系统通知一次
           ¥1 以下 → 底部问一句"是否立即充值"（不自己弹充值窗）
         """
         payload = payload or {}
@@ -430,10 +426,6 @@ class WindowMixin:
 
         low = yuan is not None and yuan < 2
 
-        # --- 托盘图标变色 ---
-        if self.tray:
-            self.tray.set_alert(low)
-
         # --- 跌破 ¥2 弹一次系统通知 ---
         if low and not self._low_notified:
             self._low_notified = True
@@ -447,24 +439,7 @@ class WindowMixin:
         if yuan is not None and yuan < 1:
             self.offer_recharge(yuan)
 
-    # ---------- 窗口显隐 / 退出 ----------
-
-    def show_window(self):
-        """从托盘恢复窗口（必须是主线程，托盘线程用 root.after 调度）"""
-        try:
-            self.root.deiconify()                # 取消 withdraw 的隐藏
-            self.root.lift()                     # 提到最前
-            self.root.focus_force()              # 抢焦点
-        except Exception:
-            pass
-
-    def hide_to_tray(self):
-        """点 X：有托盘就隐藏到托盘，没托盘就直接退出（否则窗口没了程序还在跑，用户找不到）"""
-        if HAVE_TRAY and self.tray is not None and self.tray.ok:
-            self.root.withdraw()
-            self.write("[系统] 已最小化到托盘，双击托盘图标可重新打开")
-        else:
-            self.quit_app()
+    # ---------- 退出 ----------
 
     def schedule_auto_quit(self, seconds=None):
         """安装流程走完 → 留一点时间给用户看收尾说明，然后助手自己退出。
@@ -484,15 +459,19 @@ class WindowMixin:
         self._auto_quit_id = self.root.after(int(seconds * 1000), self.quit_app)
 
     def quit_app(self):
-        """真的退出：先停托盘，再关窗口"""
+        """真的退出：取消排队的自动退出，然后关窗口。
+
+        ★ _quitting 防重入：X 按钮、安装完成的自动退出、充值窗关闭都可能走到这里，
+          重复 destroy 会抛 TclError（已经销毁的窗口不能再操作）。"""
+        if self._quitting:
+            return
+        self._quitting = True
         if self._auto_quit_id is not None:
             try:
                 self.root.after_cancel(self._auto_quit_id)
             except Exception:
                 pass
             self._auto_quit_id = None
-        if self.tray is not None:
-            self.tray.stop()
         try:
             self.root.quit()
             self.root.destroy()

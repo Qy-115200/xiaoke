@@ -1,0 +1,104 @@
+name: build
+
+# 打 tag v1.0.0 时构建四份产物；也可以在网页上手动触发。
+# 产物先只上传到 Actions artifact，发布到 aikaui.com 是后续的 publish job。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build-${{ matrix.key }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            key: windows-x64
+            artifact: ClaudeCodeAssistant-win-x64.exe
+          - runner: macos-15            # Apple Silicon
+            key: macos-arm64
+            artifact: ClaudeCodeAssistant-macos-arm64.zip
+          - runner: macos-15-intel      # Intel
+            key: macos-x64
+            artifact: ClaudeCodeAssistant-macos-x64.zip
+          - runner: ubuntu-22.04        # 老一点保证 glibc 兼容
+            key: linux-x64
+            artifact: ClaudeCodeAssistant-linux-x64.tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Check version matches tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          APP=$(python -c "import config; print(config.APP_VERSION)")
+          echo "tag=$TAG config=$APP"
+          if [ "$TAG" != "$APP" ]; then
+            echo "::error::tag $TAG 与 config.APP_VERSION $APP 不一致"
+            exit 1
+          fi
+
+      - name: Generate Windows version info
+        if: runner.os == 'Windows'
+        run: python build_tools/make_version_info.py
+
+      - name: Build
+        run: python -m PyInstaller agent.spec --noconfirm --clean
+
+      # ---------------- Windows ----------------
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cp "dist/ClaudeCode安装助手.exe" "ClaudeCodeAssistant-win-x64.exe"
+          ls -l ClaudeCodeAssistant-win-x64.exe
+
+      # ---------------- macOS ----------------
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          ls -R dist | head -50
+          ditto -c -k --keepParent "dist/ClaudeCodeAssistant.app" "${{ matrix.artifact }}"
+          ls -l "${{ matrix.artifact }}"
+
+      # ---------------- Linux ----------------
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIR=ClaudeCodeAssistant-linux-x64
+          rm -rf "$DIR"
+          mkdir -p "$DIR"
+          cp dist/ClaudeCodeAssistant "$DIR/"
+          cp agent.png "$DIR/"
+          cp packaging/claude-code-assistant.desktop "$DIR/"
+          chmod +x "$DIR/ClaudeCodeAssistant"
+          tar -czf "${{ matrix.artifact }}" "$DIR"
+          ls -l "${{ matrix.artifact }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 30
