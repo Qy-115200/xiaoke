@@ -8,6 +8,7 @@
 但里面没有 DeepSeek key，只有一个"半公开"的 AGENT_KEY（服务器会校验 + 限流）。
 """
 
+import os
 from pathlib import Path
 
 # ================= 版本 =================
@@ -38,6 +39,23 @@ HOME = Path.home()                                    # 用户主目录
 CLAUDE_CONFIG = HOME / ".claude.json"                 # Claude Code 的主配置文件
 CLAUDE_SETTINGS = HOME / ".claude" / "settings.json"  # Claude Code 的用户级设置（钉默认模型用）
 IDENTITY_FILE = HOME / ".claude-agent" / "identity.json"   # Agent 自己的身份文件（存 token）
+UPDATES_DIR = HOME / ".claude-agent" / "updates"      # 自动更新：下载暂存、清单缓存、日志
+
+# ================= 自动更新 =================
+# 清单放在自家服务器上（nginx 静态文件），下载完先暂存，下次启动时替换自己。
+# 环境变量 AGENT_UPDATE_MANIFEST_URL 可以临时指向测试清单（本机验证用）。
+UPDATE_MANIFEST_URL = os.environ.get(
+    "AGENT_UPDATE_MANIFEST_URL", f"{SERVER_URL}/downloads/latest.json")
+UPDATE_INITIAL_DELAY = 25                 # 启动后多久第一次检查（秒）——别跟启动抢网络
+UPDATE_CHECK_INTERVAL = 6 * 3600          # 之后每 6 小时看一次
+UPDATE_MAX_SIZE = 300 * 1024 * 1024       # 超过 300MB 的"更新包"一律不信
+UPDATE_STAGED_TTL = 7 * 24 * 3600         # 暂存文件保留 7 天
+UPDATE_LOCK_STALE = 10 * 60               # 替换锁超过 10 分钟算陈旧
+
+# 第一个带 updater 的版本。比它老的用户程序里没有更新代码，只能手动重装。
+# 清单里的 min_version 用它，而不是发布时的 APP_VERSION —— 否则每个新版本都会
+# 把上一版用户挡在门外（1.0.0 < 1.0.1，永远"不够新"）。
+APP_MIN_UPDATE_FROM = "1.0.0"
 
 # ================= 运行参数 =================
 

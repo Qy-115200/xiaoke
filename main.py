@@ -18,8 +18,9 @@ import threading
 import customtkinter as ctk
 
 import platform_support
+import updater
 from agent_core import agent_worker, balance_worker, refresh_balance
-from bus import poll_queue
+from bus import msg_queue, poll_queue
 from server.tools_fixed import parse_protocol_arg, parse_protocol_url, register_protocol
 from server.ui_bridge import set_ui
 from ui.gui import GUI
@@ -27,6 +28,15 @@ from ui.gui import GUI
 
 def main():
     """程序入口"""
+    # ---------- 自动更新：把上次下载好的新版本换上去 ----------
+    # 必须在创建 Tk 窗口**之前**、而且必须在最前面：替换成功后 _relaunch 会
+    # 用原参数重新拉起自己并 sys.exit(0)；失败就继续用旧版本跑，绝不阻塞启动。
+    try:
+        updater.apply_pending_update(sys.argv)
+        updater.cleanup_stale_files()
+    except Exception:
+        pass
+
     ctk.set_appearance_mode("dark")      # ★ 深色主题
     ctk.set_default_color_theme("blue")
 
@@ -56,6 +66,14 @@ def main():
             )
 
     platform_support.install_url_handler(_on_url)   # 其它平台返回 False，什么都不做
+
+    # 上一次启动完成了自动更新的话，在这里说一声（只提示一次）
+    try:
+        notice = updater.consume_applied_notice()
+        if notice:
+            gui.write(f"[系统] {notice}")
+    except Exception:
+        pass
 
     # ---------- 只办充值的启动方式 ----------
     # 用户在终端里点服务器给的 aikaui://recharge 链接 → 这里被唤起。
@@ -101,6 +119,12 @@ def main():
     # ---------- 启动后台线程 ----------
     threading.Thread(target=agent_worker, daemon=True).start()     # Agent 主循环
     threading.Thread(target=balance_worker, daemon=True).start()   # 余额定时刷新
+
+    # ---------- 后台检查更新（静默下载，下次启动生效）----------
+    # 只办充值的启动方式不查——那种场景用户只想赶紧付钱，别抢网络。
+    updater.start_background_check(
+        on_ready=lambda text: msg_queue.put(("log", f"[系统] {text}")),
+    )
 
     root.after(100, lambda: poll_queue(gui))   # 100ms 后启动第一次轮询
     root.mainloop()                      # ★ 进入 GUI 事件循环（阻塞在这里）

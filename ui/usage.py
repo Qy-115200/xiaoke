@@ -27,6 +27,7 @@ import customtkinter as ctk
 
 from agent_core import refresh_balance
 from config import (
+    APP_VERSION,
     AXIS,
     BG,
     BLUE,
@@ -115,6 +116,15 @@ class UsageMixin:
             fg_color="#2f6f4f", hover_color="#3a8560",
             command=self.on_usage_recharge,
         ).pack(side=tk.RIGHT, padx=(0, 10))
+
+        # ---------- 版本号：贴在页面最底下 ----------
+        # ★ 必须在这张会 expand 的图表卡片之前 pack(side=BOTTOM)，
+        #   否则它会被挤到图表下面、窗口一矮就看不见了。
+        #   报问题时让用户说这个版本号，比问"你什么时候下的"靠谱。
+        ctk.CTkLabel(
+            view, text=f"v{APP_VERSION} · Claude Code 助手",
+            font=font(S_TINY), text_color=DIM,
+        ).pack(side=tk.BOTTOM, pady=(0, 8))
 
         # ---------- 余额卡：一个大数字 + 两个消耗小格 ----------
         card = ctk.CTkFrame(view, fg_color=SURFACE, corner_radius=10)

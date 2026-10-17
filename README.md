@@ -1,6 +1,6 @@
 # Claude Code 安装助手
 
-一个 Windows 桌面小程序：把「装 Claude Code」这件折腾半天的事，变成跟 AI 说一句话。
+一个 Windows / macOS / Linux 桌面小程序：把「装 Claude Code」这件折腾半天的事，变成跟 AI 说一句话。
 
 窗口左边一条导航栏，右边两个页面：**💬 对话** 和 **📊 用量信息**。对话页背后是一个能调工具的
 Agent —— 它会自己检测环境、装 Node、装 Claude Code、写好配置、问清楚工作目录、在桌面放个图标，
@@ -121,14 +121,55 @@ python -m PyInstaller agent.spec --noconfirm --clean
 Actions artifact。macOS 两个包都**没有签名**：首次打开要右键 →「打开」，
 或者终端跑 `xattr -dr com.apple.quarantine /Applications/ClaudeCodeAssistant.app`。
 
+## 自动更新
+
+程序**不弹窗、不打断**：后台静默检查 → 静默下载 → 下次启动时换上新版本。
+用量页底部有一行 `v1.0.0`，就是当前跑着的版本。
+
+**客户端怎么工作**（[`updater.py`](updater.py)）
+
+1. 启动 25 秒后起一个 daemon 线程，之后每 6 小时拉一次
+   `https://aikaui.com/downloads/latest.json`（网络失败就退回上次缓存的清单）。
+2. 只接受 `schema_version: 1`、`https` 地址、64 位十六进制 SHA-256、
+   `size <= 300 MB`，而且版本必须比当前新、当前版本不低于 `min_version`。
+3. 流式下载到 `~/.claude-agent/updates/staged/<版本>/`，边写边算哈希；
+   对不上就删掉 `.part`，绝不替换。
+4. 下好只写一行日志「新版本 vX 已下载，下次启动自动更新。」，然后**什么都不做**。
+5. 下一次启动、创建 Tk 窗口**之前**（`main.py` 最前面）：
+   拿文件锁 → 把旧文件改名为 `.old-<pid>` → 放入新文件 → 失败就换回去 →
+   用原来的参数重新拉起自己 → `sys.exit(0)`。新进程打一行「已自动更新到 vX」。
+6. 同一个版本连续 3 次替换失败（只读目录、杀毒软件锁文件）就写 `failed.json`、
+   删掉暂存，不再拿它骚扰用户。更新失败永远只是"这次没更新成"，不会让程序起不来。
+
+**状态文件**都在 `~/.claude-agent/updates/`：`manifest.json`（清单缓存）、`pending.json`
+（待安装）、`applied.json`（更新成功的提示，只提示一次）、`failed.json`、`update.log`。
+
+**macOS**：从"下载"目录直接打开的 app 会被 App Translocation 放到只读的随机路径，
+替换会失败（只记日志）。把 app 拖进 `/Applications` 再运行即可正常更新。
+
+**发布新版本**
+
+1. 改 `config.py` 里的 `APP_VERSION`，提交。
+2. 打 tag（必须与 `APP_VERSION` 一致，CI 会校验）：`git tag v1.0.1 && git push origin v1.0.1`。
+3. CI 构建四个平台产物，`publish` job 调 [`build_tools/deploy_downloads.sh`](build_tools/deploy_downloads.sh)
+   把包传到 `releases/<版本>/`，最后以"先写 `.tmp` 再 `mv`"的方式换掉 `latest.json` ——
+   客户端永远读不到半个清单。
+4. 手工发布也行：四个产物放一个目录，用
+   [`build_tools/make_manifest.py`](build_tools/make_manifest.py) 生成 `latest.json`，
+   再跑部署脚本。
+
+> **老用户注意**：`v1.0.0` 是第一个带 updater 的版本。更早安装的版本里面没有更新代码，
+> 必须**手动**装一次 `v1.0.0`，之后才能自动更新。
+
 ## 目录结构
 
 ```
 agent_demo/
 │
-├── main.py                       110   程序入口：建窗口 → 起线程 → 欢迎信息 → 事件循环
+├── main.py                       134   程序入口：先换新版本 → 建窗口 → 起线程 → 事件循环
 │
-├── config.py                      80   唯一的常量源：版本、服务器地址、凭证、路径、配色、MAX_STEPS
+├── config.py                      98   唯一的常量源：版本、服务器地址、凭证、路径、配色、更新参数、MAX_STEPS
+├── updater.py                    660   自动更新：清单校验 / 静默下载 / 下次启动替换自己（不 import tkinter）
 ├── deps.py                        19   可选依赖探测：Pillow 在不在
 ├── helpers.py                    217   数字金额格式化 + 用量取数（按模型 / 时间序列）+ 刻度 + 文字宽度估算 + 选项清洗
 ├── images.py                     138   窗口图标（打包资源优先，缺了现画）+ 付款二维码下载
@@ -164,10 +205,19 @@ agent_demo/
 │   └── login.py                  230   LoginMixin：换设备登录弹窗（账户码）
 │
 ├── build_tools/
-│   └── make_version_info.py       80   生成 Windows 文件版本信息（build/version_info.txt）
+│   ├── make_version_info.py       80   生成 Windows 文件版本信息（build/version_info.txt）
+│   ├── make_manifest.py          113   四个产物 → latest.json（校验版本、算 sha256 / size）
+│   └── deploy_downloads.sh            上传产物与清单到 aikaui.com（先传包，最后原子换清单）
+├── tests/                            离线单元测试（49 个，stdlib unittest）
+│   ├── test_version.py                版本解析 / 比较 / 清单校验
+│   ├── test_download.py               本地假服务器：下载、哈希、404、缓存回退
+│   ├── test_apply.py                  备份、回滚、失败上限、锁、更新提示
+│   ├── test_platform_support.py       三平台抽象层
+│   ├── test_prompts.py                提示词按平台切换
+│   └── test_imports.py                工具层导入不依赖 Windows
 ├── packaging/
 │   └── claude-code-assistant.desktop   Linux 启动器（tar.gz 里一起发）
-├── .github/workflows/build.yml        四平台 CI 构建
+├── .github/workflows/build.yml        四平台 CI 构建 + tag 时发布
 │
 ├── agent.spec                          PyInstaller 打包配置（三平台共用）
 ├── requirements.txt                    第三方依赖（按平台带 marker）

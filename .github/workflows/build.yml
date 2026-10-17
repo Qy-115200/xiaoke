@@ -102,3 +102,44 @@ jobs:
           path: ${{ matrix.artifact }}
           if-no-files-found: error
           retention-days: 30
+
+  # ------------------------------------------------------------------
+  # 发布：只在打 tag 时跑，把四个产物 + latest.json 传到 aikaui.com。
+  # 需要在仓库 Settings 里配置：
+  #   secrets: DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY
+  #   environments: production（建议配 required reviewer，部署前人工点一下）
+  # ------------------------------------------------------------------
+  publish:
+    name: publish
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Show artifacts
+        run: ls -lR release
+
+      - name: Configure SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Publish
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: $HOME/.ssh/deploy_key
+        run: bash build_tools/deploy_downloads.sh "${GITHUB_REF_NAME#v}" release
