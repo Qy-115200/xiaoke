@@ -440,6 +440,10 @@ class RechargeMixin:
                 dlg.destroy()
             except Exception:
                 pass
+        # 「只办充值」的启动方式（aikaui://recharge）：关掉弹窗就没别的事可做了，
+        # 直接退出，别留下一个空的主窗口或托盘图标。
+        if getattr(self, "_quit_on_close", False):
+            self.quit_app()
 
     def _start_recharge(self, amount):
         """点了某个金额（或"去支付"）→ 后台创单。

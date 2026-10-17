@@ -68,6 +68,8 @@ class WindowMixin:
         self._pay_info = None                    # 当前充值订单信息
         self._qr_image = None                    # 二维码图片对象（得留着，不然会被回收）
         self._qr_box = None                      # 显示二维码的控件
+        self._quit_on_close = False              # 充值弹窗关了就直接退出（aikaui://recharge 用）
+        self._recharge_only = False              # 这次启动只办充值，不起托盘/Agent
 
         root.title("Claude Code 助手")
         root.geometry("960x780")
@@ -376,6 +378,13 @@ class WindowMixin:
         """
         payload = payload or {}
         self._usage_payload = payload
+
+        # ★ 只办充值的启动方式（点终端里服务器给的 aikaui://recharge 链接进来）：
+        #   主窗是藏着的，别在这时候弹托盘告警 / 系统通知 / 底部询问条——
+        #   用户已经在充值窗里了，再弹一遍就是噪音。
+        if self._recharge_only:
+            return
+
         bal = payload.get("balance") or {}
 
         # ★ 余额那块被服务器限流（429）时，**什么都别动**：
