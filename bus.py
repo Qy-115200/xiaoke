@@ -34,6 +34,10 @@ def poll_queue(gui):
                 gui.write(data)
             elif kind == "balance":
                 gui.update_balance(data)
+            elif kind == "install_done":
+                # 安装流程完整走完（… → launch_claude 成功）→ 给用户几秒看完
+                # 收尾说明，然后助手自己退出，别一直占着托盘。
+                gui.schedule_auto_quit()
             elif kind == "busy":
                 if data:                 # 忙碌
                     gui.start_btn.configure(state=tk.DISABLED, text="处理中...")

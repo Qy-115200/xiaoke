@@ -52,6 +52,10 @@ from ui.fonts import (
     font,
 )
 
+# 安装流程完整走完后，助手留多少秒让用户看收尾说明，然后自动退出。
+# 改这里就行——别在 schedule_auto_quit 里写死数字。
+AUTO_QUIT_SECONDS = 10
+
 
 class WindowMixin:
     def __init__(self, root):
@@ -70,6 +74,7 @@ class WindowMixin:
         self._qr_box = None                      # 显示二维码的控件
         self._quit_on_close = False              # 充值弹窗关了就直接退出（aikaui://recharge 用）
         self._recharge_only = False              # 这次启动只办充值，不起托盘/Agent
+        self._auto_quit_id = None                # 安装完成后"几秒后自动退出"的 after id
 
         root.title("Claude Code 助手")
         root.geometry("960x780")
@@ -439,8 +444,31 @@ class WindowMixin:
         else:
             self.quit_app()
 
+    def schedule_auto_quit(self, seconds=None):
+        """安装流程走完 → 留一点时间给用户看收尾说明，然后助手自己退出。
+
+        为什么不是立刻退：最后那条 Agent 消息里写了工作目录和 VSCode 的用法，
+        秒退用户根本来不及看。为什么只在这个时机退：用户只是让助手"再打开一次
+        Claude Code"时也调 launch_claude，那种情况不该把助手关掉——
+        所以触发条件是**这一轮完整走过安装流程**，见 agent_core.run_one_task。"""
+        if getattr(self, "_recharge_only", False):
+            return                               # 只办充值的启动方式没有安装流程
+        if self._auto_quit_id is not None:
+            return                               # 已经排过了，别重复排
+        if seconds is None:
+            seconds = AUTO_QUIT_SECONDS
+        self.write(f"[系统] 安装完成，{seconds} 秒后自动退出。"
+                   " Claude Code 已经在终端里打开了，以后从桌面图标启动就行。")
+        self._auto_quit_id = self.root.after(int(seconds * 1000), self.quit_app)
+
     def quit_app(self):
         """真的退出：先停托盘，再关窗口"""
+        if self._auto_quit_id is not None:
+            try:
+                self.root.after_cancel(self._auto_quit_id)
+            except Exception:
+                pass
+            self._auto_quit_id = None
         if self.tray is not None:
             self.tray.stop()
         try:

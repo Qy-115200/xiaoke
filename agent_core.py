@@ -47,8 +47,15 @@ def _sanitize_messages(messages):
             cleaned.append(m)
     return cleaned
 def run_one_task(messages, task_text):
-    """跑一轮任务：从用户输入开始，直到模型不再调工具为止"""
+    """跑一轮任务：从用户输入开始，直到模型不再调工具为止
+
+    ★ 这一轮如果**完整走完了安装流程**（register_device → … → launch_claude 成功），
+      最后会给界面发一条 ("install_done", …)：让助手在用户看完收尾说明后自动退出。
+      单独再调一次 launch_claude（用户只是说"再帮我打开一次"）不算安装流程，不退出。"""
     messages.append({"role": "user", "content": task_text})   # 把用户输入加入历史
+
+    installing = False      # 这一轮调过 register_device（安装流程的起点）
+    launched = False        # launch_claude 真的把 Claude Code 打开了
 
     for _step in range(MAX_STEPS):      # 最多循环 25 次
         messages = _sanitize_messages(messages)   # 每次调用前先清理（防被裁剪破坏结构）
@@ -108,6 +115,10 @@ def run_one_task(messages, task_text):
 
         if not msg.tool_calls:           # 模型没调工具 = 任务完成
             msg_queue.put(("log", f"\nAgent: {msg.content}"))
+            # ★ 安装流程真的走完了 → 让界面过几秒自动退出（别一直占着托盘）。
+            #   放在最后一条 Agent 消息之后发，用户才有时间看完收尾说明。
+            if installing and launched:
+                msg_queue.put(("install_done", {}))
             return True
 
         for tc in msg.tool_calls:        # 遍历每个工具调用
@@ -127,6 +138,12 @@ def run_one_task(messages, task_text):
                 result = f"错误: 没有这个工具 {name}"
             except Exception as e:
                 result = f"错误: {e}"             # 工具执行出错，把错误当结果返回
+
+            # 记录安装流程走到哪了（只用于收尾时判断要不要自动退出）
+            if name == "register_device":
+                installing = True
+            elif name == "launch_claude" and str(result).startswith("已打开新终端"):
+                launched = True
 
             if name != "ask_user":
                 msg_queue.put(("log", f"[结果] {str(result)[:400]}"))
