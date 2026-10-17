@@ -16,6 +16,14 @@ sys.path.insert(0, str(ROOT))
 
 from config import APP_NAME, APP_VERSION  # noqa: E402
 
+# GitHub Actions 的 Windows runner 控制台默认是 cp1252，直接 print 中文会
+# UnicodeEncodeError（CI 上就是这么挂的）。这里显式改成 UTF-8。
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 COMPANY = "aikaui"
 
 

@@ -11,6 +11,12 @@ on:
 permissions:
   contents: read
 
+# runner 默认编码因平台而异，统一成 UTF-8：日志里的中文和 manifest 的备注
+# 才不会在 Windows 上炸 UnicodeEncodeError。
+env:
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: "1"
+
 jobs:
   build:
     name: build-${{ matrix.key }}
