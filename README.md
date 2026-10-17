@@ -129,7 +129,7 @@ Actions artifact。macOS 两个包都**没有签名**：首次打开要右键 �
 **客户端怎么工作**（[`updater.py`](updater.py)）
 
 1. 启动 25 秒后起一个 daemon 线程，之后每 6 小时拉一次
-   `https://aikaui.com/downloads/latest.json`（网络失败就退回上次缓存的清单）。
+   `https://aikaui.com/latest.json`（网络失败就退回上次缓存的清单）。
 2. 只接受 `schema_version: 1`、`https` 地址、64 位十六进制 SHA-256、
    `size <= 300 MB`，而且版本必须比当前新、当前版本不低于 `min_version`。
 3. 流式下载到 `~/.claude-agent/updates/staged/<版本>/`，边写边算哈希；
@@ -152,7 +152,7 @@ Actions artifact。macOS 两个包都**没有签名**：首次打开要右键 �
 1. 改 `config.py` 里的 `APP_VERSION`，提交。
 2. 打 tag（必须与 `APP_VERSION` 一致，CI 会校验）：`git tag v1.0.1 && git push origin v1.0.1`。
 3. CI 构建四个平台产物，`publish` job 调 [`build_tools/deploy_downloads.sh`](build_tools/deploy_downloads.sh)
-   把包传到 `releases/<版本>/`，最后以"先写 `.tmp` 再 `mv`"的方式换掉 `latest.json` ——
+   把包传到 `https://aikaui.com/releases/<版本>/`，最后以"先写 `.tmp` 再 `mv`"的方式换掉 `latest.json` ——
    客户端永远读不到半个清单。
 4. 手工发布也行：四个产物放一个目录，用
    [`build_tools/make_manifest.py`](build_tools/make_manifest.py) 生成 `latest.json`，

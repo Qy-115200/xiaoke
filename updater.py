@@ -14,7 +14,7 @@
 5. **失败有上限**。同一个版本连续替换失败 3 次就写 failed.json、删掉暂存，
    不再拿它骚扰用户（可能是只读目录或杀毒软件锁着文件）。
 
-清单形状（服务端 https://aikaui.com/downloads/latest.json）：
+清单形状（服务端 https://aikaui.com/latest.json）：
 
     {"schema_version": 1,
      "latest": {

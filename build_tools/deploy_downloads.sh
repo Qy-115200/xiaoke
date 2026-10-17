@@ -16,9 +16,9 @@ VERSION="${1:?用法: deploy_downloads.sh <版本> <产物目录>}"
 SRC="${2:?用法: deploy_downloads.sh <版本> <产物目录>}"
 HOST="${DEPLOY_HOST:?需要 DEPLOY_HOST}"
 USER_NAME="${DEPLOY_USER:-root}"
-REMOTE_BASE="${REMOTE_BASE:-/var/www/aikaui/downloads}"
+REMOTE_BASE="${REMOTE_BASE:-/var/www/aikaui}"
 TARGET="$REMOTE_BASE/releases/$VERSION"
-BASE_URL="${BASE_URL:-https://aikaui.com/downloads/releases/$VERSION}"
+BASE_URL="${BASE_URL:-https://aikaui.com/releases/$VERSION}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -69,6 +69,6 @@ scp -q "${KEY_OPTS[@]}" "$SRC/latest.json" "$USER_NAME@$HOST:$REMOTE_BASE/latest
 
 echo "▶ 校验"
 curl -fsSI "$BASE_URL/$(basename "${FILES[0]#*:}")" | head -n 1
-curl -fsS "https://aikaui.com/downloads/latest.json" | head -c 300
+curl -fsS "https://aikaui.com/latest.json" | head -c 300
 echo
 echo "✔ 完成：$BASE_URL"

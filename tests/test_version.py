@@ -13,7 +13,7 @@ import updater  # noqa: E402
 SHA = "a" * 64
 GOOD = {
     "version": "1.0.1",
-    "url": "https://aikaui.com/downloads/releases/1.0.1/app.exe",
+    "url": "https://aikaui.com/releases/1.0.1/app.exe",
     "sha256": SHA,
     "size": 123,
     "min_version": "1.0.0",

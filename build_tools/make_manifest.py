@@ -5,7 +5,7 @@
 
     python build_tools/make_manifest.py \
         --version 1.0.1 \
-        --base-url https://aikaui.com/downloads/releases/1.0.1 \
+        --base-url https://aikaui.com/releases/1.0.1 \
         --file windows-x64=release/ClaudeCodeAssistant-win-x64.exe \
         --file macos-arm64=release/ClaudeCodeAssistant-macos-arm64.zip \
         --file macos-x64=release/ClaudeCodeAssistant-macos-x64.zip \

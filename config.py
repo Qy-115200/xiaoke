@@ -45,7 +45,7 @@ UPDATES_DIR = HOME / ".claude-agent" / "updates"      # 自动更新：下载暂
 # 清单放在自家服务器上（nginx 静态文件），下载完先暂存，下次启动时替换自己。
 # 环境变量 AGENT_UPDATE_MANIFEST_URL 可以临时指向测试清单（本机验证用）。
 UPDATE_MANIFEST_URL = os.environ.get(
-    "AGENT_UPDATE_MANIFEST_URL", f"{SERVER_URL}/downloads/latest.json")
+    "AGENT_UPDATE_MANIFEST_URL", f"{SERVER_URL}/latest.json")
 UPDATE_INITIAL_DELAY = 25                 # 启动后多久第一次检查（秒）——别跟启动抢网络
 UPDATE_CHECK_INTERVAL = 6 * 3600          # 之后每 6 小时看一次
 UPDATE_MAX_SIZE = 300 * 1024 * 1024       # 超过 300MB 的"更新包"一律不信
