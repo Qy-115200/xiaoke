@@ -16,7 +16,7 @@ import time
 
 from bus import msg_queue, user_input_queue
 from config import MAX_STEPS
-from llm import get_client
+from llm import get_client, insufficient_balance
 from prompts import SYSTEM_PROMPT
 from server.api import query_balance, query_usage
 from server.identity import ensure_identity
@@ -59,10 +59,17 @@ def run_one_task(messages, task_text):
                 model=model, messages=messages, tools=tools
             )
         except Exception as e:
-            # ★ 402 = 服务器说余额不足（响应里带充值链接和账户码，直接给用户看）
-            if getattr(e, "status_code", None) == 402:
-                msg_queue.put(("log", f"\n[系统] {e}"))
-                msg_queue.put(("recharge", {"reason": "余额不足"}))   # 让主线程弹充值窗
+            # 账户没钱了：New API 回的是 403 insufficient_user_quota（老约定是 402），
+            # 两种都认。这时候不能只打一句"调用模型失败"——用户根本看不出是余额的事，
+            # 得把话说明白，并让主线程把底部那条"是否立即充值"冒出来。
+            reason = insufficient_balance(e)
+            if reason:
+                msg_queue.put(("log", (
+                    f"\n[系统] {reason}，模型暂时用不了了。\n"
+                    f"       点下面「立即充值」（或左边「用量信息」页右上角），扫码付完款，"
+                    f"把刚才那句话再发一次就行。"
+                )))
+                msg_queue.put(("recharge", {"reason": reason}))
             else:
                 msg_queue.put(("log", f"\n[系统] 调用模型失败: {e}"))
             return False
