@@ -1,0 +1,134 @@
+# -*- coding: utf-8 -*-
+"""Claude Code 安装助手 —— 程序入口。
+
+这里只做四件事：建窗口、起后台线程、打欢迎信息、进事件循环。
+具体实现都在各自的模块里：
+  config / deps / helpers / images / notify / bus / llm  基础件
+  platform_support/  三个平台的差异（协议、快捷方式、终端、通知）
+  server/   设备身份、HTTP 接口、工具函数与说明书
+  ui/       窗口、选项面板、充值弹窗
+  agent_core.py  Agent 主循环
+
+★ 三个平台都不做托盘：关窗口 = 退出程序。
+"""
+
+import sys
+import threading
+
+import customtkinter as ctk
+
+import platform_support
+import updater
+from agent_core import agent_worker, balance_worker, refresh_balance
+from bus import msg_queue, poll_queue
+from server.tools_fixed import parse_protocol_arg, parse_protocol_url, register_protocol
+from server.ui_bridge import set_ui
+from ui.gui import GUI
+
+
+def main():
+    """程序入口"""
+    # ---------- 自动更新：把上次下载好的新版本换上去 ----------
+    # 必须在创建 Tk 窗口**之前**、而且必须在最前面：替换成功后 _relaunch 会
+    # 用原参数重新拉起自己并 sys.exit(0)；失败就继续用旧版本跑，绝不阻塞启动。
+    try:
+        updater.apply_pending_update(sys.argv)
+        updater.cleanup_stale_files()
+    except Exception:
+        pass
+
+    ctk.set_appearance_mode("dark")      # ★ 深色主题
+    ctk.set_default_color_theme("blue")
+
+    # ---------- 解析启动参数 ----------
+    proto = parse_protocol_arg()         # aikaui://recharge?user_id=7
+    auto_recharge = ("--recharge" in sys.argv) or (proto.get("action") == "recharge")
+
+    # ---------- 注册 aikaui:// 协议（尽力而为，失败不影响启动）----------
+    # 支付页面付完款会打开 aikaui://xxx 链接，靠这个协议把程序唤起来；
+    # 余额用完时服务器在 402 报错里给的「点这里充值」链接也走它。
+    # macOS 不用运行时注册（协议写在 Info.plist），但需要装一个 Apple Event 处理器，
+    # 这样程序已经开着时点链接也能收得到。
+    threading.Thread(target=register_protocol, daemon=True).start()
+
+    root = ctk.CTk()                     # 创建主窗口
+    gui = GUI(root)                      # 创建 GUI 对象
+    set_ui(gui)                          # ★ 把 gui 注入给工具层（server/ui_bridge.py）
+
+    # ---------- macOS：运行中收到 aikaui:// 链接 ----------
+    # 回调一定在主线程（Apple Event 只在主线程分发），所以可以直接操作界面。
+    def _on_url(url):
+        proto = parse_protocol_url(url)
+        if proto.get("action") == "recharge":
+            gui.show_view("usage")
+            gui.show_recharge_dialog(
+                title="充值", body="请选择充值金额，付款后余额会自动到账。", force=True,
+            )
+
+    platform_support.install_url_handler(_on_url)   # 其它平台返回 False，什么都不做
+
+    # 上一次启动完成了自动更新的话，在这里说一声（只提示一次）
+    try:
+        notice = updater.consume_applied_notice()
+        if notice:
+            gui.write(f"[系统] {notice}")
+    except Exception:
+        pass
+
+    # ---------- 只办充值的启动方式 ----------
+    # 用户在终端里点服务器给的 aikaui://recharge 链接 → 这里被唤起。
+    # 不起 Agent 线程，关掉窗口就退出。
+    #
+    # 展示顺序是刻意的：**先用量页、再充值窗**。
+    # 余额不足的人第一反应是"钱花在哪了"，所以主窗口直接切到用量页，
+    # 后台拉一次余额 + 用量；数据一回来（最多等 3 秒）再自动弹充值窗。
+    # 充值窗会停在主窗右边，不把刚看到的图表整个盖住。
+    # ★ 别在这里起 agent_worker —— 用户装完就想让助手消失，
+    #   不能再留一个常驻进程。
+    if auto_recharge:
+        gui._recharge_only = True
+        gui.show_view("usage")
+        threading.Thread(target=refresh_balance, daemon=True).start()
+
+        def _open_recharge_when_ready(attempt=0):
+            """等第一次余额/用量回来再弹充值窗；网络差也不卡住流程。"""
+            ready = bool(gui._usage_payload.get("balance"))
+            if ready or attempt >= 30:      # 3 秒兜底
+                gui.show_recharge_dialog(
+                    title="充值", body="请选择充值金额，付款后余额会自动到账。", force=True,
+                )
+            else:
+                root.after(100, lambda: _open_recharge_when_ready(attempt + 1))
+
+        root.after(300, _open_recharge_when_ready)   # 先让窗口画出来
+        root.after(100, lambda: poll_queue(gui))     # 充值结果也要靠队列回到主线程
+        root.mainloop()
+        return
+
+    # ---------- 欢迎信息 ----------
+    gui.write("=" * 55)
+    gui.write("  Claude Code 助手")
+    gui.write("=" * 55)
+    gui.write("")
+    gui.write("我是你的 AI 管家，随时可以问我任何问题。")
+    gui.write("")
+    gui.write("• 想装 Claude Code？点下面蓝色按钮，或直接说\"帮我装 Claude Code\"")
+    gui.write("• 左边有两个页面：💬 对话（在这儿聊天）、📊 用量信息（余额 / token 用量 / 充值）")
+    gui.write("• 关掉窗口就是退出程序")
+
+    # ---------- 启动后台线程 ----------
+    threading.Thread(target=agent_worker, daemon=True).start()     # Agent 主循环
+    threading.Thread(target=balance_worker, daemon=True).start()   # 余额定时刷新
+
+    # ---------- 后台检查更新（静默下载，下次启动生效）----------
+    # 只办充值的启动方式不查——那种场景用户只想赶紧付钱，别抢网络。
+    updater.start_background_check(
+        on_ready=lambda text: msg_queue.put(("log", f"[系统] {text}")),
+    )
+
+    root.after(100, lambda: poll_queue(gui))   # 100ms 后启动第一次轮询
+    root.mainloop()                      # ★ 进入 GUI 事件循环（阻塞在这里）
+
+
+if __name__ == "__main__":
+    main()

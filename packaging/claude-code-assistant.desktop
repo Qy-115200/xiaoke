@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Claude Code 助手
+Name[en]=Claude Code Assistant
+Comment=安装与配置 Claude Code
+Comment[en]=Install and configure Claude Code
+Exec=ClaudeCodeAssistant %u
+Icon=claude-code-assistant
+Terminal=false
+Categories=Development;Utility;
+MimeType=x-scheme-handler/aikaui;
+StartupWMClass=ClaudeCodeAssistant

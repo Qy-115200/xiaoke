@@ -75,14 +75,20 @@ python collab/collab.py status    # 谁在做什么、有没有人在等我回�
 
 ## 六、这个仓库本身
 
-`Claude Code 安装助手`：Windows 桌面应用（Python 3.12 + customtkinter，深色主题），
-PyInstaller 打成单文件 exe。目录结构、架构、线程模型、已知限制**都写在
-[README.md](README.md) 里**——那是主文档，别再另起一份。
+`Claude Code 安装助手`：桌面应用（Python 3.12 + customtkinter，深色主题），
+Windows / macOS / Linux 三平台功能一致（**三平台都没有托盘，关窗即退出**）。
+PyInstaller 打包：Windows 单文件 exe、macOS `.app`、Linux 单文件。
+平台差异全在 `platform_support/`，其它模块不直接 import 平台 API。
+自动更新在 `updater.py`：查 `https://aikaui.com/latest.json` → 后台静默下载 →
+**下次启动**替换自己。它不 import tkinter，替换失败绝不阻塞启动；发布流程见 README「自动更新」。
+目录结构、架构、线程模型、已知限制**都写在 [README.md](README.md) 里**——那是主文档，别再另起一份。
 
 要跑的验证：
-- 界面 / 逻辑：`python main.py`（Windows）
+- 界面 / 逻辑：`python main.py`（三平台）
+- 离线单元测试：`python -m unittest discover -s tests`（不联网、不需要 GUI）
 - 新对话里文件和线程的出场顺序见 [文件执行或调用顺序.md](文件执行或调用顺序.md)
-- 打包：`python -m PyInstaller "ClaudeCode安装助手.spec"`，产物在 `dist/`
+- 打包：`python -m PyInstaller agent.spec --noconfirm --clean`，产物在 `dist/`
+  （Windows 先跑 `python build_tools/make_version_info.py`；CI 见 `.github/workflows/build.yml`）
 - 协作链路自测：`python collab/collab.py digest`（应该几行内返回，且退出码 0）
 
 改协作接口时守一条：**`collab.py` 两边跑的是同一个文件**，改完要保证两台机器上的行为一致，
