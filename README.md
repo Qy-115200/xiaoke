@@ -152,10 +152,8 @@ Actions artifact。macOS 两个包都**没有签名**：首次打开要右键 �
 1. 改 `config.py` 里的 `APP_VERSION`，提交。
 2. 打 tag（必须与 `APP_VERSION` 一致，CI 会校验）：`git tag v1.0.1 && git push origin v1.0.1`。
 3. CI 构建四个平台产物，`publish` job 调 [`build_tools/deploy_downloads.sh`](build_tools/deploy_downloads.sh)
-   把包传到服务器的 `releases/<版本>/`，清单里的地址写 `https://dl.aikaui.com/releases/<版本>/`；
-   最后以"先写 `.tmp` 再 `mv`"的方式换掉 `latest.json` —— 客户端永远读不到半个清单。
-   `dl.aikaui.com` 是腾讯云 CDN，回源到 `aikaui.com`；新版本第一次被请求时边回源边缓存，
-   也可以在执行前用控制台/API 预热这四个地址。
+   把包传到 `https://aikaui.com/releases/<版本>/`，最后以"先写 `.tmp` 再 `mv`"的方式换掉 `latest.json` ——
+   客户端永远读不到半个清单。
 4. 手工发布也行：四个产物放一个目录，用
    [`build_tools/make_manifest.py`](build_tools/make_manifest.py) 生成 `latest.json`，
    再跑部署脚本。
@@ -213,7 +211,7 @@ agent_demo/
 ├── build_tools/
 │   ├── make_version_info.py       80   生成 Windows 文件版本信息（build/version_info.txt）
 │   ├── make_manifest.py          113   四个产物 → latest.json（校验版本、算 sha256 / size）
-│   └── deploy_downloads.sh            上传产物与清单（包经 dl.aikaui.com CDN 分发；先传包，最后原子换清单）
+│   └── deploy_downloads.sh            上传产物与清单到 aikaui.com（先传包，最后原子换清单）
 ├── tests/                            离线单元测试（49 个，stdlib unittest）
 │   ├── test_version.py                版本解析 / 比较 / 清单校验
 │   ├── test_download.py               本地假服务器：下载、哈希、404、缓存回退

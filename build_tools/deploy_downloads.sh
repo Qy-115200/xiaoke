@@ -18,9 +18,7 @@ HOST="${DEPLOY_HOST:?需要 DEPLOY_HOST}"
 USER_NAME="${DEPLOY_USER:-root}"
 REMOTE_BASE="${REMOTE_BASE:-/var/www/aikaui}"
 TARGET="$REMOTE_BASE/releases/$VERSION"
-# 产物走 CDN（dl.aikaui.com 回源到 aikaui.com），清单仍由 aikaui.com 提供。
-# 需要临时改回直连时：BASE_URL=https://aikaui.com/releases/$VERSION ./deploy_downloads.sh ...
-BASE_URL="${BASE_URL:-https://dl.aikaui.com/releases/$VERSION}"
+BASE_URL="${BASE_URL:-https://aikaui.com/releases/$VERSION}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
