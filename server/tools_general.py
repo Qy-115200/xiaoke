@@ -15,6 +15,7 @@
 
 import locale
 import os
+import signal
 import subprocess
 from pathlib import Path
 
@@ -53,6 +54,51 @@ def _smart_decode(b: bytes) -> str:
     return b.decode(local, errors="replace")   # 兜底，解不出的变 ?
 
 
+def _kill_tree(proc) -> None:
+    """把整棵进程树杀掉。
+
+    只 kill 直接子进程是不够的：Windows 上是 cmd.exe 起了 curl，curl 还握着管道
+    的写端，后面 communicate() 要等到 EOF 才返回 —— 于是"超时了但命令照样不返回"。
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=15)
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _run_capture(argv, *, shell: bool, timeout: int, env: dict):
+    """跑命令并抓输出，返回 (stdout, stderr, 是否超时, 退出码)。
+
+    和 subprocess.run(timeout=) 的区别：超时后连孙进程一起杀，第二次
+    communicate 也带超时，保证这条工具调用**一定会返回**，不会挂死。
+    """
+    kwargs = dict(shell=shell, env=env,
+                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True      # 独立会话，才能整组杀
+
+    proc = subprocess.Popen(argv, **kwargs)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return out or b"", err or b"", False, proc.returncode
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            out, err = proc.communicate(timeout=10)   # 实在杀不干净也不再等
+        except subprocess.TimeoutExpired:
+            out, err = b"", b""
+        return out or b"", err or b"", True, -1
+
+
 def bash(cmd: str, timeout: int = 600, show_progress: bool = False) -> str:
     """执行 shell 命令，返回输出。
     参数：
@@ -86,21 +132,13 @@ def bash(cmd: str, timeout: int = 600, show_progress: bool = False) -> str:
         u.ui_progress_start(f"正在执行：{short}")
 
     try:
-        # ★ 关键：不加 text=True，拿 bytes（原始字节）
-        # 因为 Windows 的 cmd 输出编码不确定，拿 bytes 自己解码更稳
-        r = subprocess.run(
-            argv,
-            shell=use_shell,             # 通过系统 shell 执行（支持管道、&& 等）
-            capture_output=True,         # 捕获 stdout 和 stderr
-            timeout=timeout,
-            env=env,                     # 传入补了 PATH 的环境变量
-        )
-        stdout = _smart_decode(r.stdout or b"")   # 手动解码
-        stderr = _smart_decode(r.stderr or b"")
-        out = (stdout + stderr).strip()           # 合并 + 去首尾空白
-        return out[:3000] or f"(完成，退出码 {r.returncode})"   # 截断到 3000 字
-    except subprocess.TimeoutExpired:
-        return f"[超时] 命令超过 {timeout} 秒"
+        stdout, stderr, timed_out, code = _run_capture(
+            argv, shell=use_shell, timeout=timeout, env=env)
+        if timed_out:
+            return (f"[超时] 命令超过 {timeout} 秒，已终止。"
+                    "如果是网络下载：加上 --connect-timeout / --max-time，或者换国内镜像再试。")
+        out = (_smart_decode(stdout) + _smart_decode(stderr)).strip()   # 合并 + 去首尾空白
+        return out[:3000] or f"(完成，退出码 {code})"   # 截断到 3000 字
     except Exception as e:
         return f"[失败] {e}"
     finally:                             # ★ finally：无论成功失败都执行

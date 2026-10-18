@@ -14,10 +14,21 @@ if _IS_WIN:
     _PLATFORM_GUIDE = """- 当前平台：Windows
 - 桌面目录：%USERPROFILE%\\Desktop（真实路径可能被 OneDrive 重定向，需要时用 bash 取出来）
 - 路径用完整路径，例如 C:\\Users\\名字\\Desktop\\claude-projects"""
-    _NODE_INSTALL = (
-        "`winget install OpenJS.NodeJS.LTS --accept-package-agreements "
-        "--accept-source-agreements`（没有 winget 就引导用户去 https://nodejs.org 下载 LTS 安装包）"
-    )
+    # 直连 nodejs.org 在网吧 / 公司网络里经常卡死；curl 不带超时就一直挂着，
+    # 用户只看到进度条不动。所以这里强制走国内镜像，并且每条命令都带超时。
+    _NODE_INSTALL = """按顺序试，**每条命令都必须带超时参数**：
+
+  ① 有 winget 就先用它（国内能通）：
+     bash("winget install OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements", timeout=900, show_progress=True)
+
+  ② winget 没有或失败 → 走国内镜像（**不要直连 nodejs.org**）：
+     先看镜像里最新是哪个版本：
+     bash('curl -sL --connect-timeout 15 --max-time 30 https://registry.npmmirror.com/-/binary/node/latest-v24.x/', timeout=60)
+     从返回的 JSON 里挑出**版本号最大**的 node-vX.Y.Z-x64.msi 文件名，然后下载并安装：
+     bash('curl -L --connect-timeout 20 --max-time 300 -o "%TEMP%\\node.msi" "https://npmmirror.com/mirrors/node/latest-v24.x/<上一步挑出的文件名>"', timeout=360, show_progress=True)
+     bash('msiexec /i "%TEMP%\\node.msi" /qn', timeout=600, show_progress=True)
+
+  ③ 两条都不通，才把 https://nodejs.org 的 LTS 安装包链接发给用户，让他在浏览器里自己下。"""
     _CMD_NOT_FOUND = '"不是内部或外部命令" / "not recognized" / "not found"'
     _NODE_FULLPATH = '`bash("C:\\\\Program Files\\\\nodejs\\\\node.exe -v")`'
     _DESKTOP_DIR = "%USERPROFILE%\\\\Desktop\\\\claude-projects"
@@ -144,6 +155,21 @@ register_device → bypass_region_check → set_model_config → create_shortcut
 - `bash("node -v")`
 - `bash("claude --version")`
 - 查询、探测类命令
+
+### 网络命令必须自带超时（硬规矩）
+
+联网命令不写"最多等多久"，网络一卡就会挂到工具超时为止，用户只看到一个不动的进度条。
+所以：
+
+- `curl` 必须带 `--connect-timeout 15 --max-time <秒>`
+- `wget` 必须带 `--timeout=15 --tries=2`
+- `npm` 必须带 `--registry=https://registry.npmmirror.com`
+- **不要直连境外站点**：Node 走 `registry.npmmirror.com`，npm 包走 npmmirror。
+
+传给 bash 的 `timeout` 比命令自己的 `--max-time` **大一点**（例如 `--max-time 300` 配 `timeout=360`），
+这样先由 curl 自己超时，能拿到明确的错误信息，而不是被工具直接掐断。
+
+如果一条命令超时了：**换镜像或换条路，不要原样重试三次**。重试前先跟用户说一句卡在哪。
 
 ═══════════════════════════════════════
 三、关于 ask_user 的用法（重要）
