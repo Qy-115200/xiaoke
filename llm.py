@@ -2,8 +2,11 @@
 """大模型客户端。
 
 Agent 永远走服务器代理（不直连 DeepSeek）：base_url 指向 aikaui.com/api，
-api_key 用的是"半公开"的 AGENT_KEY，真正的鉴权靠 X-Device-Id 头——
-服务器靠它找出这台设备的独立 token 来记账。
+api_key 用**这台设备注册后拿到的专属 api_key**（identity.json 里的那个）。
+
+★ 2026-10 新契约：/api/chat/completions 只认 `Authorization: Bearer <用户 api_key>`，
+  不再接受 AGENT_KEY / SHARED_API_KEY / X-Device-Id。拿 AGENT_KEY 直接聊天会 401，
+  所以没有本地凭证时**根本不能建 client**——必须先把账号注册好（见 agent_worker）。
 
 ★ get_client / reset_client 里的 `global` 声明绝对不能删：丢了不会报错，
   但 client 每次都会重建、reset_client 变成空操作，是个很难发现的回归。
@@ -11,32 +14,38 @@ api_key 用的是"半公开"的 AGENT_KEY，真正的鉴权靠 X-Device-Id 头�
 
 from openai import OpenAI
 
-from config import BUILTIN_API_KEY, BUILTIN_BASE_URL, BUILTIN_MODEL
-from server.identity import get_device_id
+from config import BUILTIN_BASE_URL, BUILTIN_MODEL
+from server.identity import load_identity
 
 _current_client = None          # 全局缓存：OpenAI 客户端实例（避免每次重建）
 _current_model = None           # 全局缓存：当前用的模型名
 
 
+class NoIdentity(RuntimeError):
+    """本地还没有账号凭证（没注册成功 / 文件被删）。界面应当提示先完成注册。"""
+
+
 def get_client():
-    """Agent 永远走服务器代理"""
+    """Agent 永远走服务器代理，用本机账号的专属 api_key。"""
     global _current_client, _current_model
     if _current_client is not None:          # 已经有缓存的 client
         return _current_client, _current_model
 
-    # ★ 必须带 X-Device-Id：服务器靠它找出这台设备的独立 token 来记账
-    # 不带的话服务器会回退到共享 key（不推荐，用量算不到用户头上）
+    ident = load_identity()
+    if not ident:
+        raise NoIdentity("还没有账号凭证，请先完成一次账号注册（检查网络后重试）")
+
     _current_client = OpenAI(
-        api_key=BUILTIN_API_KEY,
+        api_key=ident["api_key"],
         base_url=BUILTIN_BASE_URL,
-        default_headers={"X-Device-Id": get_device_id()},
+        # ★ 不再带 X-Device-Id：服务器只按 Bearer 里的 api_key 认人
     )
-    _current_model = BUILTIN_MODEL
+    _current_model = ident.get("fast_model") or BUILTIN_MODEL
     return _current_client, _current_model
 
 
 def reset_client():
-    """丢掉缓存的 client，让下次 get_client() 重新读 device_id 重建"""
+    """丢掉缓存的 client，让下次 get_client() 重新读本地凭证重建"""
     global _current_client
     _current_client = None
 

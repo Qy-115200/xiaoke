@@ -105,7 +105,9 @@ def set_model_config() -> str:
     fast_model = identity.get("fast_model") or model   # 快模型（没配就用强模型）
 
     if not api_key or not api_base:                # 缺字段
-        return f"错误：身份文件字段缺失：{identity}"
+        # ★ 不把 identity 整个打出来：里面有 api_key / account_key
+        missing = "、".join(k for k, v in (("api_key", api_key), ("api_base", api_base)) if not v)
+        return f"错误：身份文件里缺 {missing}，请重新调用 register_device()"
 
     api_base = _normalize_base(api_base)           # 去掉 /v1 后缀（防路径重复）
 
@@ -113,11 +115,12 @@ def set_model_config() -> str:
     if not ok:
         return f"错误：{settings_note}"
 
-    # 返回"人话版"配置总结给 Agent（token 只显示前 12 位，避免泄露）
+    # 返回"人话版"配置总结给 Agent。
+    # ★ 不打印 token 的任何片段：截断 8 位也算泄露（聊天记录会被截图 / 上报）。
     return (
         f"已配置：\n"
         f"  BASE_URL      = {api_base}\n"
-        f"  AUTH_TOKEN    = {api_key[:12]}...\n"
+        f"  AUTH_TOKEN    = 已写入（不显示）\n"
         f"  默认模型      = {fast_model}（sonnet / haiku 档都指向它）\n"
         f"  显式 opus 时  = {model}\n"
         f"  {settings_note}"

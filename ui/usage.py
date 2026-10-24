@@ -46,6 +46,7 @@ from helpers import (
     _fmt_tokens,
     _fmt_tokens_short,
     _fmt_yuan,
+    _mask_secret,
     _nice_ticks,
     _norm_by_model,
     _norm_series,
@@ -144,8 +145,9 @@ class UsageMixin:
         )
         self.balance_value.pack(anchor="w", pady=(0, 4))
 
-        # 账户码这一行：码 + 一个复制按钮。账户码是**换设备时唯一的凭据**，
-        # 用户多半是拿手机拍照/手抄，给个复制按钮省得抄错一位就登不上。
+        # 账户码这一行：**打码**的码 + 一个复制按钮。完整凭证在「🔐 账户信息」页
+        # （打码 + 眼睛 + 红字警告）；这里只留前 4 位让人认得出是哪个账号，
+        # 不显示明文 —— 余额页是用户最容易截给别人看的地方。
         note_row = ctk.CTkFrame(left, fg_color="transparent")
         note_row.pack(anchor="w")
         self.balance_note = ctk.CTkLabel(
@@ -300,12 +302,15 @@ class UsageMixin:
 
         code = bal.get("account_code") or (load_identity() or {}).get("account_code") or "—"
         self._account_code = code
+        # ★ 这里只露前 4 位：完整凭证在「🔐 账户信息」页（打码 + 眼睛 + 红字警告）。
+        #   复制按钮照旧可用 —— 不显示明文也能复制，用户不用把码抄下来。
+        shown = _mask_secret(code, keep=4) if code != "—" else "—"
         if bal.get("error"):
-            note = f"账户码 {code} · 余额没查到（{str(bal['error'])[:30]}）"
+            note = f"账户码 {shown} · 余额没查到（{str(bal['error'])[:30]}）"
             if self.copy_code_btn is not None:
                 self.copy_code_btn.configure(state=tk.DISABLED)
         else:
-            note = f"账户码 {code} · 换电脑时用它登录"
+            note = f"账户码 {shown} · 完整内容在「账户信息」页"
             if self.copy_code_btn is not None:
                 self.copy_code_btn.configure(state=tk.NORMAL)
         self.balance_note.configure(text=note)
@@ -603,8 +608,9 @@ class UsageMixin:
     def on_copy_account_code(self):
         """把账户码复制到剪贴板。
 
-        ★ 这是**换设备时唯一的凭据**，手抄最容易错一位（O 和 0、I 和 1 本来就
-          容易看混），所以宁可直接复制。"""
+        ★ 这一页显示的是**打码**的码（完整内容在「🔐 账户信息」页），但复制照旧给全码：
+          手抄最容易错一位（O 和 0、I 和 1 本来就容易看混），不显示明文也能一键复制。
+          日志里只说"已复制"，不打值 —— 日志是用户会截图的地方。"""
         code = self._account_code or (load_identity() or {}).get("account_code") or ""
         if not code or code == "—":
             self.write("[系统] 还没拿到账户码，稍后再试")
@@ -615,7 +621,7 @@ class UsageMixin:
         except Exception:
             self.write("[系统] 复制失败，手动抄一下吧")
             return
-        self.write("[系统] 账户码已复制。换电脑时在「用量信息」页点「换设备登录」，把这串填进去。")
+        self.write("[系统] 账户码已复制。完整凭证和找回说明在左边「🔐 账户信息」页。")
 
         # 按钮上闪一下"已复制"，1.5 秒后变回去——比弹窗轻，也不挡视线
         btn = self.copy_code_btn

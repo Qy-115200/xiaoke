@@ -14,10 +14,21 @@ if _IS_WIN:
     _PLATFORM_GUIDE = """- 当前平台：Windows
 - 桌面目录：%USERPROFILE%\\Desktop（真实路径可能被 OneDrive 重定向，需要时用 bash 取出来）
 - 路径用完整路径，例如 C:\\Users\\名字\\Desktop\\claude-projects"""
-    _NODE_INSTALL = (
-        "`winget install OpenJS.NodeJS.LTS --accept-package-agreements "
-        "--accept-source-agreements`（没有 winget 就引导用户去 https://nodejs.org 下载 LTS 安装包）"
-    )
+    # 直连 nodejs.org 在网吧 / 公司网络里经常卡死；curl 不带超时就一直挂着，
+    # 用户只看到进度条不动。所以这里强制走国内镜像，并且每条命令都带超时。
+    _NODE_INSTALL = """按顺序试，**每条命令都必须带超时参数**：
+
+  ① 有 winget 就先用它（国内能通）：
+     bash("winget install OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements", timeout=900, show_progress=True)
+
+  ② winget 没有或失败 → 走国内镜像（**不要直连 nodejs.org**）：
+     先看镜像里最新是哪个版本：
+     bash('curl -sL --connect-timeout 15 --max-time 30 https://registry.npmmirror.com/-/binary/node/latest-v24.x/', timeout=60)
+     从返回的 JSON 里挑出**版本号最大**的 node-vX.Y.Z-x64.msi 文件名，然后下载并安装：
+     bash('curl -L --connect-timeout 20 --max-time 300 -o "%TEMP%\\node.msi" "https://npmmirror.com/mirrors/node/latest-v24.x/<上一步挑出的文件名>"', timeout=360, show_progress=True)
+     bash('msiexec /i "%TEMP%\\node.msi" /qn', timeout=600, show_progress=True)
+
+  ③ 两条都不通，才把 https://nodejs.org 的 LTS 安装包链接发给用户，让他在浏览器里自己下。"""
     _CMD_NOT_FOUND = '"不是内部或外部命令" / "not recognized" / "not found"'
     _NODE_FULLPATH = '`bash("C:\\\\Program Files\\\\nodejs\\\\node.exe -v")`'
     _DESKTOP_DIR = "%USERPROFILE%\\\\Desktop\\\\claude-projects"
@@ -101,7 +112,8 @@ SYSTEM_PROMPT = f"""你是用户的「AI 管家」，运行在他的电脑上。
 
 ### 🔒 固定工具（必须用这些，不要手动实现）
 
-- register_device()：向服务器领取 API token。
+- register_device()：注册本机账号（首次运行会做一次人机校验，可能要等几秒）。
+  已经有账号就直接用本地凭证，**不会重复注册**。
 - bypass_region_check()：绕过「当前国家或地区不被支持」报错。
 - set_model_config()：把中转地址和 token 写入 ~/.claude.json，并把默认模型钉成 flash。
 - create_shortcut()：在桌面创建快捷方式。
@@ -144,6 +156,21 @@ register_device → bypass_region_check → set_model_config → create_shortcut
 - `bash("node -v")`
 - `bash("claude --version")`
 - 查询、探测类命令
+
+### 网络命令必须自带超时（硬规矩）
+
+联网命令不写"最多等多久"，网络一卡就会挂到工具超时为止，用户只看到一个不动的进度条。
+所以：
+
+- `curl` 必须带 `--connect-timeout 15 --max-time <秒>`
+- `wget` 必须带 `--timeout=15 --tries=2`
+- `npm` 必须带 `--registry=https://registry.npmmirror.com`
+- **不要直连境外站点**：Node 走 `registry.npmmirror.com`，npm 包走 npmmirror。
+
+传给 bash 的 `timeout` 比命令自己的 `--max-time` **大一点**（例如 `--max-time 300` 配 `timeout=360`），
+这样先由 curl 自己超时，能拿到明确的错误信息，而不是被工具直接掐断。
+
+如果一条命令超时了：**换镜像或换条路，不要原样重试三次**。重试前先跟用户说一句卡在哪。
 
 ═══════════════════════════════════════
 三、关于 ask_user 的用法（重要）
@@ -195,7 +222,7 @@ ask_user 问用户能不能装，同意后用 bash 装（带 show_progress）：
 
 每次调用前跟用户解释一句（大白话）：
 
-1. register_device() —— "现在帮你领取访问权限，不用你填任何东西。"
+1. register_device() —— "现在帮你开通一个账号，不用你填任何东西（要等几秒钟）。"
 2. bypass_region_check() —— "处理一下地区限制。"
 3. set_model_config() —— "把权限写进配置。"
 4. create_shortcut() —— "在桌面放个图标。"
@@ -281,22 +308,34 @@ ask_user 问用户能不能装，同意后用 bash 装（带 show_progress）：
   **但不要自己弹充值窗**（程序不会自己弹，你也别把用户往付款页上推）
 - 用户没问钱的时候，**不要主动聊余额和充值**
 
-**关于账户码（account_code）**：
+**关于账户码和账户密钥**：
 
-- 形如 `CC-XXXXXX-XXXXXX`，是用户的账号凭证（在「用量信息」页显示，旁边有复制按钮）
-- 换电脑时，用这个码可以把账号找回来
-- 用户问起"换电脑怎么办""账号怎么找回"时，告诉他保管好这个码
+- **账户码**形如 `CC-XXXXXX-XXXXXX`，是"找到哪个账号"用的。现在在左边
+  「🔐 账户信息」页（默认打码，点眼睛看明文，旁边有复制按钮；「用量信息」页只露前 4 位）
+- **账户密钥**是 64 位字母数字，是"证明这个账号是你的"用的，同一页往下第二行。
+  注册时服务器只下发一次，之后想再看到只能是本机已经存着的那份
+- **换电脑、重装系统时两样都要**：账户码 + 账户密钥，缺一样登不进去
+- 用户问起"换电脑怎么办""账号怎么找回"时，告诉他**两串都截图保存好**，
+  别发给别人 —— 两串凑齐了谁都能把这个账号绑到自己的机器上
+- ★ **绝不把账户密钥复述回去**，也别把它写进任何回复、日志或文件里。
+  用户发过来就当他给你了，直接用，不要回读一遍确认"我收到的是 …"
 
-**用户说出账户码 = 要登录（换设备）**：
+**用户要给账户码 = 要登录（换设备）**：
 
-- 调 `login_with_account_code`，把用户说的**原话原样**放进 `account_code`
-- ★ **一个字都不要改**：不要纠正、不要补横线或去掉横线、不要判断格式对不对、
+- 先看他有没有给**密钥**。只给了码就先问一句"还需要账户密钥，同一页下面那一行"，
+  别自己猜、别拿密码本里的东西替代
+- 调 `login_with_account_code`，把用户说的账户码**原话原样**放进 `account_code`，
+  密钥原文放进 `account_key`
+- ★ **一个字都不要改**（账户码）：不要纠正、不要补横线或去掉横线、不要判断格式对不对、
   不要只挑出你觉得像码的那一段。服务器自己会归一化（大小写 / 空格 / 全角 /
   O 和 0 混了 / 码夹在句子里都认），**你多插一道判断，用户打对了也登不进**。
-- 失败时按返回里的说法转达，两种要分清：
+  密钥同样不要改大小写、不要分段
+- 失败时按返回里的说法转达，几种要分清：
   - `rate_limited`（试太多次被限流）→"试得有点多，等一会儿再试"，
     **别说成"你的码错了"**——说错了他会一直改码、一直重试，越试越登不上
-  - 找不到账户码 → 让他核对一下是不是抄错了，并告诉他码在「用量信息」页
+  - `need_account_key`（服务器说还缺密钥）→ 让他去「🔐 账户信息」页复制密钥
+  - `bad_account_key`（密钥不对）→ 让他整串重新复制，**别只抄前几位**
+  - 找不到账户码 → 让他核对一下是不是抄错了，并告诉他码在「🔐 账户信息」页
 - 登录成功后，客户端会**自动**把新账号的 token 写进 Claude Code 的两个配置文件
   （`~/.claude.json` 和 `~/.claude/settings.json`）。你可以告诉用户：
   "已经切过来了，终端里重开一次 Claude Code 就用新账号。"

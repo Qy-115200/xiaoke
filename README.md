@@ -2,7 +2,7 @@
 
 一个 Windows / macOS / Linux 桌面小程序：把「装 Claude Code」这件折腾半天的事，变成跟 AI 说一句话。
 
-窗口左边一条导航栏，右边两个页面：**💬 对话** 和 **📊 用量信息**。对话页背后是一个能调工具的
+窗口左边一条导航栏，右边三个页面：**💬 对话**、**📊 用量信息** 和 **🔐 账户信息**。对话页背后是一个能调工具的
 Agent —— 它会自己检测环境、装 Node、装 Claude Code、写好配置、问清楚工作目录、在桌面放个图标，
 然后把 Claude Code 打开。它也是个能用的 AI 管家：能陪你聊天、答疑、查余额、扫码充值。
 
@@ -56,6 +56,25 @@ Claude Code 只看得到你给它的**一个**文件夹。所以启动之前 Age
 > 余额不足时点服务器给的 `aikaui://recharge` 链接，助手**先显示这一页**（让人看清钱花在
 > 哪了），数据回来后再自动弹充值窗；充值窗停在主窗右边，不把图表整个盖住。
 
+余额卡下面那行账户码**只露前 4 位**（完整凭证在「🔐 账户信息」页）：这一页是用户最容易
+截图发给别人的地方。
+
+**🔐 账户信息页**
+
+账户码和账户密钥在这里，**默认打码**（`CC-D************` / `************************`）。
+每行有「👁 显示」按钮，点一下才看明文；再点变回打码，切走再回来也是打码 —— 明文状态
+不做任何持久化。旁边是「复制」，只写系统剪贴板，**不写日志**（日志是用户会截图的地方）。
+
+两串的分工：**账户码"找到哪个账号"，账户密钥"证明这个账号是你的"**。换设备登录要两样
+一起填（见下面「换设备登录要两样」）。
+
+下面一行红字是这一页存在的理由：
+
+> ⚠️ 重要：这是您找回账户和余额的唯一凭证，请截图保存在安全的地方。切勿发给他人，否则余额将被盗用。
+
+打码只是"别被路过的人一眼看走"，**不是加密**：明文就躺在本地凭证里。所以那句警告是必需品，
+不是装饰。
+
 **余额见底只问一句，不主动弹充值页**
 
 余额跌破 ¥1 时，程序**不会**自己打开充值窗口，只在窗口底部冒一条暗琥珀色的
@@ -90,7 +109,8 @@ pip install -r requirements.txt
 python main.py
 ```
 
-首次运行会自动向服务器领一份设备凭证，存到 `~/.claude-agent/identity.json`。
+首次运行会自动注册一个账号（服务器要求做一次 PoW 人机校验，通常一两秒），
+凭证存到 `~/.claude-agent/identity.json`。之后每次启动都直接用这份本地凭证，不再联网注册。
 
 离线测试（不需要联网，也不需要 GUI）：
 
@@ -152,11 +172,32 @@ Actions artifact。macOS 两个包都**没有签名**：首次打开要右键 �
 1. 改 `config.py` 里的 `APP_VERSION`，提交。
 2. 打 tag（必须与 `APP_VERSION` 一致，CI 会校验）：`git tag v1.0.1 && git push origin v1.0.1`。
 3. CI 构建四个平台产物，`publish` job 调 [`build_tools/deploy_downloads.sh`](build_tools/deploy_downloads.sh)
-   把包传到 `https://aikaui.com/releases/<版本>/`，最后以"先写 `.tmp` 再 `mv`"的方式换掉 `latest.json` ——
-   客户端永远读不到半个清单。
-4. 手工发布也行：四个产物放一个目录，用
-   [`build_tools/make_manifest.py`](build_tools/make_manifest.py) 生成 `latest.json`，
-   再跑部署脚本。
+   发布。**这一步要配 `DEPLOY_HOST` / `DEPLOY_USER` / `DEPLOY_SSH_KEY` 三个 secrets**；
+   没配时 `publish` 会打一行 `::warning::` 然后整步跳过（不会让 tag 构建变红），
+   四个产物只在 Actions artifact 里，得手工发。
+4. 手工发布：下载四个产物到一个目录（`ClaudeCodeAssistant-*` + 版本号目录），然后
+
+   ```bash
+   NOTES="这一版改了什么" DRY_RUN=1 DEPLOY_HOST=… ./build_tools/deploy_downloads.sh 1.1.0 ./release/1.1.0   # 先空跑
+   NOTES="这一版改了什么" DEPLOY_HOST=… ./build_tools/deploy_downloads.sh 1.1.0 ./release/1.1.0            # 真发
+   ```
+
+**发布时有两个容易踩的坑，脚本已经处理好了，但你要知道它在干什么：**
+
+- **同一份包有两个源，两个都要传。** 下载页的 HTML 用相对路径走 `aikaui.com`（nginx 的
+  `/var/www/aikaui/releases/`），而 `latest.json` 里给自动更新用的 url 指向 `dl.aikaui.com`
+  （腾讯云 COS + CDN）。脚本两边都传、两边都 HEAD 验大小；**任何一边取不到就直接退出，
+  不换清单**。只传一边的后果不是报错，而是客户端悄悄 404 —— 只会在 `update.log` 里留一行，
+  6 小时后再试一次。
+- **下载页里写死了版本号。** `index.html` 和 `download/index.html` 各有 4 条
+  `/releases/<版本>/…` 的链接，只换 `latest.json` 的话，新用户从下载页拿到的还是旧包。
+  脚本在换完清单之后用正则把这两页的版本号改成新的（备份成 `*.bak-<时间戳>`，
+  同目录 `mv` 原子替换）。用正则而不是替换某个固定字符串，所以不用每次改脚本。
+
+顺序是刻意的：**传包 → 两边都验 → 才换 `latest.json` → 再改下载页**。
+清单永远不会指向一个取不到的文件。`DRY_RUN=1` 只生成清单并用客户端自己的
+`updater.py` 验一遍（形状、sha256、size、`min_version`、已是最新时不再提示），不连服务器。
+
 
 > **老用户注意**：`v1.0.0` 是第一个带 updater 的版本。更早安装的版本里面没有更新代码，
 > 必须**手动**装一次 `v1.0.0`，之后才能自动更新。
@@ -171,11 +212,11 @@ agent_demo/
 ├── config.py                      98   唯一的常量源：版本、服务器地址、凭证、路径、配色、更新参数、MAX_STEPS
 ├── updater.py                    660   自动更新：清单校验 / 静默下载 / 下次启动替换自己（不 import tkinter）
 ├── deps.py                        19   可选依赖探测：Pillow 在不在
-├── helpers.py                    217   数字金额格式化 + 用量取数（按模型 / 时间序列）+ 刻度 + 文字宽度估算 + 选项清洗
+├── helpers.py                    240   数字金额格式化 + 用量取数（按模型 / 时间序列）+ 刻度 + 文字宽度估算 + 选项清洗 + 凭证打码
 ├── images.py                     138   窗口图标（打包资源优先，缺了现画）+ 付款二维码下载
 ├── notify.py                      26   桌面通知薄封装（各平台实现在 platform_support）
 ├── bus.py                         79   线程间队列 + poll_queue（每 100ms 把消息翻译成界面操作）
-├── llm.py                        117   大模型客户端（走 aikaui.com 代理，带 X-Device-Id）
+├── llm.py                        126   大模型客户端（走 aikaui.com 代理，用本机账号的 api_key）
 ├── agent_core.py                 221   Agent 主循环：run_one_task / agent_worker / balance_worker
 ├── prompts.py                    415   系统提示词（按平台给安装指令 + 工作目录 + VSCode 推荐 + 余额分寸）
 │
@@ -188,7 +229,10 @@ agent_demo/
 │
 ├── server/                            服务端与工具层（不 import 界面）
 │   ├── ui_bridge.py               31   GUI 注入桥：set_ui / get_ui
-│   ├── identity.py               332   设备指纹、本地凭证、领 token、_ensure_account_code / _ensure_user_id
+│   ├── identity.py               515   设备指纹、PoW 注册、本地凭证、换设备登录、_ensure_account_code / _ensure_user_id、pending_recovery
+│   ├── fingerprint.py            147   硬件指纹：主板序列号 + CPU ID → SHA-256 前 32 位（不是凭据，只在注册时上报）
+│   ├── vault.py                  213   凭证的"第二份"：账户码存注册表（DPAPI 加密）/ 配置目录
+│   ├── pow.py                    128   PoW 求解（进度 / 取消 / 90 秒超时），和服务器 pow.js 逐位对齐
 │   ├── api.py                    504   余额 / 用量 / 充值 HTTP 层（永远不抛异常）
 │   ├── claude_config.py          124   把身份写进 ~/.claude.json 和 ~/.claude/settings.json
 │   ├── tools_fixed.py            141   五个固定工具 + aikaui:// 协议注册（转发 platform_support）
@@ -197,21 +241,27 @@ agent_demo/
 │
 ├── ui/                                界面层
 │   ├── fonts.py                  179   全界面字体表：按平台选字体 + 字号常量 + 画布缩放
-│   ├── gui.py                     26   class GUI(WindowMixin, OptionsMixin, RechargeMixin, UsageMixin, LoginMixin)
-│   ├── window.py                 479   WindowMixin：窗口壳、左侧导航、对话页、底部询问条、余额回流
+│   ├── gui.py                     27   class GUI(WindowMixin, OptionsMixin, RechargeMixin, UsageMixin, LoginMixin, AccountMixin)
+│   ├── window.py                 490   WindowMixin：窗口壳、左侧导航、对话页、底部询问条、余额回流
 │   ├── usage.py                  625   UsageMixin：用量信息页（余额卡 + 两张按模型的时间分布图 + 充值入口）
+│   ├── account.py                272   AccountMixin：账户信息页（账户码 / 密钥打码、眼睛、复制、防泄露红字）
 │   ├── options.py                219   OptionsMixin：ask_user 选项面板（点击 / ↑↓ / 回车 / Esc）
 │   ├── recharge.py               627   RechargeMixin：充值弹窗两页 + 创单 + 付款后刷新 + 只办充值时的靠右定位
-│   └── login.py                  230   LoginMixin：换设备登录弹窗（账户码）
+│   └── login.py                  323   LoginMixin：换设备登录弹窗（账户码 + 账户密钥；也承担"本地凭证丢了"时的自动找回）
 │
 ├── build_tools/
 │   ├── make_version_info.py       80   生成 Windows 文件版本信息（build/version_info.txt）
 │   ├── make_manifest.py          113   四个产物 → latest.json（校验版本、算 sha256 / size）
-│   └── deploy_downloads.sh            上传产物与清单到 aikaui.com（先传包，最后原子换清单）
-├── tests/                            离线单元测试（49 个，stdlib unittest）
+│   └── deploy_downloads.sh            发布：传 nginx + 传 COS → 两边验大小 → 换清单 → 改下载页版本号
+├── tests/                            离线单元测试（106 个，stdlib unittest）
 │   ├── test_version.py                版本解析 / 比较 / 清单校验
 │   ├── test_download.py               本地假服务器：下载、哈希、404、缓存回退
 │   ├── test_apply.py                  备份、回滚、失败上限、锁、更新提示
+│   ├── test_pow.py                    PoW 求解（和服务器 pow.js 的测试向量对齐）
+│   ├── test_register_flow.py          本地假服务器说真契约：注册、不重注册、不泄密、指纹字段、is_recovered、保险箱
+│   ├── test_credentials.py            打码、硬件指纹（占位符 / 非 Windows / 绝不抛异常）、保险箱往返
+│   ├── test_ui_messages.py            poll_queue 把 recovery / recovered 送到对的界面方法
+│   ├── test_bash_timeout.py           bash 工具的超时与杀干净
 │   ├── test_platform_support.py       三平台抽象层
 │   ├── test_prompts.py                提示词按平台切换
 │   └── test_imports.py                工具层导入不依赖 Windows
@@ -237,7 +287,7 @@ main.py ─→ ui/ ─→ agent_core ─→ llm / server/ ─→ config
 依赖是**单向**的，全图无环：
 
 - `config.py` 不依赖任何本地模块，是所有常量的唯一来源。
-- 界面层（`ui/`）按职责拆成四个 mixin，拼成 `GUI`；四个 mixin 方法名互不重复，
+- 界面层（`ui/`）按职责拆成六个 mixin，拼成 `GUI`；六个 mixin 方法名互不重复，
   也没有一个调 `super()`，所以 MRO 顺序不影响行为。
 - 工具层（`server/`）**不 import 界面**。
 
@@ -257,7 +307,8 @@ main.py ─→ ui/ ─→ agent_core ─→ llm / server/ ─→ config
 **铁律：非主线程绝不碰控件，一律往 `msg_queue` 丢消息，由主线程在 `poll_queue` 里更新界面。**
 
 `poll_queue` 会分发的消息种类：`log`、`balance`、`busy`、`recharge`、`recharge_result`、
-`recharge_paid`、`ask`、`progress_start`、`progress_stop`。其中 `recharge`（服务器说余额不足）
+`recharge_methods`、`recharge_qr`、`recharge_paid`、`login_result`、`recovery`、`recovered`、
+`ask`、`progress_start`、`pow_progress`、`progress_stop`。其中 `recharge`（服务器说余额不足）
 **不弹窗**，只调 `offer_recharge()` 在底部问一句。
 
 一次对话里文件和线程的完整流转，见 [文件执行或调用顺序.md](文件执行或调用顺序.md)。
@@ -288,8 +339,8 @@ from server.api import refresh_balance as fetch_balance   # 查完返回 dict，
 `ui/usage.py` 的「刷新」按钮也是起一条 daemon 线程跑 `agent_core.refresh_balance` ——
 网络请求不能落在主线程上，不然界面会卡住。
 
-**3. 四个 mixin 的方法名不能撞。**
-`GUI` 靠 MRO 把四个 mixin 拼起来，谁都不调 `super()`，所以一旦两个 mixin 定义了同名方法，
+**3. 六个 mixin 的方法名不能撞。**
+`GUI` 靠 MRO 把六个 mixin 拼起来，谁都不调 `super()`，所以一旦两个 mixin 定义了同名方法，
 排在后面的那个会被静默吃掉。加方法前先在全目录搜一下同名。
 
 **4. `_ensure_account_code` / `_ensure_user_id` 必须留在 `server/identity.py`。**
@@ -309,9 +360,10 @@ from server.api import refresh_balance as fetch_balance   # 查完返回 dict，
 
 | 文件 | 内容 |
 |---|---|
-| `~/.claude-agent/identity.json` | 本机凭证：`device_id`、`api_key`、`api_base`、`model`、`user_id`、`account_code`、`balance`，以及最近一笔充值订单 `last_order` |
+| `~/.claude-agent/identity.json` | 本机凭证：`device_id`、`api_key`、`account_key`、`api_base`、`model`、`fast_model`、`user_id`、`account_code`、`balance`、`fingerprint`（取到时），以及最近一笔充值订单 `last_order`。POSIX 上权限是 `0600` |
+| `HKCU\Software\aikaui\ClaudeCodeAssistant` | **凭证的第二份**（只有 `account_code` / `account_key` / `user_id`），值用 DPAPI 加密 —— 只有同一个 Windows 用户、同一台机器解得开。macOS 在 `~/Library/Application Support/aikaui/credential.json`，Linux 在 `~/.config/aikaui/credential.json`（都 `0600`） |
 | `~/.claude.json` | Claude Code 的配置，`set_model_config` 往它的 `env` 里写中转地址、token 和各档位模型映射 |
-| `~/.claude/settings.json` | Claude Code 的用户级设置，`set_model_config` 只改其中的 `model` 一个键（钉默认模型），其它键原样保留 |
+| `~/.claude/settings.json` | Claude Code 的用户级设置，`set_model_config` 会把同一套 `env` 也写进去（优先级更高），并把 `model` 钉成 flash，其它键原样保留 |
 
 ### 模型档位：默认只走 flash，pro 要自己主动选
 
@@ -335,24 +387,100 @@ from server.api import refresh_balance as fetch_balance   # 查完返回 dict，
 不想要可以把它也改成 flash。
 
 `device_id` 是主机名 + MAC + 架构 的 sha256 前 16 位，同一台机器每次算出来都一样。
-服务器靠它记账，所以一旦注册过就固定复用文件里那个 —— 每次重新生成的话，服务器会当成
-新设备再发一份 token，用户余额也看不到。
+它现在只是**本机标识**（`bind-account` 用它去重），不再是身份凭证 —— 服务器只按
+`api_key` / `account_code` 认人，所以同一个 `device_id` 换不出任何东西。
 
-同一个 `account_code`（形如 `CC-F43D-5152`）可以换设备找回账号，**「用量信息」页的余额卡
-下面一直显示着它**，方便用户截图保存。
+同一个 `account_code`（形如 `CC-XXXXXX-XXXXXX`）可以换设备找回账号，**「🔐 账户信息」页**把它和
+`account_key` 都列出来（默认打码，点眼睛看明文，带复制和红字警告）；「用量信息」页只露前 4 位。
+服务端还回一个 `account_key`（64 位 hex，**只回一次**），存在 `identity.json` 里，目前只用来核对
+账号归属，接口并不需要它。
+
+> 注册**不是幂等的**：新契约下"注册"= 用 PoW 开一个新账号，所以只要本地有凭证，
+> 客户端**一次请求都不会再发**（重复注册会开新号、把余额丢掉）。
+
+### 凭证丢了怎么找回来（两条路，都不靠硬件指纹）
+
+1. **本机凭证被删 / 被清理工具带走**：注册或换设备登录成功时，账户码和账户密钥会另存一份到
+   `server/vault.py`（Windows 注册表 + DPAPI）。下次启动发现 `identity.json` 不在了、
+   但保险箱里还有凭证，程序**不注册新号**，而是弹出「换设备登录」窗口把两串都预填好，
+   由用户点一下「登录」确认 —— 恢复走的是现成的 `POST /api/bind-account`。
+   **不替用户自动确认**：共用电脑上前一个人删了凭证，后一个人一开机就被"恢复"进别人的账号，
+   等于把余额送给陌生人。
+2. **换了机器 / 重装了系统**：只能靠用户自己存下来的账户码 + 账户密钥（这也是「🔐 账户信息」页
+   要红字提醒"截图保存"的原因）。
+
+### 换设备登录要两样
+
+服务端 `POST /api/bind-account` 要 `{account_code, account_key, device_id}`：
+
+- **账户码**会露给旁人（截图、口述、页面上露前 4 位），单靠它就把整台机器的余额领走太薄；
+- **账户密钥**是 32 字节随机数的 hex，注册时下发一次，服务端只存 `SHA-256`。
+  比对时 **trim + 大小写不敏感**（那串 hex 大小写不携带信息，用户手抄容易错），
+  用 `timingSafeEqual` 比，不按字节早退。
+
+三种回答分得很清楚，别混着说：
+
+| 服务端 | 含义 | 界面上 |
+|---|---|---|
+| `404 account_code not found` | 码查不到 | 让用户核对账户码 |
+| `403 account_key_required` | 码对、但没给密钥 | 光标跳到密钥框 |
+| `403 account_key_invalid` | 密钥不对 | 强调"整串复制，别只抄一段" |
+
+**老账号（2026-10-24 之前注册的）没有密钥**，服务端对它们只认码 —— 那批账号的密钥
+从来没下发过，现发一把会让"只知道码的人先登录把真用户锁在外面"。所以客户端**不**把密钥
+设成必填，空着照样发，由服务端决定。
+
+### 硬件指纹是什么、不是什么
+
+注册时会把 `SHA-256(主板序列号 | ProcessorId)[:32]` 一起发给服务器（`server/fingerprint.py`，
+Windows 上用一次 PowerShell 的 `Get-CimInstance` 读，非 Windows 或取不到就是空串、不发这个字段）。
+它**只当反滥用线索**，理由写在那份文件开头：
+
+- 它不保密 —— 本机任何程序都能读到，随手也能往接口里传任意字符串，所以**不能**用它认人；
+- `ProcessorId` 对同型号 CPU 是常量（CPUID 特性位 + 型号签名，不是序列号）；
+- 不少 OEM 主板 / 虚拟机的序列号是 `Default string`、`To be filled by O.E.M.` 这类占位符 ——
+  这些情况一律返回空串，不拿 "`|` + CPU" 去凑一个全网同型号共用的常量。
+
+**服务端目前对指纹只落库、不恢复**：`/api/auto-register` 收下 `fingerprint` 存进
+`cc_accounts.fingerprint`（以后能统计"一个指纹建过多少号"），但**从不**据此发账号；
+响应里的 `is_recovered` 恒为 `false`。
+
+这是刻意的：指纹不保密，拿它当凭据等于"谁知道这串值谁能领走账号和余额" —— 同型号 CPU
+撞号、共用电脑换人，都会把别人的余额送出去。真正能证明"这账号是我的"的，是账户码 +
+账户密钥。客户端的恢复提示（`is_recovered: true` → 「检测到您之前已注册过…」）保留着，
+服务端哪天改主意接上就能用，现在它不会触发。
 
 ## 服务端接口
 
-统一走 `https://aikaui.com`，统一带 `X-Agent-Key` 请求头（值在 `config.py` 里，
-是个"半公开"的凭证，服务器端会限流）。
+统一走 `https://aikaui.com`。`X-Agent-Key` **只在注册链路**里发（它打在 exe 里，
+是公开的"敲门砖"，不是秘密）；聊天用注册拿到的专属 `api_key`。
 
 | 接口 | 用途 |
 |---|---|
-| `POST /api/issue-token` | 拿 `device_id` 换一份设备专属 token |
+| `GET /api/challenge` | 取一个 PoW 挑战（带 `X-Agent-Key`） |
+| `POST /api/auto-register` | 提交 `{challenge, nonce, fingerprint?}`，换回账号与专属 `api_key`（`is_recovered` 目前恒为 `false`） |
+| `POST /api/bind-account` | 用 `{account_code, account_key, device_id}` 换设备登录（不需要 `X-Agent-Key`；老账号 `account_key` 可省） |
 | `GET /api/balance` | 查余额（按 `account_code` 查） |
 | `GET /api/usage` | 查 token 消耗 |
 | `POST /api/create-order` | 创建充值订单，返回付款二维码 |
+| `POST /api/chat/completions` | 助手自己聊天，只认 `Authorization: Bearer <用户 api_key>` |
 | `aikaui://recharge?user_id=N` | 自定义协议：支付页付完款靠它把本程序唤起来 |
+
+`POST /api/issue-token` 已经下线（恒返回 410），客户端不再调用。
+
+### 注册：PoW 人机校验
+
+`/api/challenge` 给一个 32 位 hex 的挑战（绑定来源 IP、120 秒过期、只能用一次），
+客户端要在本地找一个 `nonce`，使 `SHA256(challenge + nonce)` 的**前 difficulty 个二进制位**
+全为 0，再交给 `/api/auto-register`。难度平时是 16，同一出口注册太频繁会抬到 22。
+
+求解在 `server/pow.py`，跑在 Agent 线程里：**能报进度（已算多少次 / 约百分之几）、能取消
+（进度条上有个「取消」）、单次 90 秒硬超时**，一次注册最多重来 3 次（每次都重新取挑战）。
+失败原因会照实带到界面上：注册关闭、网络太频繁、认不出 IP，三种情况用户该做的事不一样。
+
+提交时可能多带一个 `fingerprint` 字段（见上面「硬件指纹是什么、不是什么」）。服务端还是
+老版本、不认识这个字段而整条请求 400 时，客户端会**去掉字段再试一轮** —— 指纹是加分项，
+不能因为它把注册搞挂。
 
 `server/api.py` 里的所有函数**永远不抛异常** —— 失败就返回 `(None, 错误说明)` 或
 `{"error": "..."}`，错误原文会被翻译成大白话带到界面上。余额查不到、支付平台挂了，
