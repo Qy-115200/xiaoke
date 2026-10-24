@@ -52,6 +52,11 @@ PY="${PYTHON:-python}"
 command -v "$PY" >/dev/null 2>&1 || PY=python3
 command -v "$PY" >/dev/null 2>&1 || die "找不到 python / python3"
 
+# 下面几段内联 python 会打 ✔ ▶ 这类符号。Windows 控制台默认是 GBK，
+# 不加这个就直接 UnicodeEncodeError，DRY_RUN 在本地一次都跑不完。
+# CI 那边 workflow 里已经设了同名的变量，这里再设一次是给本机用的。
+export PYTHONIOENCODING=utf-8
+
 # CI 里私钥是临时文件，用 DEPLOY_SSH_KEY 指过来；本机直接跑就让它走 ssh-agent
 KEY_OPTS=()
 RSYNC_SSH="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
