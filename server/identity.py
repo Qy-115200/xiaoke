@@ -7,12 +7,13 @@
   register_device()  第一次运行时走 /api/challenge + /api/auto-register 开一个新账号，
                      把服务器给的专属 api_key 缓存到 identity.json
   load_identity()    读本地缓存（没文件 / 损坏 / 缺 api_key 都当没领过）
-  bind_account()     拿账户码把本机绑到一个已有账号（换电脑 / 找回）
+  bind_account()     拿「账户码 + 账户密钥」把本机绑到一个已有账号（换电脑 / 找回）
   _ensure_*()        给上层用：本地缺 user_id / account_code 时补领一次
-  pending_recovery() identity.json 没了、但 server/vault.py 里还留着账户码时就返回它
+  pending_recovery() identity.json 没了、但 server/vault.py 里还留着凭证时就返回它
 
 ★ device_id 和 server/fingerprint.py 那个硬件指纹都不是凭据（见那两处的说明）。
-  真正能证明"这个账号是我的"的，只有账户码。
+  能证明"这个账号是我的"的是账户码 + 账户密钥：码用来找到账号，密钥用来证明
+  手里有注册时下发的那串随机数（服务端只存它的 sha256）。
 
 ★ 注册**不是幂等的**（2026-10 新契约）：/api/issue-token 已经恒返回 410，
   现在"注册"= 用 PoW 换一个新账号。所以 **只要有本地凭证就绝不再注册**，
@@ -84,7 +85,7 @@ def _ensure_account_code(refresh: bool = False):
     if ident and ident.get("account_code"):
         return ident["account_code"], None
     if ident:
-        return None, "本地凭证里没有账户码，请用「换设备登录」输入账户码"
+        return None, "本地凭证里没有账户码，请用「换设备登录」输入账户码和账户密钥"
     return None, "这台电脑还没有账号，请等注册完成（或检查网络）"
 
 
@@ -129,7 +130,7 @@ _RETRYABLE = {
 
 # 服务器错误码 → 给用户看的大白话。没列到的走原样透传。
 _ERROR_TEXT = {
-    "signup_closed": "服务器暂时关闭了新账号注册。已有账号请点「用量信息」页的「换设备登录」，输入账户码。",
+    "signup_closed": "服务器暂时关闭了新账号注册。已有账号请点「用量信息」页的「换设备登录」，输入账户码和账户密钥。",
     "too_many_registrations": "这个网络（或这一片网络）今天注册得太频繁了，服务器让过一会儿再试。",
     "invalid_ip": "服务器认不出这台电脑的网络出口，换个网络再试。",
     "forbidden": "这台设备被服务器拒绝了。换个网络再试，不行就联系客服。",
@@ -340,26 +341,34 @@ def adopt_identity(data: dict) -> dict:
     return merged
 
 
-def bind_account(account_code):
-    """用账户码把本机绑到一个已有账号（换设备登录 / 找回账号）。
+def bind_account(account_code, account_key=""):
+    """用「账户码 + 账户密钥」把本机绑到一个已有账号（换设备登录 / 找回账号）。
 
     ★ account_code **原样发出去，一个字都不清洗**：服务器会归一化大小写、横线、
       空格、全角（中文输入法打的），认 O↔0 / I↔1 的混淆，甚至能把码从一整句话里
       挑出来。客户端在这儿先做一道正则校验或者"帮你纠正一下"，就等于把用户
       明明打对了的码拦在门外——这是这个接口最容易踩的坑。
 
-    ★ 这个接口不再要求 X-Agent-Key（账户码本身就是凭据，防护靠服务端失败限流），
-      所以这里不发那个头。
+    ★ account_key 相反：**只 trim，不洗别的**。它是 64 位 hex，让用户从截图上
+      手抄时大小写很容易错，所以服务端按大小写不敏感比对（那串 hex 大小写
+      不携带任何信息）。客户端不在这里做任何"纠正"，原样发。
+
+    ★ 2026-10-24 起服务端要求两样都给：账户码会露给旁人（截图、口述、页面上露
+      前 4 位），单靠它就把整台机器的余额领走太薄。**2026-10-24 之前注册的老账号
+      没有密钥**，服务端对这种账号维持"只要码"的旧行为。
 
     返回 (数据, 错误说明, 错误码, 建议等待秒数)；成功时数据是 dict，
-    错误码形如 account_code not found / too_many_attempts。"""
+    错误码形如 account_code not found / account_key_required /
+    account_key_invalid / too_many_attempts。"""
     raw = "" if account_code is None else str(account_code)   # 不 strip、不 upper、不补横线
+    key = "" if account_key is None else str(account_key).strip()
     try:
         import requests
         resp = requests.post(
             f"{SERVER_URL}/api/bind-account",
             headers={"Content-Type": "application/json"},
-            json={"account_code": raw, "device_id": get_device_id()},
+            json={"account_code": raw, "device_id": get_device_id(),
+                  "account_key": key},
             timeout=15,
         )
     except Exception as e:
@@ -372,6 +381,10 @@ def bind_account(account_code):
             return None, "试得太频繁了，服务器让等一会儿再试", code, wait
         if code == "account_code not found" or resp.status_code == 404:
             return None, "没找到这个账户码", "account_code not found", wait
+        if code == "account_key_required":
+            return None, "这个账号还需要账户密钥", code, wait
+        if code == "account_key_invalid":
+            return None, "账户密钥不对", code, wait
         return None, f"登录失败 HTTP {resp.status_code}：{resp.text[:200]}", code, wait
 
     try:
@@ -431,7 +444,7 @@ def register_device() -> str:
         if not data.get("account_code"):
             # 极端情况：文件里有 api_key 但没有账户码（老版本留下的）。没法补——
             # 服务器只能按码查账户，重新注册又会开新号。如实告诉上层。
-            note = "本地凭证缺少账户码，请用「换设备登录」输入账户码"
+            note = "本地凭证缺少账户码，请用「换设备登录」输入账户码和账户密钥"
         u = get_ui()                       # 通知界面刷新（幂等，重复调没关系）
         if u and hasattr(u, "on_token_acquired"):
             try:
@@ -501,15 +514,21 @@ def register_device() -> str:
 
 
 def pending_recovery():
-    """本地没有凭证、但"第二份"里还留着账户码 → 返回那串码，等用户确认。
+    """本地没有凭证、但"第二份"里还留着账户码 → 返回 {"account_code", "account_key"}。
 
     ★ 为什么不直接自动恢复：这是台共享机器（网吧、公司电脑）时，前一个人
       删掉了 identity.json，后一个人一开机就被"恢复"进前一个人的账号 —— 那是
-      把别人的余额塞到陌生人手里。所以只把码交回给界面，由用户点一下确认。
+      把别人的余额塞到陌生人手里。所以只把凭证交回给界面，由用户点一下确认。
+
+    ★ 保险箱里存了 account_key 就一起带出来（换设备登录现在要两样）。老版本
+      存进去的可能只有码，所以 `account_key` 可能为空 —— 调用方要能处理。
 
     没有可恢复的（本地已有凭证 / 保险箱里也没有）返回 None。
     调用方拿到非空值时**不要**再去注册新号。"""
     if load_identity():
         return None
     cred = vault.load() or {}
-    return cred.get("account_code") or None
+    code = cred.get("account_code")
+    if not code:
+        return None
+    return {"account_code": code, "account_key": cred.get("account_key") or ""}

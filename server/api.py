@@ -431,25 +431,31 @@ def last_order():
 
 # ================= 账户码登录（换设备 / 找回账号） =================
 
-def login_with_account_code(account_code) -> str:
-    """用账户码把本机登录到一个已有账号。返回 JSON 字符串。
+def login_with_account_code(account_code, account_key="") -> str:
+    """用「账户码 + 账户密钥」把本机登录到一个已有账号。返回 JSON 字符串。
 
     ★ 这是**换电脑**的唯一入口：同一份身份文件拷到新机器也能用，但用户手上
-      如果只有那串账户码（在「🔐 账户信息」页显示），就得靠这里。
+      如果只有那两串凭证（都在「🔐 账户信息」页），就得靠这里。
 
     ★ account_code **原样发给服务器，不做任何清洗**。服务器会归一化大小写、
       横线、空格、全角，认 O↔0 / I↔1，甚至能把码从一整句话里挑出来。
       在这里加正则校验或者"顺手帮用户改一下"，只会把打对了的人挡在外面。
       所以下面除了"压根没给"以外，一个字符都不动。
 
+    ★ account_key 只 trim。它是 64 位 hex，服务端按大小写不敏感比对。
+    ★ 两样都要给：码只能"找到"账号，密钥才证明账号是你的。2026-10-24 之前
+      注册的老账号没有密钥，服务端会放行只给码的请求（这一点服务端说了算，
+      客户端不替它判断）。
+
     成功时返回 {"ok": true, "account_code":..., "user_id":..., "balance":...,
     "note":..., "next":...}；失败返回 {"error": "..."}。"""
     raw = "" if account_code is None else str(account_code)
+    key = "" if account_key is None else str(account_key).strip()
     if not raw.strip():
         return json.dumps({"error": "没收到账户码。把账户码发我，或者点「用量信息」页右上角的「🔑 换设备登录」。"},
                           ensure_ascii=False)
 
-    data, err, code, wait = bind_account(raw)      # ★ 原样透传
+    data, err, code, wait = bind_account(raw, key)      # ★ 原样透传
 
     if data:
         adopt_identity(data)                       # 合并进本地文件 + 丢掉旧 client
@@ -479,6 +485,21 @@ def login_with_account_code(account_code) -> str:
                      f"**这不是账户码打错了**，别改码，也别连着试。",
             "rate_limited": True,
             "retry_after": wait or 60,
+        }, ensure_ascii=False)
+
+    if code == "account_key_required":
+        return json.dumps({
+            "error": "这个账号还需要**账户密钥**：换设备登录要账户码和账户密钥两样。"
+                     "密钥在左边「🔐 账户信息」页，点「👁 显示」就能看到，"
+                     "旁边还有「复制」按钮。让用户把那一串也发过来。",
+            "need_account_key": True,
+        }, ensure_ascii=False)
+
+    if code == "account_key_invalid":
+        return json.dumps({
+            "error": "账户密钥不对。密钥是 64 位字母数字，"
+                     "「🔐 账户信息」页点「👁 显示」后整串复制，别只抄一段。",
+            "bad_account_key": True,
         }, ensure_ascii=False)
 
     if code == "account_code not found":

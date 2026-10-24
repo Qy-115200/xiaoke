@@ -65,6 +65,9 @@ Claude Code 只看得到你给它的**一个**文件夹。所以启动之前 Age
 每行有「👁 显示」按钮，点一下才看明文；再点变回打码，切走再回来也是打码 —— 明文状态
 不做任何持久化。旁边是「复制」，只写系统剪贴板，**不写日志**（日志是用户会截图的地方）。
 
+两串的分工：**账户码"找到哪个账号"，账户密钥"证明这个账号是你的"**。换设备登录要两样
+一起填（见下面「换设备登录要两样」）。
+
 下面一行红字是这一页存在的理由：
 
 > ⚠️ 重要：这是您找回账户和余额的唯一凭证，请截图保存在安全的地方。切勿发给他人，否则余额将被盗用。
@@ -244,13 +247,13 @@ agent_demo/
 │   ├── account.py                272   AccountMixin：账户信息页（账户码 / 密钥打码、眼睛、复制、防泄露红字）
 │   ├── options.py                219   OptionsMixin：ask_user 选项面板（点击 / ↑↓ / 回车 / Esc）
 │   ├── recharge.py               627   RechargeMixin：充值弹窗两页 + 创单 + 付款后刷新 + 只办充值时的靠右定位
-│   └── login.py                  268   LoginMixin：换设备登录弹窗（账户码；也承担"本地凭证丢了"时的自动找回）
+│   └── login.py                  323   LoginMixin：换设备登录弹窗（账户码 + 账户密钥；也承担"本地凭证丢了"时的自动找回）
 │
 ├── build_tools/
 │   ├── make_version_info.py       80   生成 Windows 文件版本信息（build/version_info.txt）
 │   ├── make_manifest.py          113   四个产物 → latest.json（校验版本、算 sha256 / size）
 │   └── deploy_downloads.sh            发布：传 nginx + 传 COS → 两边验大小 → 换清单 → 改下载页版本号
-├── tests/                            离线单元测试（100 个，stdlib unittest）
+├── tests/                            离线单元测试（106 个，stdlib unittest）
 │   ├── test_version.py                版本解析 / 比较 / 清单校验
 │   ├── test_download.py               本地假服务器：下载、哈希、404、缓存回退
 │   ├── test_apply.py                  备份、回滚、失败上限、锁、更新提示
@@ -397,14 +400,35 @@ from server.api import refresh_balance as fetch_balance   # 查完返回 dict，
 
 ### 凭证丢了怎么找回来（两条路，都不靠硬件指纹）
 
-1. **本机凭证被删 / 被清理工具带走**：注册或换设备登录成功时，账户码会另存一份到
+1. **本机凭证被删 / 被清理工具带走**：注册或换设备登录成功时，账户码和账户密钥会另存一份到
    `server/vault.py`（Windows 注册表 + DPAPI）。下次启动发现 `identity.json` 不在了、
-   但保险箱里还有码，程序**不注册新号**，而是弹出「换设备登录」窗口把码预填好，
+   但保险箱里还有凭证，程序**不注册新号**，而是弹出「换设备登录」窗口把两串都预填好，
    由用户点一下「登录」确认 —— 恢复走的是现成的 `POST /api/bind-account`。
    **不替用户自动确认**：共用电脑上前一个人删了凭证，后一个人一开机就被"恢复"进别人的账号，
    等于把余额送给陌生人。
-2. **换了机器 / 重装了系统**：只能靠用户自己存下来的账户码（这也是「🔐 账户信息」页要
-   红字提醒"截图保存"的原因）。
+2. **换了机器 / 重装了系统**：只能靠用户自己存下来的账户码 + 账户密钥（这也是「🔐 账户信息」页
+   要红字提醒"截图保存"的原因）。
+
+### 换设备登录要两样
+
+服务端 `POST /api/bind-account` 要 `{account_code, account_key, device_id}`：
+
+- **账户码**会露给旁人（截图、口述、页面上露前 4 位），单靠它就把整台机器的余额领走太薄；
+- **账户密钥**是 32 字节随机数的 hex，注册时下发一次，服务端只存 `SHA-256`。
+  比对时 **trim + 大小写不敏感**（那串 hex 大小写不携带信息，用户手抄容易错），
+  用 `timingSafeEqual` 比，不按字节早退。
+
+三种回答分得很清楚，别混着说：
+
+| 服务端 | 含义 | 界面上 |
+|---|---|---|
+| `404 account_code not found` | 码查不到 | 让用户核对账户码 |
+| `403 account_key_required` | 码对、但没给密钥 | 光标跳到密钥框 |
+| `403 account_key_invalid` | 密钥不对 | 强调"整串复制，别只抄一段" |
+
+**老账号（2026-10-24 之前注册的）没有密钥**，服务端对它们只认码 —— 那批账号的密钥
+从来没下发过，现发一把会让"只知道码的人先登录把真用户锁在外面"。所以客户端**不**把密钥
+设成必填，空着照样发，由服务端决定。
 
 ### 硬件指纹是什么、不是什么
 
@@ -417,9 +441,14 @@ Windows 上用一次 PowerShell 的 `Get-CimInstance` 读，非 Windows 或取�
 - 不少 OEM 主板 / 虚拟机的序列号是 `Default string`、`To be filled by O.E.M.` 这类占位符 ——
   这些情况一律返回空串，不拿 "`|` + CPU" 去凑一个全网同型号共用的常量。
 
-如果服务端回了 `is_recovered: true`（它按指纹认出了旧账号），客户端弹一句
-「检测到您之前已注册过，已为您自动恢复原有账户和余额。」，并把 `recovered` 放进给 Agent 的
-那段 JSON。真正能证明"这账号是我的"的，永远只有账户码。
+**服务端目前对指纹只落库、不恢复**：`/api/auto-register` 收下 `fingerprint` 存进
+`cc_accounts.fingerprint`（以后能统计"一个指纹建过多少号"），但**从不**据此发账号；
+响应里的 `is_recovered` 恒为 `false`。
+
+这是刻意的：指纹不保密，拿它当凭据等于"谁知道这串值谁能领走账号和余额" —— 同型号 CPU
+撞号、共用电脑换人，都会把别人的余额送出去。真正能证明"这账号是我的"的，是账户码 +
+账户密钥。客户端的恢复提示（`is_recovered: true` → 「检测到您之前已注册过…」）保留着，
+服务端哪天改主意接上就能用，现在它不会触发。
 
 ## 服务端接口
 
@@ -429,8 +458,8 @@ Windows 上用一次 PowerShell 的 `Get-CimInstance` 读，非 Windows 或取�
 | 接口 | 用途 |
 |---|---|
 | `GET /api/challenge` | 取一个 PoW 挑战（带 `X-Agent-Key`） |
-| `POST /api/auto-register` | 提交 `{challenge, nonce, fingerprint?}`，换回账号与专属 `api_key`（`is_recovered` 表示按指纹认出了旧账号） |
-| `POST /api/bind-account` | 用账户码换设备登录（不需要 `X-Agent-Key`） |
+| `POST /api/auto-register` | 提交 `{challenge, nonce, fingerprint?}`，换回账号与专属 `api_key`（`is_recovered` 目前恒为 `false`） |
+| `POST /api/bind-account` | 用 `{account_code, account_key, device_id}` 换设备登录（不需要 `X-Agent-Key`；老账号 `account_key` 可省） |
 | `GET /api/balance` | 查余额（按 `account_code` 查） |
 | `GET /api/usage` | 查 token 消耗 |
 | `POST /api/create-order` | 创建充值订单，返回付款二维码 |

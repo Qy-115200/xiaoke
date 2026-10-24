@@ -33,8 +33,8 @@ class _FakeGUI:
     def write(self, text):
         self.calls.append(("write", text))
 
-    def show_login_dialog(self, prefill="", notice=""):
-        self.calls.append(("show_login_dialog", prefill, notice))
+    def show_login_dialog(self, prefill="", prefill_key="", notice=""):
+        self.calls.append(("show_login_dialog", prefill, prefill_key, notice))
 
     def show_recovered_notice(self):
         self.calls.append(("show_recovered_notice",))
@@ -56,14 +56,17 @@ class PollQueueTests(unittest.TestCase):
 
     def test_recovery_opens_login_with_prefill(self):
         gui = _FakeGUI()
-        bus.msg_queue.put(("recovery", {"account_code": "CC-AAAAAA-BBBBBB"}))
+        bus.msg_queue.put(("recovery", {"account_code": "CC-AAAAAA-BBBBBB",
+                                        "account_key": "k" * 64}))
         bus.poll_queue(gui)
 
         kinds = [c[0] for c in gui.calls]
         self.assertIn("show_login_dialog", kinds)
         call = next(c for c in gui.calls if c[0] == "show_login_dialog")
         self.assertEqual(call[1], "CC-AAAAAA-BBBBBB")
-        self.assertTrue(call[2], "自动找回必须解释清楚为什么弹这个窗口")
+        # 登录现在要两样，保险箱里有密钥就一起预填
+        self.assertEqual(call[2], "k" * 64)
+        self.assertTrue(call[3], "自动找回必须解释清楚为什么弹这个窗口")
 
     def test_recovery_without_code_still_opens_dialog(self):
         # 消息里没带码也不该崩：弹一个空的登录窗，用户自己填
@@ -72,6 +75,7 @@ class PollQueueTests(unittest.TestCase):
         bus.poll_queue(gui)
         call = next(c for c in gui.calls if c[0] == "show_login_dialog")
         self.assertEqual(call[1], "")
+        self.assertEqual(call[2], "")
 
     def test_recovered_shows_notice(self):
         gui = _FakeGUI()

@@ -6,7 +6,7 @@
   OptionsMixin   ask_user 的选项面板
   RechargeMixin  充值弹窗
   UsageMixin     用量信息页（余额 / 各模型 token 柱状图 / 充值入口）
-  LoginMixin     换设备登录弹窗（账户码）
+  LoginMixin     换设备登录弹窗（账户码 + 账户密钥）
   AccountMixin   账户信息页（账户码 / 账户密钥：打码、显示、复制、防泄露警告）
 
 几个 mixin 的方法名互不重复，也没有一个调 super()，所以 MRO 顺序不影响行为。

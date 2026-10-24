@@ -48,6 +48,8 @@ class _State:
         self.bodies = []         # 收到的 POST 正文（看客户端发了什么字段）
         self.reject_fingerprint = False   # 模拟"服务端不认识 fingerprint 字段"
         self.recovered = False            # 模拟"按指纹认出了旧账号"
+        self.good_key = "k" * 64          # bind-account 认的账户密钥
+        self.key_required = True          # 模拟新账号：必须给密钥
         self.lock = threading.Lock()
 
 
@@ -89,6 +91,8 @@ def _make_handler(state: _State):
             body = json.loads(self.rfile.read(n) or b"{}")
             with state.lock:
                 state.bodies.append(body)
+            if self.path == "/api/bind-account":
+                return self._bind(body)
             if self.path != "/api/auto-register":
                 return self._send(404, {"error": "not found"})
             # 模拟老服务端：不认识 fingerprint 这个字段，整条请求 400 掉
@@ -120,10 +124,31 @@ def _make_handler(state: _State):
                 payload["is_recovered"] = True
             return self._send(200, payload)
 
+        def _bind(self, body):
+            """照着线上 bind-account 的新契约：新账号必须给密钥。"""
+            code = str(body.get("account_code") or "")
+            key = str(body.get("account_key") or "")
+            if code != "CC-AAAAAA-BBBBBB":
+                return self._send(404, {"error": "account_code not found"})
+            if state.key_required:
+                if not key:
+                    return self._send(403, {"error": "account_key_required"})
+                if key.strip().lower() != state.good_key:
+                    return self._send(403, {"error": "account_key_invalid"})
+            return self._send(200, {
+                "user_id": 42,
+                "api_key": "sk-user-secret",
+                "api_base": "https://aikaui.com/v1",
+                "account_code": "CC-AAAAAA-BBBBBB",
+                "balance": "3.00",
+                "account_key": key.strip().lower() or None,
+                "legacy_no_key": not state.key_required,
+            })
+
     return Handler
 
 
-class RegisterFlowTests(unittest.TestCase):
+class _FakeServerCase(unittest.TestCase):
     def setUp(self):
         self.state = _State()
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), _make_handler(self.state))
@@ -159,6 +184,8 @@ class RegisterFlowTests(unittest.TestCase):
         self._fp.stop()
         vault._force_file, vault._file_override = self._old_vault
         fplib._reset_cache()
+
+class RegisterFlowTests(_FakeServerCase):
 
     def test_register_writes_identity_and_hides_secrets(self):
         result = identity.register_device()
@@ -246,7 +273,17 @@ class RegisterFlowTests(unittest.TestCase):
     def test_pending_recovery_offers_code_when_identity_lost(self):
         identity.register_device()
         identity.IDENTITY_FILE.unlink()
-        self.assertEqual(identity.pending_recovery(), "CC-AAAAAA-BBBBBB")
+        got = identity.pending_recovery()
+        # 换设备登录要两样，保险箱里两样都存了 → 一起交回去
+        self.assertEqual(got.get("account_code"), "CC-AAAAAA-BBBBBB")
+        self.assertEqual(got.get("account_key"), "k" * 64)
+
+    def test_pending_recovery_tolerates_vault_without_key(self):
+        # 老版本保险箱里只存了码：仍然要能把码交回去，密钥留空让用户手填
+        vault.save("CC-AAAAAA-BBBBBB", None, None)
+        got = identity.pending_recovery()
+        self.assertEqual(got.get("account_code"), "CC-AAAAAA-BBBBBB")
+        self.assertEqual(got.get("account_key"), "")
 
     def test_pending_recovery_is_silent_when_identity_present(self):
         identity.register_device()
@@ -274,6 +311,53 @@ class RegisterFlowTests(unittest.TestCase):
     def test_recovered_defaults_to_false(self):
         result = identity.register_device()
         self.assertFalse(json.loads(result)["recovered"])
+
+
+class BindAccountTests(_FakeServerCase):
+    """换设备登录：账户码 + 账户密钥。"""
+
+    def _last_bind_body(self):
+        posts = [b for b in self.state.bodies if "device_id" in b]
+        self.assertTrue(posts, "根本没往 bind-account 发请求")
+        return posts[-1]
+
+    def test_key_is_sent_along_with_code(self):
+        data, err, code, _wait = identity.bind_account("CC-AAAAAA-BBBBBB", self.state.good_key)
+        self.assertIsNone(err, err)
+        self.assertEqual(data["user_id"], 42)
+        body = self._last_bind_body()
+        self.assertEqual(body.get("account_key"), self.state.good_key)
+        # 回来的密钥要能落盘（客户端据此把保险箱补齐）
+        self.assertEqual(data.get("account_key"), self.state.good_key)
+
+    def test_missing_key_is_reported_as_its_own_thing(self):
+        data, err, code, _wait = identity.bind_account("CC-AAAAAA-BBBBBB", "")
+        self.assertIsNone(data)
+        self.assertEqual(code, "account_key_required")
+        self.assertIn("账户密钥", err)
+
+    def test_wrong_key_is_not_reported_as_wrong_code(self):
+        data, err, code, _wait = identity.bind_account("CC-AAAAAA-BBBBBB", "f" * 64)
+        self.assertIsNone(data)
+        self.assertEqual(code, "account_key_invalid")
+        self.assertIn("密钥", err)
+        self.assertNotIn("没找到", err)   # 别让用户以为是码抄错了
+
+    def test_legacy_account_without_key_still_logs_in(self):
+        # 2026-10-24 之前注册的账号从来没有密钥，服务端对这些放行
+        self.state.key_required = False
+        data, err, _code, _wait = identity.bind_account("CC-AAAAAA-BBBBBB", "")
+        self.assertIsNone(err, err)
+        self.assertTrue(data.get("legacy_no_key"))
+
+    def test_key_is_never_put_in_the_agent_facing_json(self):
+        from server import api
+        # ★ 真实实现会去改这台机器的 ~/.claude.json 和 settings.json，测试里挡掉
+        with mock.patch.object(api, "sync_from_identity_file", return_value=(True, "")):
+            out = api.login_with_account_code("CC-AAAAAA-BBBBBB", self.state.good_key)
+        self.assertTrue(out.startswith("{"), out)
+        self.assertNotIn(self.state.good_key, out)
+        self.assertNotIn("sk-user-secret", out)
 
 
 if __name__ == "__main__":
