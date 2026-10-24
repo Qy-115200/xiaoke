@@ -20,3 +20,9 @@ sandbox/
 # ---- 发版产物（CI artifact 下载 + 本地拼的清单，不进仓库）----
 artifact/
 release/
+
+# ---- 凭证：任何形式的 token / 密钥文件都不许进仓库 ----
+# 协作分支两边可见、永久留在 git 历史里，删掉也追不回来。
+github_token.txt
+*_token.txt
+!*_token.txt.example
