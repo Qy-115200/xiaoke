@@ -16,3 +16,7 @@ sandbox/
 # 平台相关的解释器名），提交上去只会让两台机器互相覆盖。协作约定写 CLAUDE.md。
 .claude/settings.local.json
 .claude/settings.local.json.bak-collab
+
+# ---- 发版产物（CI artifact 下载 + 本地拼的清单，不进仓库）----
+artifact/
+release/
