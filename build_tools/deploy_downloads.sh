@@ -202,35 +202,44 @@ cmp -s "$SRC/latest.json" "$live" \
   || die "线上 latest.json 和本地不一致（等了一会儿还是旧的）—— 去服务器上看一眼"
 
 echo "▶ 改下载页里的版本号"
-# 两个页面里写死了 /releases/1.0.0/ 这种链接，只换清单的话新用户下载到的还是旧包。
+# 页面里有四处写死了版本号，少改一处就会误导用户：
+#   · <a href="/releases/1.0.0/…">   只换清单的话，新用户下载到的还是旧包
+#   · <span id="ver">v1.0.0</span>    页面头顶那颗版本号
+#   · <code id="ver2">1.0.0</code>    "当前版本"
+#   · fallbackVersion = "1.0.0"       JS 拉不到 /latest.json 时用的兜底
+# 后三处是静态文字，只有 JS 成功拉到清单才会被覆盖 —— 拉不到的时候页面会理直气壮地
+# 说自己还是 1.0.0，用户照着这个来问"怎么还是旧版"。
 "${SSH[@]}" "VERSION='$VERSION' REMOTE_BASE='$REMOTE_BASE' bash -s" <<'REMOTE'
 set -euo pipefail
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+# 一处正则覆盖上面四种写法；改完再用同一个正则确认没有漏网的旧版本号。
+VER_PAT='/releases/[0-9]+\.[0-9]+\.[0-9]+/|id="ver">v[0-9]+\.[0-9]+\.[0-9]+<|id="ver2">[0-9]+\.[0-9]+\.[0-9]+<|fallbackVersion = "[0-9]+\.[0-9]+\.[0-9]+"'
 for page in index.html download/index.html; do
   f="$REMOTE_BASE/$page"
   if [ ! -f "$f" ]; then
     echo "  ✖ 找不到页面：$f" >&2
     exit 1
   fi
-  if ! grep -Eq '/releases/[0-9]+\.[0-9]+\.[0-9]+/' "$f"; then
-    echo "  · $page 里没有版本号链接，跳过"
-    continue
-  fi
-  stale="$(grep -Eo '/releases/[0-9]+\.[0-9]+\.[0-9]+/' "$f" | grep -v "/releases/$VERSION/" || true)"
+  stale="$(grep -Eo "$VER_PAT" "$f" | grep -v "$VERSION" || true)"
   if [ -z "$stale" ]; then
-    echo "  · $page 已经指向 /releases/$VERSION/，跳过"
+    echo "  · $page 里没有需要改的版本号，跳过"
     continue
   fi
   cp -p "$f" "$f.bak-$stamp"
-  sed -E "s#/releases/[0-9]+\.[0-9]+\.[0-9]+/#/releases/$VERSION/#g" "$f.bak-$stamp" > "$f.new"
+  sed -E \
+    -e "s#/releases/[0-9]+\.[0-9]+\.[0-9]+/#/releases/$VERSION/#g" \
+    -e "s#(id=\"ver\">)v[0-9]+\.[0-9]+\.[0-9]+#\1v$VERSION#g" \
+    -e "s#(id=\"ver2\">)[0-9]+\.[0-9]+\.[0-9]+#\1$VERSION#g" \
+    -e "s#(fallbackVersion = \")[0-9]+\.[0-9]+\.[0-9]+#\1$VERSION#g" \
+    "$f.bak-$stamp" > "$f.new"
   mv "$f.new" "$f"          # 同目录 mv 是原子的：nginx 不会读到半个页面
-  left="$(grep -Eo '/releases/[0-9]+\.[0-9]+\.[0-9]+/' "$f" | grep -v "/releases/$VERSION/" || true)"
+  left="$(grep -Eo "$VER_PAT" "$f" | grep -v "$VERSION" || true)"
   if [ -n "$left" ]; then
-    echo "  ✖ $page 里还有旧版本链接：" >&2
+    echo "  ✖ $page 里还有旧版本号：" >&2
     echo "$left" | sort -u >&2
     exit 1
   fi
-  echo "  ✔ $page → /releases/$VERSION/（备份 $f.bak-$stamp）"
+  echo "  ✔ $page 全部改成 $VERSION（备份 $f.bak-$stamp）"
 done
 REMOTE
 
