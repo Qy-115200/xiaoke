@@ -153,11 +153,32 @@ Actions artifact。macOS 两个包都**没有签名**：首次打开要右键 �
 1. 改 `config.py` 里的 `APP_VERSION`，提交。
 2. 打 tag（必须与 `APP_VERSION` 一致，CI 会校验）：`git tag v1.0.1 && git push origin v1.0.1`。
 3. CI 构建四个平台产物，`publish` job 调 [`build_tools/deploy_downloads.sh`](build_tools/deploy_downloads.sh)
-   把包传到 `https://aikaui.com/releases/<版本>/`，最后以"先写 `.tmp` 再 `mv`"的方式换掉 `latest.json` ——
-   客户端永远读不到半个清单。
-4. 手工发布也行：四个产物放一个目录，用
-   [`build_tools/make_manifest.py`](build_tools/make_manifest.py) 生成 `latest.json`，
-   再跑部署脚本。
+   发布。**这一步要配 `DEPLOY_HOST` / `DEPLOY_USER` / `DEPLOY_SSH_KEY` 三个 secrets**；
+   没配时 `publish` 会打一行 `::warning::` 然后整步跳过（不会让 tag 构建变红），
+   四个产物只在 Actions artifact 里，得手工发。
+4. 手工发布：下载四个产物到一个目录（`ClaudeCodeAssistant-*` + 版本号目录），然后
+
+   ```bash
+   NOTES="这一版改了什么" DRY_RUN=1 DEPLOY_HOST=… ./build_tools/deploy_downloads.sh 1.1.0 ./release/1.1.0   # 先空跑
+   NOTES="这一版改了什么" DEPLOY_HOST=… ./build_tools/deploy_downloads.sh 1.1.0 ./release/1.1.0            # 真发
+   ```
+
+**发布时有两个容易踩的坑，脚本已经处理好了，但你要知道它在干什么：**
+
+- **同一份包有两个源，两个都要传。** 下载页的 HTML 用相对路径走 `aikaui.com`（nginx 的
+  `/var/www/aikaui/releases/`），而 `latest.json` 里给自动更新用的 url 指向 `dl.aikaui.com`
+  （腾讯云 COS + CDN）。脚本两边都传、两边都 HEAD 验大小；**任何一边取不到就直接退出，
+  不换清单**。只传一边的后果不是报错，而是客户端悄悄 404 —— 只会在 `update.log` 里留一行，
+  6 小时后再试一次。
+- **下载页里写死了版本号。** `index.html` 和 `download/index.html` 各有 4 条
+  `/releases/<版本>/…` 的链接，只换 `latest.json` 的话，新用户从下载页拿到的还是旧包。
+  脚本在换完清单之后用正则把这两页的版本号改成新的（备份成 `*.bak-<时间戳>`，
+  同目录 `mv` 原子替换）。用正则而不是替换某个固定字符串，所以不用每次改脚本。
+
+顺序是刻意的：**传包 → 两边都验 → 才换 `latest.json` → 再改下载页**。
+清单永远不会指向一个取不到的文件。`DRY_RUN=1` 只生成清单并用客户端自己的
+`updater.py` 验一遍（形状、sha256、size、`min_version`、已是最新时不再提示），不连服务器。
+
 
 > **老用户注意**：`v1.0.0` 是第一个带 updater 的版本。更早安装的版本里面没有更新代码，
 > 必须**手动**装一次 `v1.0.0`，之后才能自动更新。
@@ -209,11 +230,14 @@ agent_demo/
 ├── build_tools/
 │   ├── make_version_info.py       80   生成 Windows 文件版本信息（build/version_info.txt）
 │   ├── make_manifest.py          113   四个产物 → latest.json（校验版本、算 sha256 / size）
-│   └── deploy_downloads.sh            上传产物与清单到 aikaui.com（先传包，最后原子换清单）
-├── tests/                            离线单元测试（65 个，stdlib unittest）
+│   └── deploy_downloads.sh            发布：传 nginx + 传 COS → 两边验大小 → 换清单 → 改下载页版本号
+├── tests/                            离线单元测试（66 个，stdlib unittest）
 │   ├── test_version.py                版本解析 / 比较 / 清单校验
 │   ├── test_download.py               本地假服务器：下载、哈希、404、缓存回退
 │   ├── test_apply.py                  备份、回滚、失败上限、锁、更新提示
+│   ├── test_pow.py                    PoW 求解（和服务器 pow.js 的测试向量对齐）
+│   ├── test_register_flow.py          本地假服务器说真契约：注册、不重注册、不泄密
+│   ├── test_bash_timeout.py           bash 工具的超时与杀干净
 │   ├── test_platform_support.py       三平台抽象层
 │   ├── test_prompts.py                提示词按平台切换
 │   └── test_imports.py                工具层导入不依赖 Windows
