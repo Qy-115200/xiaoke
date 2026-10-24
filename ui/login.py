@@ -30,19 +30,34 @@ import customtkinter as ctk
 from agent_core import refresh_balance
 from bus import msg_queue
 from config import BG, DIM, GREEN, ORANGE, RED, TEXT
+from server.identity import load_identity
 from ui.fonts import S_BODY, S_BTN, S_DIALOG, S_MONO, S_SMALL, font
 
 
 class LoginMixin:
     # ---------- 弹窗 ----------
 
-    def show_login_dialog(self):
-        """打开「换设备登录」弹窗（已经开着就提到前面来）"""
+    def show_login_dialog(self, prefill="", notice=""):
+        """打开「换设备登录」弹窗（已经开着就提到前面来）。
+
+        两个可选参数是给**自动找回**用的（本机凭证丢了、但注册表/配置目录里还留着
+        上次的账户码，见 server/vault.py）：
+          prefill  预填账户码 —— 用户只要点一下「登录」；
+          notice   替换掉默认的说明文字 —— 告诉用户"为什么这个框自己弹出来了"。
+        ★ 即使能自动恢复也**不替用户点这一下**：共用电脑上前一个人删了凭证，
+          后一个人开机就被恢复进别人的账号，等于把余额送给陌生人。
+        """
         if getattr(self, "_login_dlg", None) is not None:
             try:
                 if self._login_dlg.winfo_exists():
                     self._login_dlg.lift()
                     self._login_dlg.focus_force()
+                    if prefill and self._login_entry is not None:
+                        try:
+                            if not self._login_entry.get():
+                                self._login_entry.insert(0, prefill)
+                        except Exception:
+                            pass
                     return
             except Exception:
                 pass
@@ -52,9 +67,11 @@ class LoginMixin:
         self._login_btn = None            # 登录按钮（限流时要锁它）
         self._login_status = None         # 状态那行字
         self._login_left = 0              # 限流倒计时还剩几秒
+        self._login_recovery = bool(prefill)   # 这次弹窗是"自动找回"触发的
 
         dlg.title("换设备登录")
-        dlg.geometry("440x330")
+        # 自动找回时的说明比平时长，窗口给高一点，别把按钮挤出去
+        dlg.geometry("460x390" if notice else "440x330")
         dlg.configure(fg_color=BG)
         dlg.transient(self.root)          # 跟随主窗
         dlg.after(150, self._safe_grab_login)
@@ -66,9 +83,10 @@ class LoginMixin:
 
         ctk.CTkLabel(
             dlg,
-            text=("在另一台电脑上继续用同一个账号：\n"
-                  "把这台机器上「用量信息」页显示的账户码填进来。"),
-            font=font(S_SMALL), text_color=DIM, justify="center", wraplength=380,
+            text=(notice or
+                  "在另一台电脑上继续用同一个账号：\n"
+                  "把之前存下来的账户码填进来（本机在左边「🔐 账户信息」页）。"),
+            font=font(S_SMALL), text_color=DIM, justify="center", wraplength=400,
         ).pack(pady=(0, 12))
 
         entry = ctk.CTkEntry(
@@ -78,6 +96,10 @@ class LoginMixin:
         )
         entry.pack(pady=(0, 6))
         self._login_entry = entry
+        if prefill:
+            # ★ 预填的是本机保险箱里的码，不给用户看第二遍：直接填进框里，
+            #   他点「登录」就恢复；不满意也能自己改。
+            entry.insert(0, str(prefill))
         entry.bind("<Return>", lambda e: self._submit_login())
 
         # 状态行：成功绿灯，限流黄灯，码不对红灯
@@ -114,16 +136,26 @@ class LoginMixin:
 
     def _close_login_dialog(self):
         dlg = getattr(self, "_login_dlg", None)
+        was_recovery = getattr(self, "_login_recovery", False)
+        had_identity = bool(load_identity())
         self._login_dlg = None
         self._login_btn = None
         self._login_status = None
         self._login_left = 0
+        self._login_recovery = False
         if dlg is not None:
             try:
                 dlg.grab_release()
                 dlg.destroy()
             except Exception:
                 pass
+        # ★ 自动找回那次，用户点了「取消」= 这不是他的账号（或者他想重来）。
+        #   这时候程序是"没有账号"的状态：得说清楚怎么接着往下走，
+        #   否则界面看着正常、其实一句话都答不了。
+        if was_recovery and not had_identity:
+            self.write("[系统] 没有恢复账号。这台电脑现在没有可用凭证。")
+            self.write("[系统] 想恢复原来的账号：点「用量信息」→「🔑 换设备登录」，"
+                       "输入之前存下来的账户码。")
 
     # ---------- 提交 ----------
 
@@ -171,6 +203,7 @@ class LoginMixin:
                 pass
 
         if res.get("ok"):
+            self._login_recovery = False       # 恢复成功了，退出时别再提示"没有账号"
             synced = bool(res.get("commands_synced"))
             self._set_login_status(
                 "登录成功，这台电脑已经切到这个账号了。" if synced else
@@ -186,6 +219,8 @@ class LoginMixin:
                            "重新点一次「一键安装 Claude Code」。")
             # 账号变了 → 余额/用量要按新账号重查（后台线程，别卡界面）
             threading.Thread(target=refresh_balance, daemon=True).start()
+            # 「账户信息」页上的两串凭据也跟着换了
+            self._refresh_account_panel()
             return
 
         if res.get("rate_limited"):

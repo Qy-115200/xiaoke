@@ -100,6 +100,8 @@ class WindowMixin:
         self.chat_view.grid(row=0, column=0, sticky="nsew")
         self.usage_view = self._build_usage_view(self.content)   # ui/usage.py
         self.usage_view.grid(row=0, column=0, sticky="nsew")
+        self.account_view = self._build_account_view(self.content)   # ui/account.py
+        self.account_view.grid(row=0, column=0, sticky="nsew")
 
         self._build_chat_view()
         self._build_prompt_bar()
@@ -125,7 +127,8 @@ class WindowMixin:
         ).pack(fill=tk.X, padx=16, pady=(0, 18))
 
         self.nav_buttons = {}
-        for key, label in (("chat", "💬  对话"), ("usage", "📊  用量信息")):
+        for key, label in (("chat", "💬  对话"), ("usage", "📊  用量信息"),
+                           ("account", "🔐  账户信息")):
             btn = ctk.CTkButton(
                 rail, text=label, anchor="w", height=42, corner_radius=6,
                 font=font(S_NAV),
@@ -141,10 +144,11 @@ class WindowMixin:
         ).pack(side=tk.BOTTOM, fill=tk.X, padx=16, pady=16)
 
     def show_view(self, key="chat"):
-        """切换内容区：chat（对话）/ usage（用量信息）"""
-        if key not in ("chat", "usage"):
+        """切换内容区：chat（对话）/ usage（用量信息）/ account（账户信息）"""
+        if key not in ("chat", "usage", "account"):
             key = "chat"
-        for k, view in (("chat", self.chat_view), ("usage", self.usage_view)):
+        for k, view in (("chat", self.chat_view), ("usage", self.usage_view),
+                        ("account", self.account_view)):
             if k == key:
                 view.grid(row=0, column=0, sticky="nsew")
             else:
@@ -160,6 +164,9 @@ class WindowMixin:
 
         if key == "usage":
             self.usage_view_update(self._usage_payload)
+        elif key == "account":
+            # 注册 / 换设备登录可能刚刚改过凭证，每次进来重读一遍
+            self._refresh_account_panel()
         else:
             self.entry.focus_set()
 

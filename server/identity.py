@@ -9,6 +9,10 @@
   load_identity()    读本地缓存（没文件 / 损坏 / 缺 api_key 都当没领过）
   bind_account()     拿账户码把本机绑到一个已有账号（换电脑 / 找回）
   _ensure_*()        给上层用：本地缺 user_id / account_code 时补领一次
+  pending_recovery() identity.json 没了、但 server/vault.py 里还留着账户码时就返回它
+
+★ device_id 和 server/fingerprint.py 那个硬件指纹都不是凭据（见那两处的说明）。
+  真正能证明"这个账号是我的"的，只有账户码。
 
 ★ 注册**不是幂等的**（2026-10 新契约）：/api/issue-token 已经恒返回 410，
   现在"注册"= 用 PoW 换一个新账号。所以 **只要有本地凭证就绝不再注册**，
@@ -22,6 +26,10 @@
 
 ★ device_id 只是本机的本地标识（bind-account 用它做去重），**不再是身份凭证**。
   服务器不再凭它发 token，所以猜中别人的 device_id 也拿不到任何东西。
+★ server/fingerprint.py 的硬件指纹同理：它连同一条注册请求发给服务器当反滥用
+  线索，但**不能**单独拿来换账号（它不保密、同型号 CPU 还会撞号）。
+★ 注册/绑定成功后额外把账户码存进 server/vault.py（注册表 / 配置目录）。
+  identity.json 被删掉时靠它把账号找回来，而不是默默开一个新号。
 """
 
 import hashlib
@@ -31,7 +39,9 @@ import platform
 import uuid
 
 from config import AGENT_KEY, IDENTITY_FILE, POW_MAX_ATTEMPTS, SERVER_URL
+from server import fingerprint as fplib
 from server import pow as powlib
+from server import vault
 from server.ui_bridge import get_ui
 
 # 上一次自动注册失败的原因（ensure_identity 写，界面读）
@@ -176,6 +186,10 @@ def _run_pow(challenge: str, difficulty: int):
 def _register_new_account():
     """走一次完整注册。成功返回 (身份 dict, None, "", None)，失败返回四个参数。"""
     last = (None, "注册失败", "", None)
+    # 硬件指纹（取不到就是 ""）。它只是个反滥用线索，**不是凭据** —— 见
+    # server/fingerprint.py 里的说明。为空时压根不发这个字段。
+    fp = fplib.get_device_fingerprint()
+    send_fp = bool(fp)
     for attempt in range(1, POW_MAX_ATTEMPTS + 1):
         data, err, code, wait = _post_json("/api/challenge")
         if not data:
@@ -196,14 +210,26 @@ def _register_new_account():
             last = (None, pow_err, "pow_timeout", None)
             continue
 
-        reg, err, code, wait = _post_json(
-            "/api/auto-register", {"challenge": challenge, "nonce": nonce}, method="POST")
+        body = {"challenge": challenge, "nonce": nonce}
+        if send_fp:
+            body["fingerprint"] = fp
+        reg, err, code, wait = _post_json("/api/auto-register", body, method="POST")
         if reg:
             if not reg.get("api_key"):
                 return None, "服务器返回异常：没给 api_key", "", None
+            if fp:
+                reg["fingerprint"] = fp          # 存进本地凭证，排查时能看到
             return reg, None, "", None
 
         last = (None, err, code, wait)
+
+        # ★ 服务端还是老版本、不认识 fingerprint 这个字段时，可能整条请求被 400 掉。
+        #   认不出的错误码先按"可能是字段不被接受"处理：去掉它再试一次。
+        #   下一轮如果还失败，就原样把错误带回去（不再无限重试）。
+        if send_fp and code not in _RETRYABLE and code not in _ERROR_TEXT:
+            send_fp = False
+            continue
+
         if code not in _RETRYABLE:
             return last
         # 可重试：换一个挑战再来（第 1 次失败最可能的原因是挑战过期 / 出口 IP 变了）
@@ -225,6 +251,14 @@ def _save_identity(data: dict) -> None:
         if os.name != "nt":
             os.chmod(IDENTITY_FILE, 0o600)                    # 里面有 api_key / account_key
     except OSError:
+        pass
+
+    # ★ 另存一份"命"到程序目录之外（注册表 / 配置目录）。identity.json 被删掉时，
+    #   就靠这一份把账号找回来 —— 否则只能开新号，余额全丢。
+    #   失败只是没存上，绝不影响注册本身。
+    try:
+        vault.save(data.get("account_code"), data.get("account_key"), data.get("user_id"))
+    except Exception:
         pass
 
 
@@ -433,6 +467,17 @@ def register_device() -> str:
             return f"注册成功但凭证没存下来：{e}"
         note = "领取成功"
 
+        # ★ 服务器按硬件指纹认出了旧账号，把原来的账号和余额还回来了
+        #   （响应里 is_recovered: true）→ 让界面弹一次提示，别让用户以为是新号。
+        #   走的还是 ui_bridge：这里在 Agent 线程上，真弹窗只能交给主线程。
+        if data.get("is_recovered"):
+            u = get_ui()
+            if u and hasattr(u, "ui_recovered"):
+                try:
+                    u.ui_recovered()
+                except Exception:
+                    pass
+
         u = get_ui()
         if u and hasattr(u, "on_token_acquired"):
             try:
@@ -450,4 +495,21 @@ def register_device() -> str:
         "user_id": data.get("user_id"),            # 后续查余额 / 充值要用
         "account_code": data.get("account_code"),  # 账户码，充值 & 换机找回用
         "balance": data.get("balance"),            # 余额（注册时服务器下发）
+        # 服务器按硬件指纹认出了旧账号、把原来的账号和余额还回来了
+        "recovered": bool(data.get("is_recovered")),
     }, ensure_ascii=False)
+
+
+def pending_recovery():
+    """本地没有凭证、但"第二份"里还留着账户码 → 返回那串码，等用户确认。
+
+    ★ 为什么不直接自动恢复：这是台共享机器（网吧、公司电脑）时，前一个人
+      删掉了 identity.json，后一个人一开机就被"恢复"进前一个人的账号 —— 那是
+      把别人的余额塞到陌生人手里。所以只把码交回给界面，由用户点一下确认。
+
+    没有可恢复的（本地已有凭证 / 保险箱里也没有）返回 None。
+    调用方拿到非空值时**不要**再去注册新号。"""
+    if load_identity():
+        return None
+    cred = vault.load() or {}
+    return cred.get("account_code") or None

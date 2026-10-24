@@ -11,6 +11,13 @@
   2. 返回给 Agent 的那段 JSON 里**没有** api_key / account_key（不能进聊天记录）；
   3. 已有凭证时**一次网络请求都不发**（重复注册 = 开新号 = 丢余额）；
   4. 注册关闭时给的是人话，不是 "HTTP 403"。
+
+外加 2026-10 加的两样：
+  5. 硬件指纹随注册请求一起发（服务器不认识这个字段时要能去掉再试一次）；
+  6. 服务器回 is_recovered 时把"账号已恢复"交给界面，并把账户码存进保险箱。
+
+★ 测试**绝不许**碰真实的 Windows 注册表 / 真实配置目录：vault 强制文件后端，
+  落在临时目录里；指纹也不真去起 PowerShell。
 """
 
 import json
@@ -20,12 +27,15 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from server import pow as powlib                     # noqa: E402
-from server import identity                          # noqa: E402
+from server import fingerprint as fplib                # noqa: E402
+from server import pow as powlib                       # noqa: E402
+from server import identity                            # noqa: E402
+from server import vault                               # noqa: E402
 
 DIFFICULTY = 9          # 平均 512 次哈希，测试跑得快
 
@@ -35,6 +45,9 @@ class _State:
         self.closed = False
         self.calls = []          # [(method, path)]
         self.challenges = {}     # challenge -> 是否已被用过
+        self.bodies = []         # 收到的 POST 正文（看客户端发了什么字段）
+        self.reject_fingerprint = False   # 模拟"服务端不认识 fingerprint 字段"
+        self.recovered = False            # 模拟"按指纹认出了旧账号"
         self.lock = threading.Lock()
 
 
@@ -74,8 +87,13 @@ def _make_handler(state: _State):
                 state.calls.append(("POST", self.path))
             n = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(n) or b"{}")
+            with state.lock:
+                state.bodies.append(body)
             if self.path != "/api/auto-register":
                 return self._send(404, {"error": "not found"})
+            # 模拟老服务端：不认识 fingerprint 这个字段，整条请求 400 掉
+            if state.reject_fingerprint and "fingerprint" in body:
+                return self._send(400, {"error": "unexpected_field"})
             challenge = body.get("challenge") or ""
             nonce = body.get("nonce")
             with state.lock:
@@ -88,7 +106,7 @@ def _make_handler(state: _State):
                 return self._send(400, {"error": "pow_failed"})
             with state.lock:
                 state.challenges[challenge] = True
-            return self._send(200, {
+            payload = {
                 "user_id": 42,
                 "account_code": "CC-AAAAAA-BBBBBB",
                 "account_key": "k" * 64,
@@ -97,7 +115,10 @@ def _make_handler(state: _State):
                 "model": "deepseek-v4-pro",
                 "fast_model": "deepseek-flash",
                 "balance": "3.00",
-            })
+            }
+            if state.recovered:
+                payload["is_recovered"] = True
+            return self._send(200, payload)
 
     return Handler
 
@@ -121,8 +142,23 @@ class RegisterFlowTests(unittest.TestCase):
         identity.IDENTITY_FILE = Path(self.tmp.name) / ".claude-agent" / "identity.json"
         powlib.reset_cancel()
 
+        # ★ 保险箱走文件后端，落在临时目录：绝不许往这台机器真实的 HKCU 注册表里
+        #   写一条假账户码（跑一次测试就污染一台机器）。
+        self._old_vault = (vault._force_file, vault._file_override)
+        vault._force_file = True
+        vault._file_override = Path(self.tmp.name) / "credential.json"
+
+        # ★ 指纹用固定的假值，别真去起 PowerShell 读主板序列号
+        fplib._reset_cache()
+        self._fp = mock.patch.object(fplib, "get_device_fingerprint",
+                                     return_value="f" * 32)
+        self._fp.start()
+
     def tearDown(self):
         identity.SERVER_URL, identity.AGENT_KEY, identity.IDENTITY_FILE = self._old
+        self._fp.stop()
+        vault._force_file, vault._file_override = self._old_vault
+        fplib._reset_cache()
 
     def test_register_writes_identity_and_hides_secrets(self):
         result = identity.register_device()
@@ -175,6 +211,69 @@ class RegisterFlowTests(unittest.TestCase):
         nonce, err = powlib.solve("a" * 32, DIFFICULTY)
         self.assertIsNone(err)
         self.assertTrue(powlib.verify("a" * 32, nonce, DIFFICULTY))
+
+    # ---------- 硬件指纹 ----------
+
+    def test_fingerprint_is_sent_with_register(self):
+        identity.register_device()
+        body = self.state.bodies[-1]
+        self.assertEqual(body.get("fingerprint"), "f" * 32)
+
+    def test_fingerprint_omitted_when_unavailable(self):
+        # 非 Windows / 主板序列号是占位符 → 算出来是空串 → 压根不发这个字段
+        with mock.patch.object(fplib, "get_device_fingerprint", return_value=""):
+            identity.register_device()
+        self.assertNotIn("fingerprint", self.state.bodies[-1])
+
+    def test_unknown_fingerprint_field_is_dropped_and_retried(self):
+        # 服务端还是老版本、不认识 fingerprint：别让整次注册死在这儿，
+        # 去掉字段再走一轮，第二次必须成功。
+        self.state.reject_fingerprint = True
+        result = identity.register_device()
+        self.assertTrue(result.startswith("{"), result)
+        self.assertIn("fingerprint", self.state.bodies[0])
+        self.assertNotIn("fingerprint", self.state.bodies[-1])
+        self.assertTrue(identity.IDENTITY_FILE.exists())
+
+    # ---------- 保险箱 / 自动恢复 ----------
+
+    def test_account_code_is_vaulted(self):
+        identity.register_device()
+        kept = vault.load() or {}
+        self.assertEqual(kept.get("account_code"), "CC-AAAAAA-BBBBBB")
+        self.assertEqual(kept.get("account_key"), "k" * 64)
+
+    def test_pending_recovery_offers_code_when_identity_lost(self):
+        identity.register_device()
+        identity.IDENTITY_FILE.unlink()
+        self.assertEqual(identity.pending_recovery(), "CC-AAAAAA-BBBBBB")
+
+    def test_pending_recovery_is_silent_when_identity_present(self):
+        identity.register_device()
+        self.assertIsNone(identity.pending_recovery())
+
+    def test_pending_recovery_is_none_without_vault(self):
+        self.assertIsNone(identity.pending_recovery())
+
+    # ---------- is_recovered ----------
+
+    def test_recovered_flag_reaches_the_ui(self):
+        self.state.recovered = True
+        calls = []
+
+        class _FakeUI:
+            def ui_recovered(self):
+                calls.append(1)
+
+        with mock.patch.object(identity, "get_ui", return_value=_FakeUI()):
+            result = identity.register_device()
+
+        self.assertTrue(json.loads(result)["recovered"])
+        self.assertEqual(calls, [1], "服务器说账号已恢复，界面却没收到提示")
+
+    def test_recovered_defaults_to_false(self):
+        result = identity.register_device()
+        self.assertFalse(json.loads(result)["recovered"])
 
 
 if __name__ == "__main__":

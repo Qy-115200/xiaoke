@@ -19,7 +19,12 @@ from config import MAX_STEPS
 from llm import get_client, insufficient_balance, NoIdentity
 from prompts import SYSTEM_PROMPT
 from server.api import query_balance, query_usage
-from server.identity import ensure_identity, last_register_error, load_identity
+from server.identity import (
+    ensure_identity,
+    last_register_error,
+    load_identity,
+    pending_recovery,
+)
 from server.tool_specs import tool_map, tools
 
 def _sanitize_messages(messages):
@@ -174,15 +179,31 @@ def agent_worker():
     """Agent 常驻线程：从启动就等着接收用户消息"""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # ★ 启动时先确保有正式凭证（首次运行会走 PoW 注册开一个账号）
+    # ★ 先确认"要不要恢复"，再决定"要不要注册"。
+    #   本地凭证丢了、但 server/vault.py 里还留着上次的账户码时，**不能**直接注册 ——
+    #   注册 = 开一个新号，原来那个账号和余额就永远回不来了。把码交给界面，
+    #   由用户点一下确认（共享电脑上不能替人做主，见 pending_recovery 的说明）。
     try:
-        if not ensure_identity():
-            msg_queue.put(("log", (
-                "[系统] 注册账号没成功：" + (last_register_error() or "未知原因") + "\n"
-                "       已有账号可以点「用量信息」页的「换设备登录」，输入账户码。"
-            )))
-    except Exception as e:
-        msg_queue.put(("log", f"[系统] 注册账号出错：{e}"))
+        recover_code = pending_recovery()
+    except Exception:
+        recover_code = None
+
+    if recover_code:
+        msg_queue.put(("log", (
+            "[系统] 这台电脑的本地凭证不见了，但还留着上次的账户码。\n"
+            "       正在问您要不要恢复 —— 点「登录」确认后，账号和余额会一起回来。"
+        )))
+        msg_queue.put(("recovery", {"account_code": recover_code}))
+    else:
+        # ★ 启动时先确保有正式凭证（首次运行会走 PoW 注册开一个账号）
+        try:
+            if not ensure_identity():
+                msg_queue.put(("log", (
+                    "[系统] 注册账号没成功：" + (last_register_error() or "未知原因") + "\n"
+                    "       已有账号可以点「用量信息」页的「换设备登录」，输入账户码。"
+                )))
+        except Exception as e:
+            msg_queue.put(("log", f"[系统] 注册账号出错：{e}"))
 
     refresh_balance()                # 立刻刷一次余额/用量
 

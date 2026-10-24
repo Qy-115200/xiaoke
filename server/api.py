@@ -435,7 +435,7 @@ def login_with_account_code(account_code) -> str:
     """用账户码把本机登录到一个已有账号。返回 JSON 字符串。
 
     ★ 这是**换电脑**的唯一入口：同一份身份文件拷到新机器也能用，但用户手上
-      如果只有那串账户码（显示在「用量信息」页），就得靠这里。
+      如果只有那串账户码（在「🔐 账户信息」页显示），就得靠这里。
 
     ★ account_code **原样发给服务器，不做任何清洗**。服务器会归一化大小写、
       横线、空格、全角，认 O↔0 / I↔1，甚至能把码从一整句话里挑出来。
@@ -446,7 +446,7 @@ def login_with_account_code(account_code) -> str:
     "note":..., "next":...}；失败返回 {"error": "..."}。"""
     raw = "" if account_code is None else str(account_code)
     if not raw.strip():
-        return json.dumps({"error": "没收到账户码。把账户码发我，或者点「用量信息」页的「换设备登录」。"},
+        return json.dumps({"error": "没收到账户码。把账户码发我，或者点「用量信息」页右上角的「🔑 换设备登录」。"},
                           ensure_ascii=False)
 
     data, err, code, wait = bind_account(raw)      # ★ 原样透传
@@ -484,7 +484,7 @@ def login_with_account_code(account_code) -> str:
     if code == "account_code not found":
         return json.dumps({
             "error": "没找到这个账户码。检查一下有没有抄错、有没有少几位——"
-                     "账户码就是「用量信息」页里显示的那串。",
+                     "账户码在左边「🔐 账户信息」页（默认打码，点一下「👁 显示」）。",
         }, ensure_ascii=False)
 
     return json.dumps({"error": err}, ensure_ascii=False)

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""纯函数小工具：数字/金额格式化、选项清洗，以及用量图表的取数与刻度。
+"""纯函数小工具：数字/金额格式化、凭证打码、选项清洗，以及用量图表的取数与刻度。
 
 这里不 import 任何本地模块，界面层和图表都从这里拿格式化逻辑。
 """
@@ -215,3 +215,26 @@ def _norm_options(options):
         if s:
             out.append(s)
     return out
+
+
+def _mask_secret(value, keep=4, mask_len=24) -> str:
+    """把凭证打码给人看：保留前 keep 位，其余换成 *。
+
+    账户码（CC-XXXXXX-XXXXXX）留前 4 位，用户认得出"是不是这一个"，又不是整串
+    亮在屏幕上；账户密钥长度固定，用 keep=0 就整串打成一排 *。
+
+    ★ 这只是"别被路过的人一眼看走"，**不是加密**：明文就躺在本地凭证里，
+      点一下眼睛按钮就出来了。所以界面上必须配那句红字警告 —— 打码不能替代提醒。
+    """
+    s = "" if value is None else str(value).strip()
+    if not s:
+        return ""
+    try:
+        keep = int(keep)
+    except (TypeError, ValueError):
+        keep = 0
+    keep = max(0, min(keep, len(s)))
+    if keep >= len(s):
+        return "*" * len(s)
+    hidden = max(8, min(len(s) - keep, mask_len))
+    return s[:keep] + "*" * hidden
