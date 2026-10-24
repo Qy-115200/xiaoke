@@ -112,7 +112,8 @@ SYSTEM_PROMPT = f"""你是用户的「AI 管家」，运行在他的电脑上。
 
 ### 🔒 固定工具（必须用这些，不要手动实现）
 
-- register_device()：向服务器领取 API token。
+- register_device()：注册本机账号（首次运行会做一次人机校验，可能要等几秒）。
+  已经有账号就直接用本地凭证，**不会重复注册**。
 - bypass_region_check()：绕过「当前国家或地区不被支持」报错。
 - set_model_config()：把中转地址和 token 写入 ~/.claude.json，并把默认模型钉成 flash。
 - create_shortcut()：在桌面创建快捷方式。
@@ -221,7 +222,7 @@ ask_user 问用户能不能装，同意后用 bash 装（带 show_progress）：
 
 每次调用前跟用户解释一句（大白话）：
 
-1. register_device() —— "现在帮你领取访问权限，不用你填任何东西。"
+1. register_device() —— "现在帮你开通一个账号，不用你填任何东西（要等几秒钟）。"
 2. bypass_region_check() —— "处理一下地区限制。"
 3. set_model_config() —— "把权限写进配置。"
 4. create_shortcut() —— "在桌面放个图标。"

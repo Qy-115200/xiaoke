@@ -16,10 +16,10 @@ import time
 
 from bus import msg_queue, user_input_queue
 from config import MAX_STEPS
-from llm import get_client, insufficient_balance
+from llm import get_client, insufficient_balance, NoIdentity
 from prompts import SYSTEM_PROMPT
 from server.api import query_balance, query_usage
-from server.identity import ensure_identity
+from server.identity import ensure_identity, last_register_error, load_identity
 from server.tool_specs import tool_map, tools
 
 def _sanitize_messages(messages):
@@ -60,7 +60,12 @@ def run_one_task(messages, task_text):
     for _step in range(MAX_STEPS):      # 最多循环 25 次
         messages = _sanitize_messages(messages)   # 每次调用前先清理（防被裁剪破坏结构）
 
-        client, model = get_client()    # 取当前 client 和模型
+        try:
+            client, model = get_client()    # 取当前 client 和模型
+        except NoIdentity as e:
+            # 没有本地账号凭证就压根没法聊天（服务器只认 Bearer 里的用户 api_key）
+            msg_queue.put(("log", f"\n[系统] {e}"))
+            return False
         try:
             resp = client.chat.completions.create(   # ★ 调大模型
                 model=model, messages=messages, tools=tools
@@ -147,7 +152,15 @@ def run_one_task(messages, task_text):
                 launched = True
 
             if name != "ask_user":
-                msg_queue.put(("log", f"[结果] {str(result)[:400]}"))
+                # ★ 注册结果是 JSON，里面有账户码（新契约下它就是账号凭据）。
+                #   日志窗口是用户会截图 / 复制的地方，所以只打一句结论。
+                shown = str(result)
+                if name == "register_device" and shown.startswith("{"):
+                    try:
+                        shown = json.loads(shown).get("note") or "领取成功"
+                    except Exception:
+                        shown = "领取成功"
+                msg_queue.put(("log", f"[结果] {shown[:400]}"))
 
             messages.append({
                 "role": "tool",
@@ -161,12 +174,15 @@ def agent_worker():
     """Agent 常驻线程：从启动就等着接收用户消息"""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # ★ 启动时先确保有正式凭证（首次运行会拿 AGENT_KEY 换一份 token）
+    # ★ 启动时先确保有正式凭证（首次运行会走 PoW 注册开一个账号）
     try:
         if not ensure_identity():
-            msg_queue.put(("log", "[系统] 未能领取凭证，可能无法对话（检查网络后重试）"))
+            msg_queue.put(("log", (
+                "[系统] 注册账号没成功：" + (last_register_error() or "未知原因") + "\n"
+                "       已有账号可以点「用量信息」页的「换设备登录」，输入账户码。"
+            )))
     except Exception as e:
-        msg_queue.put(("log", f"[系统] 领取凭证出错：{e}"))
+        msg_queue.put(("log", f"[系统] 注册账号出错：{e}"))
 
     refresh_balance()                # 立刻刷一次余额/用量
 
@@ -190,7 +206,12 @@ def refresh_balance():
     """查一次余额 + 用量，把结果丢给主线程显示。
     两个查询都不抛异常（失败会返回 {"error": ...}），所以这里只管转发。
 
+    ★ 还没有账号凭证就直接跳过：不然每 30 秒的轮询会一直打一个必定失败的接口，
+      界面上还会反复冒同一句错误。注册只由 ensure_identity / 用户点按钮触发。
+
     返回"服务器让我们等几秒"（限流时才有，没有就是 0），给 balance_worker 退避用。"""
+    if not load_identity():
+        return 0
     try:
         bal = json.loads(query_balance())
     except Exception as e:

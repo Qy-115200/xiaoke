@@ -67,11 +67,26 @@ def poll_queue(gui):
                 gui.show_options(data.get("options") or [])
             elif kind == "progress_start":
                 gui.progress_label.configure(text=data)
+                gui.progress_bar.configure(mode="indeterminate")
+                gui.progress_cancel.pack_forget()      # 跑马灯不需要取消
                 gui.progress_frame.pack(fill=tk.X, padx=12, pady=(0, 6),
                                         before=gui.entry_frame)   # 插到输入行之前
                 gui.progress_bar.start()
+            elif kind == "pow_progress":
+                # 注册的人机校验：除了文字还要一个**确定**的进度条 + 「取消」按钮
+                text, pct = data
+                gui.progress_label.configure(text=text)
+                gui.progress_bar.stop()
+                gui.progress_bar.configure(mode="determinate")
+                gui.progress_bar.set(pct if pct is not None else 0)
+                if not gui.progress_cancel.winfo_ismapped():
+                    gui.progress_cancel.configure(text="取消", state=tk.NORMAL)
+                    gui.progress_cancel.pack(side=tk.RIGHT, padx=(8, 0))
+                gui.progress_frame.pack(fill=tk.X, padx=12, pady=(0, 6),
+                                        before=gui.entry_frame)
             elif kind == "progress_stop":
                 gui.progress_bar.stop()
+                gui.progress_cancel.pack_forget()
                 gui.progress_frame.pack_forget()
     except queue.Empty:
         pass                             # 队列空，正常退出

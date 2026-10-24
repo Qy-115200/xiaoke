@@ -4,8 +4,9 @@
 这里集中放着整个程序用到的所有字面量：服务器地址、内置凭证、路径、
 配色、以及几个全局阈值。其它模块只从这里 import，不要再自己写一份。
 
-这些常量会被 PyInstaller 打进入 exe，用户反编译能看到，
-但里面没有 DeepSeek key，只有一个"半公开"的 AGENT_KEY（服务器会校验 + 限流）。
+这些常量会被 PyInstaller 打进入 exe，用户反编译能看到。里面唯一像凭证的是
+AGENT_KEY，但它只是注册链路的"敲门砖"（服务器只拿它换一次挑战），不是秘密，
+也绝不能当秘密使——真正的身份是每台设备注册后拿到的专属 api_key。
 """
 
 import os
@@ -15,22 +16,29 @@ from pathlib import Path
 
 # 唯一真源：git tag、Windows 文件版本、macOS Info.plist、更新清单都用它。
 # 只允许 X.Y.Z 三个数字段（自动更新按数字比较，不要写 beta/日期）。
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 APP_NAME = "Claude Code 助手"
 APP_ID = "com.aikaui.claudeassistant"
 
 # ================= 服务器 =================
 
-SERVER_URL = "https://aikaui.com"           # 服务器根地址（领 token / 查余额 / 生成订单）
-BUILTIN_BASE_URL = "https://aikaui.com/api"  # ★ 服务器代理入口
+SERVER_URL = "https://aikaui.com"           # 服务器根地址（注册 / 查余额 / 生成订单）
+BUILTIN_BASE_URL = "https://aikaui.com/api"  # ★ 助手自己聊天用的入口
                                              # SDK 会拼成 https://aikaui.com/api/chat/completions
 
-# Agent 的身份凭证。服务器用它判断"是不是我们的 Agent"。
-# 注意：BUILTIN_API_KEY 和 AGENT_KEY 是同一个字面量，别写成两个不一样的值。
+# Agent 的"敲门砖"。**只用于注册链路**（/api/challenge 取挑战、
+# /api/auto-register 提交），服务器不再接受它去调模型接口。
+# 打完包反编译就能看到，所以它不是秘密，也绝不能当秘密使。
 AGENT_KEY = "78530877000c2cd6b2ab2890aebc573e416c69f6aaf1500f"
-BUILTIN_API_KEY = AGENT_KEY
 
-BUILTIN_MODEL = "deepseek-flash"            # 默认模型（便宜快，够 Agent 打招呼/答疑）
+BUILTIN_MODEL = "deepseek-flash"            # 兜底模型（正常用服务器下发的 fast_model）
+
+# ================= 注册（PoW） =================
+# /api/challenge 给一个 32 位 hex 挑战，客户端找 nonce 让
+# SHA256(challenge+nonce) 的前 difficulty 个**二进制位**为 0，再交给
+# /api/auto-register。一次注册最多重来这么多次（每次都重新取挑战）。
+# 求解本身的超时在 server/pow.py 里（POW_TIMEOUT）。
+POW_MAX_ATTEMPTS = 3
 
 # ================= 路径 =================
 

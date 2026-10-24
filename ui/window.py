@@ -178,13 +178,22 @@ class WindowMixin:
         )
         self.log.pack(fill=tk.BOTH, expand=True, padx=14, pady=(14, 8))
 
-        # ---------- 进度条（默认隐藏，bash 跑长命令时才显示）----------
+        # ---------- 进度条（默认隐藏，bash 长命令 / 账号注册时才显示）----------
         self.progress_frame = ctk.CTkFrame(view, fg_color=PANEL, corner_radius=8)
+        _prow = ctk.CTkFrame(self.progress_frame, fg_color="transparent")
+        _prow.pack(fill=tk.X, padx=12, pady=(10, 4))
         self.progress_label = ctk.CTkLabel(
-            self.progress_frame, text="", anchor="w",
+            _prow, text="", anchor="w",
             font=font(S_SMALL), text_color=OPTION_SEL_TEXT,
         )
-        self.progress_label.pack(fill=tk.X, padx=12, pady=(10, 4))
+        self.progress_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # 「取消」只在 PoW 求解时出现（那个循环可能跑几十秒，得让人能叫停）
+        self.progress_cancel = ctk.CTkButton(
+            _prow, text="取消", width=56, height=24, corner_radius=4,
+            font=font(S_TINY),
+            fg_color="#3a3a3a", hover_color="#4a4a4a",
+            command=self.on_progress_cancel,
+        )
         self.progress_bar = ctk.CTkProgressBar(self.progress_frame, mode="indeterminate")
         self.progress_bar.pack(fill=tk.X, padx=12, pady=(0, 10))
 
@@ -378,12 +387,28 @@ class WindowMixin:
         return f"用户回答：{input_holder['value']}"
 
     def ui_progress_start(self, text="处理中..."):
-        """Agent 调用：显示进度条"""
+        """Agent 调用：显示进度条（不确定进度，跑马灯）"""
         msg_queue.put(("progress_start", text))
 
     def ui_progress_stop(self):
         """Agent 调用：隐藏进度条"""
         msg_queue.put(("progress_stop", None))
+
+    def ui_pow_progress(self, text, pct=None):
+        """Agent 调用：报 PoW（人机校验）的进度，pct 是 0~1，None 表示算不出来。
+
+        ★ 单独开一个消息类型，是因为这里要**确定进度**（百分比）并且露出
+          「取消」按钮；普通的 bash 进度条是跑马灯，不需要这两样。"""
+        msg_queue.put(("pow_progress", (text, pct)))
+
+    def on_progress_cancel(self):
+        """用户点了进度条上的「取消」——只对正在跑的 PoW 有效。
+
+        ★ 这里直接置一个 Event，求解线程每 4096 次哈希看一次；它不会立刻停，
+          但最多几毫秒。按钮先变成"取消中…"，免得用户以为没点上。"""
+        from server.pow import request_cancel
+        request_cancel()
+        self.progress_cancel.configure(text="取消中…", state=tk.DISABLED)
 
     # ---------- 余额显示 ----------
 

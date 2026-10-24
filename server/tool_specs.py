@@ -53,7 +53,7 @@ tools = [
         "type": "function",              # 固定写法
         "function": {
             "name": "register_device",   # 工具名（跟 tool_map 的 key 一致）
-            "description": "向服务器注册当前设备，领取 API token。装完 Claude Code 后必须调用。已注册过会自动跳过。",
+            "description": "注册本机账号并拿到本机专属的 API key。首次运行会做一次人机校验，可能要等几秒。已经有账号时直接用本地凭证，不会重复注册。装完 Claude Code 后必须调用。",
             # ↑ description 非常重要！模型靠它判断"什么时候该调这个工具"
             "parameters": {              # 参数 schema
                 "type": "object",

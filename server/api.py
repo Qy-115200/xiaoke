@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """余额 / 用量 / 充值的 HTTP 层。
 
-统一走 https://aikaui.com，统一带 X-Agent-Key 鉴权。
+统一走 https://aikaui.com。`/api/balance`、`/api/usage`、`/api/bind-account`
+按账户码查，不再需要 X-Agent-Key；`/api/pay-methods`、`/api/create-order`
+仍然要（它们按 user_id 操作，得有个门槛）。
 
 设计原则：**永远不抛异常**。失败就返回 (None, 错误说明) 或 {"error": "..."}，
 这样余额查不到、支付平台挂了，都不会把整个程序搞崩——错误原文会被翻译成
@@ -31,7 +33,8 @@ from server.identity import (
 RATE_LIMITED = "too_many_attempts"
 
 # ================= 服务器接口调用（余额 / 用量 / 充值） =================
-# 这几个接口统一走 https://aikaui.com，统一带 X-Agent-Key 鉴权。
+# /api/balance、/api/usage 只按 account_code 查，不需要任何请求头；
+# /api/pay-methods、/api/create-order 仍然带 X-Agent-Key（这两个按 user_id 操作）。
 # 设计原则：**永远不抛异常**，失败就返回 (None, 错误说明)，
 # 这样余额查不到也不会把整个程序搞崩。
 
@@ -163,8 +166,11 @@ def _account_get(path: str):
     比 _api_get 多两件正事：
       ① 服务器回 200 时，把它回显的**规范形态**账户码写回本地
          （本地文件里那串可能早就过期了）；
-      ② 服务器说"这个账户码我不认"（account_code not found）时，**自动重领一次**
-         再查一遍——老机器上存的是旧形态的码，不重领会一直查不到。
+      ② 服务器说"这个账户码我不认"（account_code not found）时，再查一遍确认。
+
+    ★ 老版本这里会"重新领一次"来换掉过期的码；现在注册 = 开新账号，
+      绝不能再为了自愈去注册（用户的余额会丢）。所以现在只是把错误如实带回去，
+      让用户用「换设备登录」重新输入账户码。
 
     返回 (数据, 错误说明, 错误码, 建议等待秒数)，跟 _api_get 同一套。"""
     account_code, err = _ensure_account_code()
@@ -181,13 +187,9 @@ def _account_get(path: str):
             remember_account_code(data.get("account_code"))
             return data, None, "", None
         last = (None, err, code, wait)
-        # 只有"码不认"才值得重领；限流、断网这些重领也没用
+        # 只有"码不认"才值得再试一次；限流、断网这些重试也没用
         if code != "account_code not found" or attempt == 2:
             break
-        fresh, _ = _ensure_account_code(refresh=True)
-        if not fresh or fresh == account_code:
-            break                      # 领回来的还是同一串：别再白试一次
-        account_code = fresh
     return last
 
 

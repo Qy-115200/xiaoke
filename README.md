@@ -90,7 +90,8 @@ pip install -r requirements.txt
 python main.py
 ```
 
-首次运行会自动向服务器领一份设备凭证，存到 `~/.claude-agent/identity.json`。
+首次运行会自动注册一个账号（服务器要求做一次 PoW 人机校验，通常一两秒），
+凭证存到 `~/.claude-agent/identity.json`。之后每次启动都直接用这份本地凭证，不再联网注册。
 
 离线测试（不需要联网，也不需要 GUI）：
 
@@ -175,7 +176,7 @@ agent_demo/
 ├── images.py                     138   窗口图标（打包资源优先，缺了现画）+ 付款二维码下载
 ├── notify.py                      26   桌面通知薄封装（各平台实现在 platform_support）
 ├── bus.py                         79   线程间队列 + poll_queue（每 100ms 把消息翻译成界面操作）
-├── llm.py                        117   大模型客户端（走 aikaui.com 代理，带 X-Device-Id）
+├── llm.py                        126   大模型客户端（走 aikaui.com 代理，用本机账号的 api_key）
 ├── agent_core.py                 221   Agent 主循环：run_one_task / agent_worker / balance_worker
 ├── prompts.py                    415   系统提示词（按平台给安装指令 + 工作目录 + VSCode 推荐 + 余额分寸）
 │
@@ -188,7 +189,8 @@ agent_demo/
 │
 ├── server/                            服务端与工具层（不 import 界面）
 │   ├── ui_bridge.py               31   GUI 注入桥：set_ui / get_ui
-│   ├── identity.py               332   设备指纹、本地凭证、领 token、_ensure_account_code / _ensure_user_id
+│   ├── identity.py               468   设备指纹、PoW 注册、本地凭证、换设备登录、_ensure_account_code / _ensure_user_id
+│   ├── pow.py                    128   PoW 求解（进度 / 取消 / 90 秒超时），和服务器 pow.js 逐位对齐
 │   ├── api.py                    504   余额 / 用量 / 充值 HTTP 层（永远不抛异常）
 │   ├── claude_config.py          124   把身份写进 ~/.claude.json 和 ~/.claude/settings.json
 │   ├── tools_fixed.py            141   五个固定工具 + aikaui:// 协议注册（转发 platform_support）
@@ -208,7 +210,7 @@ agent_demo/
 │   ├── make_version_info.py       80   生成 Windows 文件版本信息（build/version_info.txt）
 │   ├── make_manifest.py          113   四个产物 → latest.json（校验版本、算 sha256 / size）
 │   └── deploy_downloads.sh            上传产物与清单到 aikaui.com（先传包，最后原子换清单）
-├── tests/                            离线单元测试（49 个，stdlib unittest）
+├── tests/                            离线单元测试（65 个，stdlib unittest）
 │   ├── test_version.py                版本解析 / 比较 / 清单校验
 │   ├── test_download.py               本地假服务器：下载、哈希、404、缓存回退
 │   ├── test_apply.py                  备份、回滚、失败上限、锁、更新提示
@@ -309,9 +311,9 @@ from server.api import refresh_balance as fetch_balance   # 查完返回 dict，
 
 | 文件 | 内容 |
 |---|---|
-| `~/.claude-agent/identity.json` | 本机凭证：`device_id`、`api_key`、`api_base`、`model`、`user_id`、`account_code`、`balance`，以及最近一笔充值订单 `last_order` |
+| `~/.claude-agent/identity.json` | 本机凭证：`device_id`、`api_key`、`account_key`、`api_base`、`model`、`fast_model`、`user_id`、`account_code`、`balance`，以及最近一笔充值订单 `last_order`。POSIX 上权限是 `0600` |
 | `~/.claude.json` | Claude Code 的配置，`set_model_config` 往它的 `env` 里写中转地址、token 和各档位模型映射 |
-| `~/.claude/settings.json` | Claude Code 的用户级设置，`set_model_config` 只改其中的 `model` 一个键（钉默认模型），其它键原样保留 |
+| `~/.claude/settings.json` | Claude Code 的用户级设置，`set_model_config` 会把同一套 `env` 也写进去（优先级更高），并把 `model` 钉成 flash，其它键原样保留 |
 
 ### 模型档位：默认只走 flash，pro 要自己主动选
 
@@ -335,24 +337,44 @@ from server.api import refresh_balance as fetch_balance   # 查完返回 dict，
 不想要可以把它也改成 flash。
 
 `device_id` 是主机名 + MAC + 架构 的 sha256 前 16 位，同一台机器每次算出来都一样。
-服务器靠它记账，所以一旦注册过就固定复用文件里那个 —— 每次重新生成的话，服务器会当成
-新设备再发一份 token，用户余额也看不到。
+它现在只是**本机标识**（`bind-account` 用它去重），不再是身份凭证 —— 服务器只按
+`api_key` / `account_code` 认人，所以同一个 `device_id` 换不出任何东西。
 
-同一个 `account_code`（形如 `CC-F43D-5152`）可以换设备找回账号，**「用量信息」页的余额卡
-下面一直显示着它**，方便用户截图保存。
+同一个 `account_code`（形如 `CC-XXXXXX-XXXXXX`）可以换设备找回账号，**「用量信息」页的余额卡
+下面一直显示着它**，方便用户截图保存。服务端还回一个 `account_key`（64 位 hex，**只回一次**），
+存在 `identity.json` 里备查；当前接口不用它，界面上也不显示。
+
+> 注册**不是幂等的**：新契约下"注册"= 用 PoW 开一个新账号，所以只要本地有凭证，
+> 客户端**一次请求都不会再发**（重复注册会开新号、把余额丢掉）。`identity.json`
+> 删了就等于换号 —— 所以「用量信息」页一直把账户码亮在那儿。
 
 ## 服务端接口
 
-统一走 `https://aikaui.com`，统一带 `X-Agent-Key` 请求头（值在 `config.py` 里，
-是个"半公开"的凭证，服务器端会限流）。
+统一走 `https://aikaui.com`。`X-Agent-Key` **只在注册链路**里发（它打在 exe 里，
+是公开的"敲门砖"，不是秘密）；聊天用注册拿到的专属 `api_key`。
 
 | 接口 | 用途 |
 |---|---|
-| `POST /api/issue-token` | 拿 `device_id` 换一份设备专属 token |
+| `GET /api/challenge` | 取一个 PoW 挑战（带 `X-Agent-Key`） |
+| `POST /api/auto-register` | 提交 `{challenge, nonce}`，换回账号与专属 `api_key` |
+| `POST /api/bind-account` | 用账户码换设备登录（不需要 `X-Agent-Key`） |
 | `GET /api/balance` | 查余额（按 `account_code` 查） |
 | `GET /api/usage` | 查 token 消耗 |
 | `POST /api/create-order` | 创建充值订单，返回付款二维码 |
+| `POST /api/chat/completions` | 助手自己聊天，只认 `Authorization: Bearer <用户 api_key>` |
 | `aikaui://recharge?user_id=N` | 自定义协议：支付页付完款靠它把本程序唤起来 |
+
+`POST /api/issue-token` 已经下线（恒返回 410），客户端不再调用。
+
+### 注册：PoW 人机校验
+
+`/api/challenge` 给一个 32 位 hex 的挑战（绑定来源 IP、120 秒过期、只能用一次），
+客户端要在本地找一个 `nonce`，使 `SHA256(challenge + nonce)` 的**前 difficulty 个二进制位**
+全为 0，再交给 `/api/auto-register`。难度平时是 16，同一出口注册太频繁会抬到 22。
+
+求解在 `server/pow.py`，跑在 Agent 线程里：**能报进度（已算多少次 / 约百分之几）、能取消
+（进度条上有个「取消」）、单次 90 秒硬超时**，一次注册最多重来 3 次（每次都重新取挑战）。
+失败原因会照实带到界面上：注册关闭、网络太频繁、认不出 IP，三种情况用户该做的事不一样。
 
 `server/api.py` 里的所有函数**永远不抛异常** —— 失败就返回 `(None, 错误说明)` 或
 `{"error": "..."}`，错误原文会被翻译成大白话带到界面上。余额查不到、支付平台挂了，
