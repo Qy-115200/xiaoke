@@ -476,9 +476,9 @@ class WindowMixin:
     def schedule_auto_quit(self, seconds=None):
         """安装流程走完 → 留一点时间给用户看收尾说明，然后助手自己退出。
 
-        为什么不是立刻退：最后那条 Agent 消息里写了工作目录和 VSCode 的用法，
+        为什么不是立刻退：最后那条 Agent 消息里写了工作目录和怎么用（VSCode 或终端），
         秒退用户根本来不及看。为什么只在这个时机退：用户只是让助手"再打开一次
-        Claude Code"时也调 launch_claude，那种情况不该把助手关掉——
+        Claude Code"时也调 launch_claude / open_vscode，那种情况不该把助手关掉——
         所以触发条件是**这一轮完整走过安装流程**，见 agent_core.run_one_task。"""
         if getattr(self, "_recharge_only", False):
             return                               # 只办充值的启动方式没有安装流程
@@ -486,8 +486,10 @@ class WindowMixin:
             return                               # 已经排过了，别重复排
         if seconds is None:
             seconds = AUTO_QUIT_SECONDS
+        # ★ 这里不能写"已经在终端里打开了"：走 VSCode 分支时根本没开终端，
+        #   那种文案是假的。两种收尾都适用的话只能这么写。
         self.write(f"[系统] 安装完成，{seconds} 秒后自动退出。"
-                   " Claude Code 已经在终端里打开了，以后从桌面图标启动就行。")
+                   " Claude Code 已经可以用了，以后从桌面图标启动就行。")
         self._auto_quit_id = self.root.after(int(seconds * 1000), self.quit_app)
 
     def quit_app(self):

@@ -12,8 +12,8 @@ ROOT = Path(__file__).resolve().parent.parent
 class ImportTests(unittest.TestCase):
     def test_tool_layer_imports(self):
         code = (
-            "import server.tools_fixed, server.tools_general, notify, prompts;"
-            "print('ok')"
+            "import server.tools_fixed, server.tools_general, server.tools_vscode,"
+            " notify, prompts; print('ok')"
         )
         r = subprocess.run(
             [sys.executable, "-c", code],

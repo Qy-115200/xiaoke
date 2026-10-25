@@ -142,5 +142,7 @@ def launch_claude(directory: str = "") -> str:
 
     ★ 只接受用户主目录里的路径：越界的一律拒绝，退回主目录并说明原因
       —— 跟 read_file / write_file 用的是同一条安全规则。
-    ★ 返回值必须以「已打开新终端」开头：agent_core 靠这个前缀判断安装完成。"""
+    ★ 返回值必须以「已打开新终端」开头：agent_core 靠这个前缀判断安装完成。
+    ★ 走 VSCode 分支的时候不调这个，改调 tools_vscode.open_vscode
+      （那个以「已打开 VSCode」开头，agent_core 一视同仁）；两者只能开一个。"""
     return platform_support.launch_claude(directory)

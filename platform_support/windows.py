@@ -6,14 +6,28 @@ macOS/Linux 在 import 阶段就崩掉。现在 winreg / win32com 全部收进�
 模块本身在任何平台上都能安全 import。
 """
 
+import os
 import platform
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from config import HOME
-from platform_support.common import find_claude, safe_cwd
+from platform_support.common import (
+    clean_env,
+    download_page_fallback,
+    exe_from_command,
+    find_claude,
+    run_capture,
+    safe_cwd,
+)
+
+# 装 VSCode 可能要一两分钟（下载 + 安装 + 杀软扫一遍）。这个超时只给 install_vscode
+# 自己的子进程用，跟 bash 工具的 600 秒上限无关。
+VSCODE_INSTALL_TIMEOUT = 900
 
 
 def platform_key() -> str:
@@ -55,6 +69,222 @@ def find_claude_path() -> str | None:
         HOME / "AppData" / "Local" / "Programs" / "claude" / "claude.exe",  # 官方原生装的
         Path("C:/Program Files/claude/claude.exe"),                          # 系统级装的
     ])
+
+
+# ================= VSCode =================
+# 找 VSCode 不能只看 PATH。真机上最常见的两种情况都靠不住 PATH：
+#   1) 用户装的时候没勾「添加到 PATH」——安装目录里明明有 bin\code.cmd，PATH 里却没有；
+#   2) 装到了非默认盘（本机就是 D:\vs code\Microsoft VS Code），不在任何标准目录里。
+# 所以顺序是「注册表 → 标准目录 → PATH」，注册表排最前面，它一定是最准的。
+
+def _read_reg_value(hive_name: str, subkey: str, value_name: str = "") -> str:
+    """读一个注册表字符串值，读不到就返回空串（任何异常都不许冒出去）。"""
+    try:
+        import winreg
+        hive = (winreg.HKEY_LOCAL_MACHINE if hive_name == "HKLM"
+                else winreg.HKEY_CURRENT_USER)
+        flags = winreg.KEY_READ
+        if hive_name == "HKLM":
+            # 32 位冻结包默认会被重定向到 WOW6432Node，显式要 64 位视图
+            flags |= getattr(winreg, "KEY_WOW64_64KEY", 0)
+        with winreg.OpenKey(hive, subkey, 0, flags) as key:
+            return str(winreg.QueryValueEx(key, value_name)[0] or "")
+    except Exception:
+        return ""
+
+
+def _vscode_registry_candidates() -> list[str]:
+    """注册表里能给出 Code.exe 路径的几处，按可靠程度排。
+
+    App Paths 最好：值本身就是干净的完整路径，不用解析。
+    后面两条是"命令行"，形如 `"...\\Code.exe" "%1"`，得用 exe_from_command 抠。"""
+    subkeys = [
+        r"Software\Microsoft\Windows\CurrentVersion\App Paths\Code.exe",
+        r"Software\Classes\Applications\Code.exe\shell\open\command",
+        r"Software\Classes\vscode\shell\open\command",
+    ]
+    out = []
+    for hive in ("HKCU", "HKLM"):
+        for sub in subkeys:
+            value = _read_reg_value(hive, sub)
+            if value:
+                out.append(value)
+    return out
+
+
+def _vscode_standard_paths() -> list[Path]:
+    """几个常见安装位置（用户级安装器默认就落在 LOCALAPPDATA 那条）。"""
+    roots = [HOME / "AppData" / "Local" / "Programs"]
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)"):
+        value = os.environ.get(env_name)
+        if value:
+            roots.append(Path(value))
+    return [root / "Microsoft VS Code" / "Code.exe" for root in roots]
+
+
+def _vscode_uninstall_candidates() -> list[str]:
+    """从卸载表里找。★ 只有兜底价值：本机两个卸载表都匹配不到 "Visual Studio Code"，
+    所以它排在最后，不能当主路。"""
+    found = []
+    try:
+        import winreg
+    except Exception:
+        return found
+    sub = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+    # (读值时用的 hive 名, 真正的 hive 句柄, 视图标志)
+    tables = [
+        ("HKCU", winreg.HKEY_CURRENT_USER, 0),
+        ("HKLM", winreg.HKEY_LOCAL_MACHINE, getattr(winreg, "KEY_WOW64_64KEY", 0)),
+        ("HKLM", winreg.HKEY_LOCAL_MACHINE, getattr(winreg, "KEY_WOW64_32KEY", 0)),
+    ]
+    for hive_name, hive, view in tables:
+        try:
+            with winreg.OpenKey(hive, sub, 0, winreg.KEY_READ | view) as key:
+                count = winreg.QueryInfoKey(key)[0]
+                names = []
+                for i in range(count):
+                    try:
+                        names.append(winreg.EnumKey(key, i))
+                    except OSError:
+                        break
+        except Exception:
+            continue
+        for name in names:
+            base = sub + "\\" + name
+            display = _read_reg_value(hive_name, base, "DisplayName")
+            if "visual studio code" not in " ".join(display.lower().split()):
+                continue
+            for value_name in ("DisplayIcon", "InstallLocation", "Inno Setup: App Path"):
+                value = _read_reg_value(hive_name, base, value_name)
+                if not value:
+                    continue
+                path = Path(value.rstrip(",0").strip().strip('"'))
+                if path.suffix.lower() != ".exe":
+                    path = path / "Code.exe"
+                found.append(str(path))
+    return found
+
+
+def _resolve_vscode_exe(raw: str) -> Path | None:
+    """把一条候选（可能是路径、命令行、也可能是 code.cmd）变成 Code.exe 的路径。
+
+    返回 None 表示这条候选不可用 —— 注册表键在卸载后经常残留，所以要真验文件存在。"""
+    candidate = exe_from_command(raw)
+    if not candidate:
+        return None
+    path = Path(candidate).expanduser()
+    if path.name.lower() != "code.exe":
+        # 拿到的是 bin\code.cmd（或某个 code 包装脚本）→ 反推安装根目录
+        path = path.parent.parent / "Code.exe"
+    try:
+        return path if path.is_file() else None
+    except OSError:
+        return None
+
+
+def _vscode_info(exe: Path, source: str) -> dict:
+    """把 Code.exe 路径补全成"怎么开窗 + 怎么跑 CLI"。
+
+    ★ CLI 必须是 bin\\code.cmd，不能用 Code.exe：本机实测 `Code.exe --list-extensions`
+      输出是空的，而 code.cmd 能正常列出扩展（Code.exe 是把参数转交给已运行实例的
+      GUI 进程，不适合当命令行用）。"""
+    cli = exe.parent / "bin" / "code.cmd"
+    return {
+        "exe": str(exe),
+        "cli_argv": [str(cli)] if cli.is_file() else [],
+        "launch_argv": [str(exe)],
+        "source": source,
+    }
+
+
+def find_vscode() -> dict | None:
+    """找 VSCode。只读、不起进程、不看 PATH 也基本能找到。
+
+    返回 {"exe", "cli_argv", "launch_argv", "source"}，找不到返回 None。"""
+    # (原始值, 来源标签)
+    candidates: list[tuple[str, str]] = []
+    candidates += [(v, "registry") for v in _vscode_registry_candidates()]
+    candidates += [(str(p), "standard") for p in _vscode_standard_paths()]
+    for name in ("code", "code.cmd", "Code.exe"):
+        found = shutil.which(name)
+        if found:
+            candidates.append((found, "PATH"))
+    candidates += [(v, "uninstall") for v in _vscode_uninstall_candidates()]
+
+    seen = set()
+    for raw, source in candidates:
+        exe = _resolve_vscode_exe(raw)
+        if exe is None:
+            continue
+        key = os.path.normcase(str(exe))
+        if key in seen:          # 同一个 exe 被多条路径认出来，只用第一条（也就是最可靠的那条）
+            continue
+        seen.add(key)
+        return _vscode_info(exe, source)
+    return None
+
+
+def install_vscode() -> str:
+    """用 winget 装 VSCode（用户级安装，不提权）。装不上就打开下载页。"""
+    found = find_vscode()
+    if found:
+        return f"已经装过 VSCode，不用重复安装（{found['exe']}）"
+
+    winget = (shutil.which("winget") or shutil.which("winget.exe")
+              or str(HOME / "AppData" / "Local" / "Microsoft" / "WindowsApps" / "winget.exe"))
+    if not Path(winget).is_file():
+        return download_page_fallback("这台机器上没有 winget")
+
+    argv = [
+        winget, "install", "-e", "--id", "Microsoft.VisualStudioCode",
+        "--scope", "user",                     # 用户级：不弹 UAC
+        "--accept-package-agreements", "--accept-source-agreements",
+    ]
+    try:
+        out, err, timed_out, rc = run_capture(
+            argv, timeout=VSCODE_INSTALL_TIMEOUT, env=clean_env(),
+            stdin=subprocess.DEVNULL)
+    except Exception as e:
+        return download_page_fallback(f"winget 跑不起来：{e}")
+
+    if timed_out:
+        return download_page_fallback(f"winget 超过 {VSCODE_INSTALL_TIMEOUT} 秒没装完")
+    if rc != 0:
+        # 只取最后一行有用信息，别把整段 winget 日志倒给模型
+        detail = (err or out or b"").decode("utf-8", "replace").strip().splitlines()
+        return download_page_fallback(
+            f"winget 返回 {rc}" + (f"：{detail[-1][:120]}" if detail else ""))
+
+    # 装是装完了，但 PATH 还是旧的（winget 写的是用户环境变量，本进程读不到），
+    # 所以再走一遍注册表/标准目录。杀软和安装器收尾会拖一点，重试几次。
+    for _ in range(3):
+        found = find_vscode()
+        if found:
+            return f"已安装 VSCode（{found['exe']}）"
+        time.sleep(2)
+    return download_page_fallback("winget 说装成功了，但找不到 VSCode 的安装位置")
+
+
+def open_vscode(directory: str = "") -> str:
+    """用 VSCode 打开指定目录（目录规则跟 launch_claude 一样：只在用户主目录里）。"""
+    info = find_vscode()
+    if not info:
+        return "找不到 VSCode，无法打开"
+    cwd, note = safe_cwd(directory)
+    try:
+        subprocess.Popen(
+            info["launch_argv"] + [str(cwd)],
+            stdin=subprocess.DEVNULL,          # 别让子进程抢走终端的标准输入
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            # ★ clean_env 不能省：带着 ELECTRON_RUN_AS_NODE 会让 Code.exe 变成
+            #   一个 node 解释器，跑完就退，既不弹窗也不报错。
+            env=clean_env(),
+            cwd=str(HOME),
+            creationflags=subprocess.DETACHED_PROCESS,   # 助手退出后 VSCode 继续活着
+        )
+    except Exception as e:
+        return f"打开 VSCode 失败：{e}"
+    return f"已打开 VSCode（{info['exe']}），工作目录：{cwd}{note}"
 
 
 # ================= aikaui:// 协议 =================

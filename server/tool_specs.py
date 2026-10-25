@@ -3,7 +3,7 @@
 
 tool_map 是 Agent 的执行入口（模型说"调用 bash"，这里就找 tool_map["bash"] 执行）；
 tools 是给模型看的说明书，告诉它有哪些工具、参数长什么样。
-两边必须一一对应（15 个工具）。
+两边必须一一对应（19 个工具）。
 """
 
 from server.api import (
@@ -22,6 +22,12 @@ from server.tools_fixed import (
     set_model_config,
 )
 from server.tools_general import ask_user, bash, read_file, write_file
+from server.tools_vscode import (
+    check_vscode,
+    install_claude_extension,
+    open_vscode,
+)
+from server.tools_vscode import install_vscode as vscode_install
 
 # ================= 工具注册 =================
 
@@ -43,6 +49,11 @@ tool_map = {
     "read_file": read_file,
     "write_file": write_file,
     "ask_user": ask_user,
+    # ★ VSCode 那一组：安装流程收尾时才用，都是有条件调用的
+    "check_vscode": check_vscode,
+    "install_vscode": vscode_install,
+    "install_claude_extension": install_claude_extension,
+    "open_vscode": open_vscode,
 }
 
 # tools：发给模型的"工具说明书"
@@ -90,7 +101,9 @@ tools = [
         "function": {
             "name": "launch_claude",
             "description": (
-                "打开新终端并启动 Claude Code。所有配置完成后调用，让用户立刻能用。"
+                "打开新终端并启动 Claude Code。"
+                "★ 只在用户明确不要 VSCode、或者 VSCode 装不上时当兜底调用；"
+                "能用 VSCode 就走 open_vscode，两个只能开一个，绝不都开。"
                 "★ 先用 ask_user 问清楚用户想在哪个文件夹里干活（工作目录），"
                 "把那个目录传给 directory —— Claude Code 只看得到这一个目录里的文件。"
                 "目录必须在用户主目录内，不存在会自动创建。"
@@ -227,7 +240,11 @@ tools = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "执行 shell 命令。用于检测环境、装 Node / Claude Code、查看信息等。",
+            "description": (
+                "执行 shell 命令。用于检测环境、装 Node / Claude Code、查看信息等。"
+                "★ 装 VSCode、装 VSCode 插件请用专用工具（install_vscode / "
+                "install_claude_extension），不要用 bash 去跑 winget / brew / code。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {              # 参数定义
@@ -293,6 +310,73 @@ tools = [
                     },
                 },
                 "required": ["question"],
+            },
+        },
+    },
+    # ---------------- VSCode 一组 ----------------
+    {
+        "type": "function",
+        "function": {
+            "name": "check_vscode",
+            "description": (
+                "检查这台电脑有没有装 VSCode、里面有没有 Claude 插件。"
+                "装完 Claude Code、问清楚工作目录之后，先调用它拿事实，再决定问哪一个问题。"
+                "只读，不装任何东西；也不要用 bash 代替。"
+                "返回 JSON：installed（有没有 VSCode）、exe、extension_installed"
+                "（true/false/null，null 表示没查出来，当成 false 处理）、extension_id。"
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "install_vscode",
+            "description": (
+                "自动安装 VSCode：Windows 走 winget 用户级安装（不需要管理员），"
+                "macOS 走 Homebrew；装不上会自动打开官网下载页。"
+                "★ 必须先 ask_user 得到用户同意再调用；用户本来就装了 VSCode 时不要调用。"
+                "不要用 bash 跑 winget / brew。"
+                "返回以「已安装」或「已经装过」开头 = 装好了；"
+                "以「没能自动装」开头 = 已改走下载页，需要让用户自己装完。"
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "install_claude_extension",
+            "description": (
+                "给已经装好的 VSCode 装 Claude 插件（anthropic.claude-code）。"
+                "用户已经同意装 VSCode 时，装插件算在同一次同意里，不用再问；"
+                "用户本来就有 VSCode 时，必须先 ask_user 问过。"
+                "不要用 bash 跑 code。"
+                "返回以「已装好」或「已经装好」开头 = 可以用；"
+                "以「装插件失败」开头时，**照样**调用 open_vscode，"
+                "并告诉用户可以在 VSCode 扩展面板里搜 Claude Code 手动装。"
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_vscode",
+            "description": (
+                "用 VSCode 打开指定工作目录。VSCode 分支里的最后一步。"
+                "★ 不要和 launch_claude 同时调用，两个只能开一个。"
+                "目录必须在用户主目录内，不存在会自动创建。"
+                "返回值以「已打开 VSCode」开头。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "directory": {
+                        "type": "string",
+                        "description": "工作目录的绝对路径（用户主目录之内）。留空则在用户主目录打开。",
+                    },
+                },
             },
         },
     },

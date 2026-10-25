@@ -13,91 +13,22 @@
 这里只负责"跑命令 + 把输出交回去"。
 """
 
-import locale
 import os
-import signal
 import subprocess
 from pathlib import Path
 
 import platform_support
 from config import HOME
+# ★ 解码和"超时连孙进程一起杀"这两件事平台无关，统一放在 platform_support.common，
+#   跟 VSCode 那几个工具共用一份实现。这里只留别名，调用点不用改。
+from platform_support.common import (
+    kill_tree as _kill_tree,
+    run_capture as _run_capture,
+    smart_decode as _smart_decode,
+)
 from server.ui_bridge import get_ui
 
 # ================= 通用工具 =================
-
-def _decode_with(b: bytes, encoding: str) -> str | None:
-    """按指定编码解，解出替换字符就当失败（返回 None）。"""
-    try:
-        s = b.decode(encoding)
-    except (UnicodeDecodeError, LookupError):
-        return None
-    return None if "�" in s else s
-
-
-def _smart_decode(b: bytes) -> str:
-    """智能解码：先试 UTF-8，失败再试系统本地编码。
-
-    Windows 的 cmd.exe 内置错误信息是 GBK（中文系统）或别的 ANSI 代码页，
-    其它程序输出又可能是 UTF-8，所以要"猜"编码；macOS/Linux 的本地编码
-    通常就是 UTF-8，这一步直接跳过。"""
-    if not b:
-        return ""
-    s = _decode_with(b, "utf-8")           # 优先 UTF-8
-    if s is not None:
-        return s
-    local = locale.getpreferredencoding(False) or "utf-8"
-    if local.lower() in ("utf-8", "utf8"):
-        return b.decode("utf-8", errors="replace")
-    s = _decode_with(b, local)             # 中文 Windows 上这里就是 GBK/CP936
-    if s is not None:
-        return s
-    return b.decode(local, errors="replace")   # 兜底，解不出的变 ?
-
-
-def _kill_tree(proc) -> None:
-    """把整棵进程树杀掉。
-
-    只 kill 直接子进程是不够的：Windows 上是 cmd.exe 起了 curl，curl 还握着管道
-    的写端，后面 communicate() 要等到 EOF 才返回 —— 于是"超时了但命令照样不返回"。
-    """
-    try:
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           capture_output=True, timeout=15)
-        else:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-
-
-def _run_capture(argv, *, shell: bool, timeout: int, env: dict):
-    """跑命令并抓输出，返回 (stdout, stderr, 是否超时, 退出码)。
-
-    和 subprocess.run(timeout=) 的区别：超时后连孙进程一起杀，第二次
-    communicate 也带超时，保证这条工具调用**一定会返回**，不会挂死。
-    """
-    kwargs = dict(shell=shell, env=env,
-                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        kwargs["start_new_session"] = True      # 独立会话，才能整组杀
-
-    proc = subprocess.Popen(argv, **kwargs)
-    try:
-        out, err = proc.communicate(timeout=timeout)
-        return out or b"", err or b"", False, proc.returncode
-    except subprocess.TimeoutExpired:
-        _kill_tree(proc)
-        try:
-            out, err = proc.communicate(timeout=10)   # 实在杀不干净也不再等
-        except subprocess.TimeoutExpired:
-            out, err = b"", b""
-        return out or b"", err or b"", True, -1
-
 
 def bash(cmd: str, timeout: int = 600, show_progress: bool = False) -> str:
     """执行 shell 命令，返回输出。

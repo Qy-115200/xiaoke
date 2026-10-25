@@ -14,7 +14,13 @@ import sys
 from pathlib import Path
 
 from config import HOME
-from platform_support.common import find_claude, safe_cwd
+from platform_support.common import (
+    clean_env,
+    download_page_fallback,
+    find_claude,
+    run_capture,
+    safe_cwd,
+)
 
 
 def platform_key() -> str:
@@ -202,6 +208,92 @@ def launch_claude(directory: str = "") -> str:
             continue
 
     return "启动失败：没找到可用的终端模拟器，请手动打开终端并输入 claude"
+
+
+# ================= VSCode =================
+# Linux 上装 VSCode 走 apt/snap 基本都要 sudo，助手不替用户提权：
+# install_vscode 只负责把下载页打开，剩下让用户自己装。
+
+def _vscode_cli_candidates() -> list[str]:
+    candidates = [
+        "/snap/bin/code",
+        "/usr/share/code/bin/code",
+        "/usr/share/code/code",
+        "/opt/visual-studio-code/bin/code",
+        "/opt/visual-studio-code/code",
+        # flatpak 的导出入口，两个常见前缀
+        str(HOME / ".local" / "share" / "flatpak" / "exports" / "bin" / "com.visualstudio.code"),
+        "/var/lib/flatpak/exports/bin/com.visualstudio.code",
+    ]
+    found = shutil.which("code")
+    if found:
+        candidates.insert(0, found)
+    return candidates
+
+
+def _flatpak_vscode_argv() -> list[str]:
+    """装了 flatpak 版但没导出命令的情况：问一下 flatpak 自己。"""
+    if not shutil.which("flatpak"):
+        return []
+    try:
+        out, _err, timed_out, rc = run_capture(
+            ["flatpak", "list", "--app", "--columns=application"],
+            timeout=10, env=clean_env(), stdin=subprocess.DEVNULL)
+        if timed_out or rc != 0:
+            return []
+        apps = out.decode("utf-8", "replace").split()
+        if "com.visualstudio.code" in apps:
+            return ["flatpak", "run", "com.visualstudio.code"]
+    except Exception:
+        pass
+    return []
+
+
+def find_vscode() -> dict | None:
+    for cli in _vscode_cli_candidates():
+        if Path(cli).is_file():
+            return {
+                "exe": cli,
+                "cli_argv": [cli],
+                "launch_argv": [cli],
+                "source": "cli",
+            }
+    flatpak_argv = _flatpak_vscode_argv()
+    if flatpak_argv:
+        return {
+            "exe": "flatpak:com.visualstudio.code",
+            "cli_argv": flatpak_argv,
+            "launch_argv": flatpak_argv,
+            "source": "flatpak",
+        }
+    return None
+
+
+def install_vscode() -> str:
+    """Linux 上不代劳安装（要 sudo），只把下载页打开。"""
+    found = find_vscode()
+    if found:
+        return f"已经装过 VSCode，不用重复安装（{found['exe']}）"
+    return download_page_fallback("Linux 上装 VSCode 需要管理员权限，助手不替你提权")
+
+
+def open_vscode(directory: str = "") -> str:
+    info = find_vscode()
+    if not info:
+        return "找不到 VSCode，无法打开"
+    cwd, note = safe_cwd(directory)
+    try:
+        subprocess.Popen(
+            info["launch_argv"] + [str(cwd)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=clean_env(),               # 挡掉从 VSCode 终端继承来的 ELECTRON_RUN_AS_NODE
+            cwd=str(HOME),
+            start_new_session=True,        # 助手退出后 VSCode 继续活着
+        )
+    except Exception as e:
+        return f"打开 VSCode 失败：{e}"
+    return f"已打开 VSCode（{info['exe']}），工作目录：{cwd}{note}"
 
 
 # ================= 通知 =================

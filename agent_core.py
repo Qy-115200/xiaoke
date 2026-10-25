@@ -51,16 +51,38 @@ def _sanitize_messages(messages):
             last_had_tc = False
             cleaned.append(m)
     return cleaned
+
+
+# 「把用户领进门」这件事有两种形态：开终端，或者开 VSCode。
+# 前缀是两边约好的契约（platform_support 三个后端都照这个拼），改这里必须一起改。
+_OPENED_TERMINAL_PREFIX = "已打开新终端"
+_OPENED_VSCODE_PREFIX = "已打开 VSCode"
+
+
+def _marks_install_complete(name, result) -> bool:
+    """这个工具调用算不算"真的把用户领进门了"。
+
+    抽成纯函数是为了能离线测：失败时（找不到 claude / 找不到 VSCode）返回的文字
+    不以这两个前缀开头，自然就不算完成，也就不会触发自动退出。"""
+    text = str(result)
+    if name == "launch_claude":
+        return text.startswith(_OPENED_TERMINAL_PREFIX)
+    if name == "open_vscode":
+        return text.startswith(_OPENED_VSCODE_PREFIX)
+    return False
+
+
 def run_one_task(messages, task_text):
     """跑一轮任务：从用户输入开始，直到模型不再调工具为止
 
-    ★ 这一轮如果**完整走完了安装流程**（register_device → … → launch_claude 成功），
+    ★ 这一轮如果**完整走完了安装流程**（register_device → … → 打开 VSCode 或终端），
       最后会给界面发一条 ("install_done", …)：让助手在用户看完收尾说明后自动退出。
-      单独再调一次 launch_claude（用户只是说"再帮我打开一次"）不算安装流程，不退出。"""
+      单独再调一次 launch_claude / open_vscode（用户只是说"再帮我打开一次"）不算安装流程，
+      因为这一轮没有 register_device，installing 是 False，不会退出。"""
     messages.append({"role": "user", "content": task_text})   # 把用户输入加入历史
 
     installing = False      # 这一轮调过 register_device（安装流程的起点）
-    launched = False        # launch_claude 真的把 Claude Code 打开了
+    launched = False        # 真的把用户领进门了：开了终端，或者开了 VSCode
 
     for _step in range(MAX_STEPS):      # 最多循环 25 次
         messages = _sanitize_messages(messages)   # 每次调用前先清理（防被裁剪破坏结构）
@@ -153,7 +175,7 @@ def run_one_task(messages, task_text):
             # register_device 成功时回的是 JSON（带 note/api_base），失败回"领取失败…"。
             if name == "register_device" and str(result).startswith("{"):
                 installing = True
-            elif name == "launch_claude" and str(result).startswith("已打开新终端"):
+            elif _marks_install_complete(name, result):
                 launched = True
 
             if name != "ask_user":

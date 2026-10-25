@@ -11,23 +11,42 @@ Agent —— 它会自己检测环境、装 Node、装 Claude Code、写好配�
 **装 Claude Code（一键完成）**
 
 底部一个「一键安装 Claude Code」按钮，或者直接说"帮我装 Claude Code"。Agent 按固定顺序
-调五个工具：领 token → 绕过地区限制 → 写配置 → 建桌面快捷方式 → 启动。
+调前四个工具：领 token → 绕过地区限制 → 写配置 → 建桌面快捷方式，然后问清楚工作目录，
+最后**二选一**收尾：装好 Claude 的 VSCode 插件并用 VSCode 打开（默认），或者开一个新终端。
 中途每一步都会用大白话跟你解释一句，要装东西之前会先问过你。
 
 **先定工作目录，再启动**
 
 Claude Code 只看得到你给它的**一个**文件夹。所以启动之前 Agent 必须先问清楚"以后在哪个
 文件夹里干活"（`ask_user` 给三个选项：桌面新建一个 / 用户主目录 / 自己指定路径），
-再把这个目录传给 `launch_claude(directory=…)` 当 `cwd`。目录不存在会建出来，越界（跑到
+再把这个目录传给 `open_vscode(directory=…)` / `launch_claude(directory=…)` 当 `cwd`。目录不存在会建出来，越界（跑到
 用户主目录外面）会被退回主目录并在日志里说明原因 —— 跟 `read_file` / `write_file` 是同一条规则。
 
-启动完还会把这件事再讲一遍：一个项目一个文件夹，换项目就在那个文件夹里重新启动。
+启动完还会把这件事再讲一遍：一个项目一个文件夹，换项目就在 VSCode 里打开那个文件夹（或在那个文件夹里重新启动）。
 
-**推荐 VSCode + Claude Code 的工作方式**
+**装完接到 VSCode：检测 → 问 → 装 / 装插件 → 打开**
 
-装完的收尾里会推荐一条编号的用法：装 VSCode（免费）→ 用 VSCode 打开项目文件夹 →
-`Ctrl+\`` 打开终端 → 输入 `claude`。好处是 Claude 改哪个文件、改了什么，在编辑器里直接看到差别，
-还能一键撤销。**只是推荐**：提示词里写死了不许自作主张去装 VSCode，用户说要装才走"问过再装"。
+装完 Claude Code、定好工作目录之后，Agent 先 `check_vscode()` 拿事实，再按情况**只问一次**：
+
+| 情况 | 问什么 | 同意之后 |
+|---|---|---|
+| 没有 VSCode | 先讲一句好处（改了什么在编辑器里直接看到、能一键撤销），问要不要装 | `install_vscode()` → `install_claude_extension()` → `open_vscode()` |
+| 有 VSCode 没插件 | 问要不要装 Claude 插件 | `install_claude_extension()` → `open_vscode()` |
+| 都有 | 不问 | 直接 `open_vscode()` |
+
+用户说"不用"，就退回 `launch_claude()` 开终端，**之后任何一轮都不再提 VSCode**。
+两个入口只能开一个，绝不都开。
+
+装 VSCode 本身：Windows 走 `winget --scope user`（不弹 UAC），macOS 走 `brew install --cask`，
+Linux 只打开官网下载页（apt/snap 要 sudo，助手不替你提权）。**装不上就打开下载页**并如实说明；
+插件市场连不上也一样，照样用 VSCode 打开，让用户在扩展面板里手动装。
+
+检测不依赖 PATH：Windows 先查注册表（`App Paths` → `Applications\Code.exe` → `vscode` 协议），
+再查常见目录，最后才是 `which`。这样装在 `D:\vs code` 这种非默认位置也找得到。
+CLI 一律用安装目录里的 `bin\code.cmd`（`Code.exe --list-extensions` 是空输出），
+`Code.exe` 只用来开窗；所有 VSCode 子进程都先过 `clean_env()` 摘掉
+`ELECTRON_RUN_AS_NODE` / `VSCODE_*`（带着它们 `Code.exe <目录>` 会当 node 脚本跑完就退，
+不报错也不弹窗）。
 
 **对话式 AI 管家**
 
@@ -215,17 +234,17 @@ agent_demo/
 ├── helpers.py                    240   数字金额格式化 + 用量取数（按模型 / 时间序列）+ 刻度 + 文字宽度估算 + 选项清洗 + 凭证打码
 ├── images.py                     138   窗口图标（打包资源优先，缺了现画）+ 付款二维码下载
 ├── notify.py                      26   桌面通知薄封装（各平台实现在 platform_support）
-├── bus.py                         79   线程间队列 + poll_queue（每 100ms 把消息翻译成界面操作）
+├── bus.py                        112   线程间队列 + poll_queue（每 100ms 把消息翻译成界面操作）
 ├── llm.py                        126   大模型客户端（走 aikaui.com 代理，用本机账号的 api_key）
-├── agent_core.py                 221   Agent 主循环：run_one_task / agent_worker / balance_worker
-├── prompts.py                    415   系统提示词（按平台给安装指令 + 工作目录 + VSCode 推荐 + 余额分寸）
+├── agent_core.py                 285   Agent 主循环：run_one_task / agent_worker / balance_worker
+├── prompts.py                    577   系统提示词（按平台给安装指令 + 工作目录 + VSCode 询问分支 + 余额分寸）
 │
 ├── platform_support/                  三平台差异（调用方只 import 这个包）
-│   ├── __init__.py                93   按 sys.platform 延迟加载并转发
-│   ├── common.py                  59   safe_cwd（HOME 越界检查）、find_claude
-│   ├── windows.py                208   注册表协议 / .lnk / cmd / WinRT toast
-│   ├── macos.py                  182   Info.plist 协议 + Apple Event / 符号链接 / Terminal.app
-│   └── linux.py                  222   .desktop + xdg-mime / 终端探测 / notify-send
+│   ├── __init__.py               122   按 sys.platform 延迟加载并转发
+│   ├── common.py                 230   safe_cwd（HOME 越界检查）、find_claude、clean_env、跑子进程抓输出、VSCode 值解析
+│   ├── windows.py                438   注册表协议 / .lnk / cmd / WinRT toast / VSCode 探测 + winget 安装
+│   ├── macos.py                  305   Info.plist 协议 + Apple Event / 符号链接 / Terminal.app / VSCode 探测 + brew 安装
+│   └── linux.py                  314   .desktop + xdg-mime / 终端探测 / notify-send / VSCode 探测（安装只开下载页）
 │
 ├── server/                            服务端与工具层（不 import 界面）
 │   ├── ui_bridge.py               31   GUI 注入桥：set_ui / get_ui
@@ -235,14 +254,15 @@ agent_demo/
 │   ├── pow.py                    128   PoW 求解（进度 / 取消 / 90 秒超时），和服务器 pow.js 逐位对齐
 │   ├── api.py                    504   余额 / 用量 / 充值 HTTP 层（永远不抛异常）
 │   ├── claude_config.py          124   把身份写进 ~/.claude.json 和 ~/.claude/settings.json
-│   ├── tools_fixed.py            141   五个固定工具 + aikaui:// 协议注册（转发 platform_support）
-│   ├── tools_general.py          156   bash / read_file / write_file / ask_user
-│   └── tool_specs.py             286   工具说明书：tools[] + tool_map（13 个工具）
+│   ├── tools_fixed.py            148   五个固定工具 + aikaui:// 协议注册（转发 platform_support）
+│   ├── tools_general.py          125   bash / read_file / write_file / ask_user（解码和杀进程树在 platform_support.common）
+│   ├── tools_vscode.py           181   check_vscode / install_vscode / install_claude_extension / open_vscode
+│   └── tool_specs.py             383   工具说明书：tools[] + tool_map（19 个工具）
 │
 ├── ui/                                界面层
 │   ├── fonts.py                  179   全界面字体表：按平台选字体 + 字号常量 + 画布缩放
 │   ├── gui.py                     27   class GUI(WindowMixin, OptionsMixin, RechargeMixin, UsageMixin, LoginMixin, AccountMixin)
-│   ├── window.py                 490   WindowMixin：窗口壳、左侧导航、对话页、底部询问条、余额回流
+│   ├── window.py                 513   WindowMixin：窗口壳、左侧导航、对话页、底部询问条、余额回流
 │   ├── usage.py                  625   UsageMixin：用量信息页（余额卡 + 两张按模型的时间分布图 + 充值入口）
 │   ├── account.py                272   AccountMixin：账户信息页（账户码 / 密钥打码、眼睛、复制、防泄露红字）
 │   ├── options.py                219   OptionsMixin：ask_user 选项面板（点击 / ↑↓ / 回车 / Esc）
@@ -253,7 +273,7 @@ agent_demo/
 │   ├── make_version_info.py       80   生成 Windows 文件版本信息（build/version_info.txt）
 │   ├── make_manifest.py          113   四个产物 → latest.json（校验版本、算 sha256 / size）
 │   └── deploy_downloads.sh            发布：传 nginx + 传 COS → 两边验大小 → 换清单 → 改下载页版本号
-├── tests/                            离线单元测试（106 个，stdlib unittest）
+├── tests/                            离线单元测试（196 个，stdlib unittest）
 │   ├── test_version.py                版本解析 / 比较 / 清单校验
 │   ├── test_download.py               本地假服务器：下载、哈希、404、缓存回退
 │   ├── test_apply.py                  备份、回滚、失败上限、锁、更新提示
@@ -263,7 +283,11 @@ agent_demo/
 │   ├── test_ui_messages.py            poll_queue 把 recovery / recovered 送到对的界面方法
 │   ├── test_bash_timeout.py           bash 工具的超时与杀干净
 │   ├── test_platform_support.py       三平台抽象层
-│   ├── test_prompts.py                提示词按平台切换
+│   ├── test_prompts.py                提示词按平台切换 + VSCode 询问分支的关键句
+│   ├── test_vscode.py                 VSCode 探测 / 安装 / 打开（三平台，全程打桩）
+│   ├── test_tools_vscode.py           四个 VSCode 工具的返回值和失败归类
+│   ├── test_agent_core.py             install_done 什么时候触发（自动退出的判定）
+│   ├── test_tool_specs.py             tools[] 和 tool_map 一一对上
 │   └── test_imports.py                工具层导入不依赖 Windows
 ├── packaging/
 │   └── claude-code-assistant.desktop   Linux 启动器（tar.gz 里一起发）

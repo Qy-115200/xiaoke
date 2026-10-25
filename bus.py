@@ -35,7 +35,7 @@ def poll_queue(gui):
             elif kind == "balance":
                 gui.update_balance(data)
             elif kind == "install_done":
-                # 安装流程完整走完（… → launch_claude 成功）→ 给用户几秒看完
+                # 安装流程完整走完（… → 打开 VSCode 或终端成功）→ 给用户几秒看完
                 # 收尾说明，然后助手自己退出，别一直占着托盘。
                 gui.schedule_auto_quit()
             elif kind == "busy":

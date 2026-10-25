@@ -5,7 +5,8 @@
 具体实现按 sys.platform 延迟加载，这样 Windows 的 winreg 不会在 macOS 上被导入。
 
 约定：每个平台的实现都必须提供下面这些函数，返回的文字尽量保持一致
-（agent_core 靠 launch_claude() 返回值以「已打开新终端」开头判断安装完成）。
+（agent_core 靠 launch_claude() 以「已打开新终端」开头、open_vscode() 以「已打开 VSCode」
+开头，来判断"安装流程真的把用户领进门了"）。
 """
 
 import sys
@@ -91,3 +92,31 @@ def taskbar_reserve_px() -> int:
 
 def notify(title: str, message: str) -> None:
     _impl().notify(title, message)
+
+
+# ================= VSCode =================
+
+def find_vscode() -> dict | None:
+    """找 VSCode，返回 {"exe", "cli_argv", "launch_argv", "source"} 或 None。
+
+    只读、不起进程。后端没实现就返回 None（当"没装"处理，别让工具崩）。"""
+    m = _impl()
+    fn = getattr(m, "find_vscode", None)
+    return fn() if fn is not None else None
+
+
+def install_vscode() -> str:
+    m = _impl()
+    fn = getattr(m, "install_vscode", None)
+    if fn is None:
+        from platform_support.common import download_page_fallback
+        return download_page_fallback("这个平台没有自动安装 VSCode 的实现")
+    return fn()
+
+
+def open_vscode(directory: str = "") -> str:
+    m = _impl()
+    fn = getattr(m, "open_vscode", None)
+    if fn is None:
+        return "打开 VSCode 失败：这个平台没有打开 VSCode 的实现"
+    return fn(directory)
