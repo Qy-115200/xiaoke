@@ -302,12 +302,32 @@ class WindowsInstallTests(unittest.TestCase):
         self.assertIn("找不到", text)
 
 
+class LaunchArgvTests(unittest.TestCase):
+    """"打开目录"和"开新窗口再打开目录"是两种 argv，别拼错。"""
+
+    def test_reuse_uses_launch_argv(self):
+        info = {"launch_argv": [r"D:\vs code\Code.exe"], "cli_argv": [r"D:\vs code\bin\code.cmd"]}
+        self.assertEqual(common.launch_argv_for(info, False, r"C:\work"),
+                         [r"D:\vs code\Code.exe", r"C:\work"])
+
+    def test_new_window_uses_cli(self):
+        # ★ 必须走 CLI：Code.exe 收到参数是转手给已运行实例的，-n 不生效
+        info = {"launch_argv": [r"D:\vs code\Code.exe"], "cli_argv": [r"D:\vs code\bin\code.cmd"]}
+        self.assertEqual(common.launch_argv_for(info, True, r"C:\work"),
+                         [r"D:\vs code\bin\code.cmd", "-n", r"C:\work"])
+
+    def test_new_window_without_cli_falls_back(self):
+        info = {"launch_argv": ["/usr/share/code/code"], "cli_argv": []}
+        self.assertEqual(common.launch_argv_for(info, True, "/home/x"),
+                         ["/usr/share/code/code", "/home/x"])
+
+
 class WindowsOpenTests(unittest.TestCase):
-    def _run(self, info, directory=""):
+    def _run(self, info, directory="", new_window=False):
         with mock.patch.object(win_backend, "find_vscode", return_value=info), \
              mock.patch.object(win_backend.subprocess, "Popen") as popen, \
              mock.patch.dict(os.environ, {"ELECTRON_RUN_AS_NODE": "1"}, clear=False):
-            text = win_backend.open_vscode(directory)
+            text = win_backend.open_vscode(directory, new_window)
         return text, popen
 
     def test_prefix_and_argv(self):
@@ -327,6 +347,25 @@ class WindowsOpenTests(unittest.TestCase):
         _text, popen = self._run(info)
         env = popen.call_args.kwargs["env"]
         self.assertNotIn("ELECTRON_RUN_AS_NODE", env)
+
+    def test_new_window_goes_through_cli(self):
+        info = {"exe": r"D:\vs code\Code.exe",
+                "launch_argv": [r"D:\vs code\Code.exe"],
+                "cli_argv": [r"D:\vs code\bin\code.cmd"]}
+        _text, popen = self._run(info, new_window=True)
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[:2], [r"D:\vs code\bin\code.cmd", "-n"])
+
+    def test_open_uri_uses_shell_execute(self):
+        with mock.patch.object(win_backend.os, "startfile", create=True) as startfile:
+            self.assertEqual(win_backend.open_uri("vscode://anthropic.claude-code/open"), "")
+        startfile.assert_called_once_with("vscode://anthropic.claude-code/open")
+
+    def test_open_uri_failure_is_reported(self):
+        with mock.patch.object(win_backend.os, "startfile", create=True,
+                               side_effect=OSError("没有关联的程序")):
+            msg = win_backend.open_uri("vscode://x/y")
+        self.assertIn("打不开链接", msg)
 
     def test_not_installed_prefix_does_not_claim_success(self):
         text, popen = self._run(None)

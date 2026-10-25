@@ -202,18 +202,100 @@ class InstallExtensionTests(unittest.TestCase):
 
 
 class OpenVscodeToolTests(unittest.TestCase):
-    def test_forwards_directory(self):
-        with mock.patch.object(platform_support, "open_vscode",
-                               return_value="已打开 VSCode（x），工作目录：y") as fn:
+    """open_vscode 不只是开窗：它还负责把 Claude 面板亮出来。
+
+    面板靠插件自己注册的 vscode://anthropic.claude-code/open 打开。这里盯三件事：
+      1. 前缀仍然以「已打开 VSCode」开头（agent_core 的完成判定）
+      2. 插件在 → 发 URI；插件不在 / 查不出来 → 一个字节都不发（否则 VSCode 弹报错框）
+      3. 刚装完插件 → 开新窗口（旧窗口里没有这个插件）"""
+
+    def setUp(self):
+        tools_vscode._extension_just_installed = False
+        self.addCleanup(setattr, tools_vscode, "_extension_just_installed", False)
+        patch = mock.patch.object(tools_vscode.time, "sleep")   # 别真等 4 秒
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def _run(self, opened="已打开 VSCode（x），工作目录：y", extensions=None,
+             just_installed=False):
+        exts = {} if extensions is None else extensions
+        tools_vscode._extension_just_installed = just_installed
+        with mock.patch.object(platform_support, "find_vscode", return_value=INFO), \
+             mock.patch.object(platform_support, "open_vscode", return_value=opened) as open_fn, \
+             mock.patch.object(platform_support, "open_uri", return_value="") as uri_fn, \
+             mock.patch.object(tools_vscode, "_list_extensions",
+                               return_value=(extensions, "")), \
+             mock.patch.object(tools_vscode, "get_ui", return_value=_FakeUI()):
             text = tools_vscode.open_vscode(r"C:\Users\me\Desktop\claude-projects")
-        fn.assert_called_once_with(r"C:\Users\me\Desktop\claude-projects")
+        return text, open_fn, uri_fn
+
+    def test_forwards_directory(self):
+        text, open_fn, _uri = self._run()
+        open_fn.assert_called_once_with(r"C:\Users\me\Desktop\claude-projects", False)
         self.assertTrue(text.startswith("已打开 VSCode"))
 
     def test_default_directory(self):
-        with mock.patch.object(platform_support, "open_vscode",
-                               return_value="已打开 VSCode（x）") as fn:
+        with mock.patch.object(platform_support, "find_vscode", return_value=INFO), \
+             mock.patch.object(platform_support, "open_vscode",
+                               return_value="已打开 VSCode（x）") as open_fn, \
+             mock.patch.object(tools_vscode, "_list_extensions",
+                               return_value=({"anthropic.claude-code": "1"}, "")), \
+             mock.patch.object(tools_vscode.time, "sleep"), \
+             mock.patch.object(platform_support, "open_uri", return_value=""), \
+             mock.patch.object(tools_vscode, "get_ui", return_value=_FakeUI()):
             tools_vscode.open_vscode()
-        fn.assert_called_once_with("")
+        self.assertEqual(open_fn.call_args.args[0], "")
+
+    def test_opens_panel_when_extension_present(self):
+        text, _open, uri = self._run(extensions={"anthropic.claude-code": "2.1.300"})
+        uri.assert_called_once_with("vscode://anthropic.claude-code/open")
+        self.assertIn("Claude 面板也打开了", text)
+        self.assertTrue(text.startswith("已打开 VSCode"))
+
+    def test_no_uri_when_extension_absent(self):
+        text, _open, uri = self._run(extensions={"ms-python.python": "1.0"})
+        uri.assert_not_called()
+        self.assertEqual(text, "已打开 VSCode（x），工作目录：y")   # 用户不要插件就别多嘴
+
+    def test_no_uri_when_extension_unknown(self):
+        # 查不出来（没有 CLI / 命令报错）也不发：没处理程序时 VSCode 会弹报错框
+        with mock.patch.object(platform_support, "find_vscode", return_value=INFO), \
+             mock.patch.object(platform_support, "open_vscode",
+                               return_value="已打开 VSCode（x）"), \
+             mock.patch.object(tools_vscode, "_list_extensions",
+                               return_value=(None, "超时")), \
+             mock.patch.object(platform_support, "open_uri") as uri, \
+             mock.patch.object(tools_vscode, "get_ui", return_value=_FakeUI()):
+            text = tools_vscode.open_vscode("")
+        uri.assert_not_called()
+        self.assertIn("点左边活动栏的 Claude 图标", text)
+
+    def test_just_installed_opens_new_window(self):
+        _text, open_fn, _uri = self._run(extensions={"anthropic.claude-code": "2.1.300"},
+                                         just_installed=True)
+        open_fn.assert_called_once()
+        self.assertTrue(open_fn.call_args.args[1], "刚装完插件必须开新窗口")
+        # 只用一次：下一次"再打开一次"不该再开新窗口
+        self.assertFalse(tools_vscode._extension_just_installed)
+
+    def test_failed_open_skips_panel(self):
+        text, _open, uri = self._run(opened="找不到 VSCode，无法打开",
+                                     extensions={"anthropic.claude-code": "2.1.300"})
+        uri.assert_not_called()
+        self.assertEqual(text, "找不到 VSCode，无法打开")
+
+    def test_uri_failure_is_reported(self):
+        with mock.patch.object(platform_support, "find_vscode", return_value=INFO), \
+             mock.patch.object(platform_support, "open_vscode",
+                               return_value="已打开 VSCode（x）"), \
+             mock.patch.object(tools_vscode, "_list_extensions",
+                               return_value=({"anthropic.claude-code": "1"}, "")), \
+             mock.patch.object(platform_support, "open_uri",
+                               return_value="打不开链接 vscode://…：拒绝访问"), \
+             mock.patch.object(tools_vscode, "get_ui", return_value=_FakeUI()):
+            text = tools_vscode.open_vscode("")
+        self.assertIn("Claude 面板没能自动打开", text)
+        self.assertIn("Claude 图标", text)
 
 
 if __name__ == "__main__":

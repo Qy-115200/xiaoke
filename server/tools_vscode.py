@@ -10,14 +10,17 @@
   check_vscode()             只读，拿事实（JSON）
   install_vscode()           装 VSCode 本体
   install_claude_extension() 装 anthropic.claude-code 插件
-  open_vscode(directory)     打开并带上工作目录
+  open_vscode(directory)     打开工作目录，并把 Claude 面板亮出来
 
 ★ open_vscode 的返回值必须以「已打开 VSCode」开头：agent_core 靠这个前缀判断
   "安装流程真的把用户领进门了"，和 launch_claude 的「已打开新终端」是同一个机制。
+★ "打开面板"不是白叫的：VSCode 命令行没有 --command 之类的东西，只能靠插件自己
+  注册的 vscode://anthropic.claude-code/open 链接（见 EXTENSION_OPEN_URI）。
 """
 
 import json
 import subprocess
+import time
 
 import platform_support
 from platform_support.common import (
@@ -31,8 +34,22 @@ from server.ui_bridge import get_ui
 # Claude Code 官方 VSCode 扩展的 ID（真机上 `code --list-extensions` 抄下来的）
 EXTENSION_ID = "anthropic.claude-code"
 
+# 插件自己注册的 URI 入口：vscode://anthropic.claude-code/open → 执行
+# claude-vscode.primaryEditor.open，也就是"把 Claude 面板亮出来"。
+# 这是插件 manifest 之外唯一的自动打开方式（VSCode 命令行没有 --command 这种东西），
+# 见 extension.js 里的 registerUriHandler（path 就两种：/open 和 /install-plugin）。
+EXTENSION_OPEN_URI = f"vscode://{EXTENSION_ID}/open"
+
+# 发 URI 之前等多久：刚开出来的窗口要先完成启动、插件宿主（extension host）
+# 才能注册 URI 处理器；太早发，链接会因为"没有处理程序"被丢掉。
+# 已开着的窗口其实不用等，但这里分不出来，统一等一次；装机流程本来就要几分钟。
+PANEL_SETTLE_SECONDS = 4.0
+
 LIST_TIMEOUT = 60          # 列扩展是本地操作，秒级
 INSTALL_TIMEOUT = 300      # 装扩展要下包，给 5 分钟
+
+# 和 agent_core._OPENED_VSCODE_PREFIX 是同一个契约，改一处必须改另一处
+_OPENED_PREFIX = "已打开 VSCode"
 
 # 装扩展失败时，把常见的英文报错归成一句人话。别把整段日志倒给模型。
 _NETWORK_HINTS = (
@@ -129,8 +146,14 @@ def install_vscode() -> str:
             get_ui().ui_progress_stop()
 
 
+# 这一轮是不是刚把插件装进了磁盘。刚装完必须开新窗口：已经开着的窗口是在装插件
+# 之前加载扩展的，里面没有它，URI 发过去会因为"没有处理程序"被丢掉。
+_extension_just_installed = False
+
+
 def install_claude_extension() -> str:
     """给已经装好的 VSCode 装 Claude 插件（anthropic.claude-code）。"""
+    global _extension_just_installed
     info = platform_support.find_vscode()
     if not info:
         return "装插件失败：这台机器上没找到 VSCode，得先装 VSCode"
@@ -170,12 +193,54 @@ def install_claude_extension() -> str:
     if exts is not None and EXTENSION_ID not in exts:
         return ("装插件失败：命令说装完了，但扩展列表里没看到；"
                 "可以在 VSCode 的扩展面板里搜 Claude Code 手动装")
+    _extension_just_installed = True      # 下一步 open_vscode 要据此开新窗口
     return f"已装好 Claude 的 VSCode 插件（{EXTENSION_ID}）"
 
 
+def _open_claude_panel(info) -> str:
+    """把 Claude 面板亮出来。返回要接在"已打开 VSCode"后面的半句话。
+
+    ★ 只有确认插件在列表里才发 URI：没处理程序时 VSCode 会弹一个"无法打开链接"
+      的报错框，用户会以为是助手搞坏了什么。"""
+    if not info:
+        return ""
+    cli = info.get("cli_argv") or []
+    if not cli:
+        return "；没找到 VSCode 的命令行工具，Claude 面板没能自动打开（点左边活动栏的 Claude 图标）"
+
+    exts, _note = _list_extensions(cli)
+    if exts is None:
+        return "；Claude 插件状态查不出来，面板没能自动打开（点左边活动栏的 Claude 图标）"
+    if EXTENSION_ID not in exts:
+        return ""                        # 用户不要插件，就别硬开
+
+    u = get_ui()
+    if u:
+        u.ui_progress_start("正在打开 Claude 面板…")
+    try:
+        time.sleep(PANEL_SETTLE_SECONDS)
+        err = platform_support.open_uri(EXTENSION_OPEN_URI)
+    finally:
+        if get_ui():
+            get_ui().ui_progress_stop()
+
+    if err:
+        return f"；Claude 面板没能自动打开（{err}），点左边活动栏的 Claude 图标就行"
+    return "，Claude 面板也打开了"
+
+
 def open_vscode(directory: str = "") -> str:
-    """用 VSCode 打开指定工作目录。
+    """用 VSCode 打开工作目录，**并把里面的 Claude 面板亮出来**。
 
     ★ 返回值必须以「已打开 VSCode」开头（agent_core 靠它判断安装完成）。
     ★ 和 launch_claude 二选一：走了 VSCode 就不要再开终端。"""
-    return platform_support.open_vscode(directory)
+    global _extension_just_installed
+    new_window = _extension_just_installed
+    _extension_just_installed = False
+
+    info = platform_support.find_vscode()
+    text = platform_support.open_vscode(directory, new_window)
+    if not text.startswith(_OPENED_PREFIX):
+        return text                      # 没打开就别再谈面板了
+    return text + _open_claude_panel(info)
+

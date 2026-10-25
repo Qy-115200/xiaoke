@@ -7,6 +7,7 @@
 约定：每个平台的实现都必须提供下面这些函数，返回的文字尽量保持一致
 （agent_core 靠 launch_claude() 以「已打开新终端」开头、open_vscode() 以「已打开 VSCode」
 开头，来判断"安装流程真的把用户领进门了"）。
+
 """
 
 import sys
@@ -114,9 +115,24 @@ def install_vscode() -> str:
     return fn()
 
 
-def open_vscode(directory: str = "") -> str:
+def open_vscode(directory: str = "", new_window: bool = False) -> str:
+    """打开 VSCode 并带上工作目录。
+
+    new_window=True 用于"刚装完插件"：已开的窗口是装插件之前加载的，里面没有它。"""
     m = _impl()
     fn = getattr(m, "open_vscode", None)
     if fn is None:
         return "打开 VSCode 失败：这个平台没有打开 VSCode 的实现"
-    return fn(directory)
+    return fn(directory, new_window)
+
+
+def open_uri(uri: str) -> str:
+    """把 vscode://xxx 这类自定义协议链接交给系统处理。成功返回空串，失败返回原因。
+
+    vscode://anthropic.claude-code/open 是 Claude 插件自己注册的入口，
+    打开 VSCode 之后靠它把 Claude 面板亮出来。"""
+    m = _impl()
+    fn = getattr(m, "open_uri", None)
+    if fn is None:
+        return "这个平台没有打开链接的实现"
+    return fn(uri)

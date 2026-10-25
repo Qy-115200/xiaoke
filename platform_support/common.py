@@ -175,6 +175,19 @@ def open_url(url: str) -> bool:
         return False
 
 
+def launch_argv_for(info: dict, new_window: bool, directory) -> list[str]:
+    """拼出"用 VSCode 打开这个目录"的完整 argv。
+
+    ★ 要带参数（比如 -n 开新窗口）时**必须走 CLI**：Windows 上 `Code.exe` 收到参数
+      会转手给已运行的实例，不按命令行语义处理（本机实测 `Code.exe --list-extensions`
+      是空输出，`code.cmd` 才正常）。所以有 CLI 就用 CLI，没有才退回 launch_argv
+      —— 那种情况下只是开不出新窗口，照样能打开。"""
+    cli = list(info.get("cli_argv") or [])
+    if new_window and cli:
+        return cli + ["-n", str(directory)]
+    return list(info.get("launch_argv") or []) + [str(directory)]
+
+
 def download_page_fallback(reason: str) -> str:
     """自动装失败时的统一说法：先把下载页打开，再如实告诉模型发生了什么。"""
     if open_url(VSCODE_DOWNLOAD_URL):

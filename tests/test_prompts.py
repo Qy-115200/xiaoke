@@ -93,6 +93,12 @@ class VscodePromptTests(unittest.TestCase):
         self.assertIn("不要承诺", self.text)
         self.assertIn("情况 I", self.text)
 
+    def test_open_vscode_also_opens_panel(self):
+        # open_vscode 不只是开窗：面板要一起开，而且失败时不许假装成功
+        self.assertIn("Claude 面板也打开了", self.text)
+        self.assertIn("点左边活动栏的 Claude 图标", self.text)
+        self.assertIn("在面板没打开时说", self.text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

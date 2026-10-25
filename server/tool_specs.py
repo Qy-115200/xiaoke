@@ -364,10 +364,13 @@ tools = [
         "function": {
             "name": "open_vscode",
             "description": (
-                "用 VSCode 打开指定工作目录。VSCode 分支里的最后一步。"
+                "用 VSCode 打开指定工作目录，**并把里面的 Claude 面板也打开**。"
+                "VSCode 分支里的最后一步。"
                 "★ 不要和 launch_claude 同时调用，两个只能开一个。"
                 "目录必须在用户主目录内，不存在会自动创建。"
-                "返回值以「已打开 VSCode」开头。"
+                "返回值以「已打开 VSCode」开头；打开成功时后面会接一句"
+                "「Claude 面板也打开了」或「面板没能自动打开……点左边活动栏的 Claude 图标」，"
+                "**照实转述，不要在面板没打开时说它打开了**。"
             ),
             "parameters": {
                 "type": "object",

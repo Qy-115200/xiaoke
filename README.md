@@ -41,6 +41,14 @@ Claude Code 只看得到你给它的**一个**文件夹。所以启动之前 Age
 Linux 只打开官网下载页（apt/snap 要 sudo，助手不替你提权）。**装不上就打开下载页**并如实说明；
 插件市场连不上也一样，照样用 VSCode 打开，让用户在扩展面板里手动装。
 
+`open_vscode()` 不只是开窗：它**把 Claude 面板也一起打开**。VSCode 命令行没有 `--command`
+这种东西，所以走的是插件自己注册的 URI 入口 `vscode://anthropic.claude-code/open`
+（插件 `extension.js` 里的 `registerUriHandler` 接到它就执行 `claude-vscode.primaryEditor.open`）。
+两个细节：① 只在 `--list-extensions` 里确认插件存在时才发链接 —— 否则 VSCode 会弹一个
+"无法打开链接"的报错框；② 本流程刚装完插件会先开一个**新窗口**（已开着的窗口是在装插件
+之前加载扩展的，里面没有它），等 4 秒让插件宿主注册好 URI 处理器再发。
+面板没能自动打开时，返回里会写清楚，让用户点左边活动栏的 Claude 图标 —— 不会假装成功。
+
 检测不依赖 PATH：Windows 先查注册表（`App Paths` → `Applications\Code.exe` → `vscode` 协议），
 再查常见目录，最后才是 `which`。这样装在 `D:\vs code` 这种非默认位置也找得到。
 CLI 一律用安装目录里的 `bin\code.cmd`（`Code.exe --list-extensions` 是空输出），
@@ -256,8 +264,8 @@ agent_demo/
 │   ├── claude_config.py          124   把身份写进 ~/.claude.json 和 ~/.claude/settings.json
 │   ├── tools_fixed.py            148   五个固定工具 + aikaui:// 协议注册（转发 platform_support）
 │   ├── tools_general.py          125   bash / read_file / write_file / ask_user（解码和杀进程树在 platform_support.common）
-│   ├── tools_vscode.py           181   check_vscode / install_vscode / install_claude_extension / open_vscode
-│   └── tool_specs.py             383   工具说明书：tools[] + tool_map（19 个工具）
+│   ├── tools_vscode.py           246   check_vscode / install_vscode / install_claude_extension / open_vscode（连 Claude 面板一起开）
+│   └── tool_specs.py             386   工具说明书：tools[] + tool_map（19 个工具）
 │
 ├── ui/                                界面层
 │   ├── fonts.py                  179   全界面字体表：按平台选字体 + 字号常量 + 画布缩放
@@ -285,7 +293,7 @@ agent_demo/
 │   ├── test_platform_support.py       三平台抽象层
 │   ├── test_prompts.py                提示词按平台切换 + VSCode 询问分支的关键句
 │   ├── test_vscode.py                 VSCode 探测 / 安装 / 打开（三平台，全程打桩）
-│   ├── test_tools_vscode.py           四个 VSCode 工具的返回值和失败归类
+│   ├── test_tools_vscode.py           四个 VSCode 工具的返回值、失败归类、Claude 面板什么时候发链接
 │   ├── test_agent_core.py             install_done 什么时候触发（自动退出的判定）
 │   ├── test_tool_specs.py             tools[] 和 tool_map 一一对上
 │   └── test_imports.py                工具层导入不依赖 Windows

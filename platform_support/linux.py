@@ -18,6 +18,7 @@ from platform_support.common import (
     clean_env,
     download_page_fallback,
     find_claude,
+    launch_argv_for,
     run_capture,
     safe_cwd,
 )
@@ -277,14 +278,14 @@ def install_vscode() -> str:
     return download_page_fallback("Linux 上装 VSCode 需要管理员权限，助手不替你提权")
 
 
-def open_vscode(directory: str = "") -> str:
+def open_vscode(directory: str = "", new_window: bool = False) -> str:
     info = find_vscode()
     if not info:
         return "找不到 VSCode，无法打开"
     cwd, note = safe_cwd(directory)
     try:
         subprocess.Popen(
-            info["launch_argv"] + [str(cwd)],
+            launch_argv_for(info, new_window, cwd),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             env=clean_env(),               # 挡掉从 VSCode 终端继承来的 ELECTRON_RUN_AS_NODE
@@ -294,6 +295,23 @@ def open_vscode(directory: str = "") -> str:
     except Exception as e:
         return f"打开 VSCode 失败：{e}"
     return f"已打开 VSCode（{info['exe']}），工作目录：{cwd}{note}"
+
+
+def open_uri(uri: str) -> str:
+    """把 vscode://xxx 交给系统的协议处理程序。成功返回空串。"""
+    opener = shutil.which("xdg-open")
+    if not opener:
+        return "没有 xdg-open，打不开 vscode:// 链接"
+    try:
+        subprocess.Popen(
+            [opener, uri],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=clean_env(), start_new_session=True,
+        )
+    except Exception as e:
+        return f"打不开链接 {uri}：{e}"
+    return ""
 
 
 # ================= 通知 =================

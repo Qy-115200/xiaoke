@@ -19,6 +19,7 @@ from platform_support.common import (
     clean_env,
     download_page_fallback,
     find_claude,
+    launch_argv_for,
     run_capture,
     safe_cwd,
 )
@@ -262,14 +263,16 @@ def install_vscode() -> str:
     return download_page_fallback("brew 说装成功了，但 /Applications 里没找到 VSCode")
 
 
-def open_vscode(directory: str = "") -> str:
+def open_vscode(directory: str = "", new_window: bool = False) -> str:
+    """用 VSCode 打开目录。new_window=True 时走 CLI 的 -n（`open -n` 是"再开一个
+    app 实例"，会多出一个 Dock 图标，所以不用它）。"""
     info = find_vscode()
     if not info:
         return "找不到 VSCode，无法打开"
     cwd, note = safe_cwd(directory)
     try:
         subprocess.Popen(
-            info["launch_argv"] + [str(cwd)],
+            launch_argv_for(info, new_window, cwd),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             env=clean_env(),               # 挡掉从 VSCode 终端继承来的 ELECTRON_RUN_AS_NODE
@@ -279,6 +282,20 @@ def open_vscode(directory: str = "") -> str:
     except Exception as e:
         return f"打开 VSCode 失败：{e}"
     return f"已打开 VSCode（{info['exe']}），工作目录：{cwd}{note}"
+
+
+def open_uri(uri: str) -> str:
+    """把 vscode://xxx 交给系统的协议处理程序。成功返回空串。"""
+    try:
+        subprocess.Popen(
+            ["open", uri],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=clean_env(), start_new_session=True,
+        )
+    except Exception as e:
+        return f"打不开链接 {uri}：{e}"
+    return ""
 
 
 # ================= 通知 =================

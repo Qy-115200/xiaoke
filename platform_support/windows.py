@@ -21,6 +21,7 @@ from platform_support.common import (
     download_page_fallback,
     exe_from_command,
     find_claude,
+    launch_argv_for,
     run_capture,
     safe_cwd,
 )
@@ -265,15 +266,18 @@ def install_vscode() -> str:
     return download_page_fallback("winget 说装成功了，但找不到 VSCode 的安装位置")
 
 
-def open_vscode(directory: str = "") -> str:
-    """用 VSCode 打开指定目录（目录规则跟 launch_claude 一样：只在用户主目录里）。"""
+def open_vscode(directory: str = "", new_window: bool = False) -> str:
+    """用 VSCode 打开指定目录（目录规则跟 launch_claude 一样：只在用户主目录里）。
+
+    new_window=True 时强制开新窗口 —— 刚装完插件必须这样：已开的窗口是在装插件
+    之前加载的，里面没有这个插件。"""
     info = find_vscode()
     if not info:
         return "找不到 VSCode，无法打开"
     cwd, note = safe_cwd(directory)
     try:
         subprocess.Popen(
-            info["launch_argv"] + [str(cwd)],
+            launch_argv_for(info, new_window, cwd),
             stdin=subprocess.DEVNULL,          # 别让子进程抢走终端的标准输入
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             # ★ clean_env 不能省：带着 ELECTRON_RUN_AS_NODE 会让 Code.exe 变成
@@ -285,6 +289,18 @@ def open_vscode(directory: str = "") -> str:
     except Exception as e:
         return f"打开 VSCode 失败：{e}"
     return f"已打开 VSCode（{info['exe']}），工作目录：{cwd}{note}"
+
+
+def open_uri(uri: str) -> str:
+    """把 vscode://xxx 这样的链接交给系统（VS Code 自己注册的协议）。
+
+    成功返回空串，失败返回一句要转告用户的话。用 os.startfile 而不是拼
+    `cmd /c start`：链接里带 `&` 之类的话，交给命令行会被拆开。"""
+    try:
+        os.startfile(uri)                    # noqa: S606 - ShellExecute，走系统协议处理
+    except Exception as e:
+        return f"打不开链接 {uri}：{e}"
+    return ""
 
 
 # ================= aikaui:// 协议 =================
