@@ -171,6 +171,7 @@ claude-code-assistant                 # 首次运行：注册账号 → 写 ~/.c
 claude-code-assistant --account-code <账户码> --account-key <账户密钥>   # 用已有账号绑这台机器
 claude-code-assistant --yes           # 全默认，适合写进 Dockerfile / cloud-init
 claude-code-assistant --dry-run       # 只打印要做什么，不下载、不写任何文件
+claude-code-assistant --repair        # 只对账配置：跟 identity.json 不一致就补齐（见下）
 ```
 
 | 参数 | 作用 |
@@ -180,6 +181,7 @@ claude-code-assistant --dry-run       # 只打印要做什么，不下载、不�
 | `--new-account` | 上次注册没走完、留下了旧账户码时，明确放弃它重新注册 |
 | `--node-version` / `--claude-version` | 钉版本；默认 Node 取 LTS、claude 取 latest |
 | `--yes` / `--force` / `--quiet` | 不提问 / 已装也重装 / 只输出错误 |
+| `--repair` | 只检查并修复 `~/.claude.json` 和 `~/.claude/settings.json`，不装 Node、不装 claude、不注册账号 |
 | `--allow-root` | 允许 root 跑（默认拒绝：root 装出来的东西后面普通用户用不了） |
 
 **四步和三处"自动"**
@@ -198,6 +200,18 @@ claude-code-assistant --dry-run       # 只打印要做什么，不下载、不�
    `bind_account()`；都没有才 `register_device()`（PoW 进度在终端里画一行）。
    最后 `bypass_region_check()` + `set_model_config()` 写 `~/.claude.json` 和
    `~/.claude/settings.json`。
+
+**配置自愈**。两份配置里的 `ANTHROPIC_*` 是我们写的，但用户重装 / 升级 Claude Code、
+上次写盘中断、服务端轮换 token，都会让它们跟 `~/.claude-agent/identity.json` 对不上。
+桌面版**每次启动**、服务器版**每次 `--repair`** 都会对一次账
+（[`server/claude_config.py`](server/claude_config.py) 的 `check_and_repair`）：
+
+- **只修自己的**：磁盘上的 `ANTHROPIC_BASE_URL` 与 identity 一致（或一个受管键都没有）
+  才算我们的；指向别处的不动，除非 `--repair --force`；
+- **坏文件绝不覆盖**（JSON 解析不了、`env` 不是对象、路径是软链 → 跳过并说明）；
+- **没有 diff 就不写**；写之前留一份 `<文件名>.aikaui-bak`；
+  `settings.json` 顶层的 `model` 不碰 —— 那是用户在 `/model` 里的选择；
+- 桌面版只在**真的补了东西**时往对话区留一行日志，不弹窗。
 
 **退出码**。两个程序的码各有各的含义，脚本化部署时靠它判断，别只 grep 输出：
 
@@ -218,10 +232,10 @@ claude-code-assistant --dry-run       # 只打印要做什么，不下载、不�
 | 0 | 四步全部完成 |
 | 2 | 参数不对（argparse） |
 | 3 | 环境不支持 / `~/.local` 不可写，或没有 TTY 又没给 `--yes` |
-| 4 | 账号：注册失败、绑账号失败、或本地留着未完成注册的旧账户码却没给 `--new-account` |
+| 4 | 账号：注册失败、绑账号失败、本地留着未完成注册的旧账户码却没给 `--new-account`（`--repair` 时是"本机没有账号"） |
 | 5 | Node 装不上（镜像挂了、校验失败） |
 | 6 | npm 装不上（网络、权限、包缺原生二进制） |
-| 7 | 配置写不进 `~/.claude.json` / `~/.claude/settings.json` |
+| 7 | 配置写不进 `~/.claude.json` / `~/.claude/settings.json`；`--repair` 遇到坏文件或写入校验失败 |
 
 装完 `install.sh` 会**直接进向导**，并把向导的退出码原样透传出来 ——
 所以 `curl … | sh` 返回 5/6/7 时，问题在向导那一步，照第二张表查。
@@ -346,8 +360,8 @@ macOS 两个包都**没有签名**：首次打开要右键 →「打开」，
 ```
 agent_demo/
 │
-├── main.py                       134   程序入口：先换新版本 → 建窗口 → 起线程 → 事件循环
-├── server_main.py                400   服务器版入口：环境自检 → Node → claude → 账号 → 配置（不 import tkinter）
+├── main.py                       156   程序入口：先换新版本 → 建窗口 → 起线程（含配置自愈）→ 事件循环
+├── server_main.py                474   服务器版入口：环境自检 → Node → claude → 账号 → 配置（--repair 只对账）
 │
 ├── config.py                      98   唯一的常量源：版本、服务器地址、凭证、路径、配色、更新参数、MAX_STEPS
 ├── updater.py                    660   自动更新：清单校验 / 静默下载 / 下次启动替换自己（不 import tkinter）
@@ -378,7 +392,7 @@ agent_demo/
 │   ├── vault.py                  213   凭证的"第二份"：账户码存注册表（DPAPI 加密）/ 配置目录
 │   ├── pow.py                    128   PoW 求解（进度 / 取消 / 90 秒超时），和服务器 pow.js 逐位对齐
 │   ├── api.py                    504   余额 / 用量 / 充值 HTTP 层（永远不抛异常）
-│   ├── claude_config.py          124   把身份写进 ~/.claude.json 和 ~/.claude/settings.json
+│   ├── claude_config.py          471   把身份写进两份配置 + 事后对账自愈（坏文件不覆盖、外家中转不碰）
 │   ├── tools_fixed.py            148   五个固定工具 + aikaui:// 协议注册（转发 platform_support）
 │   ├── tools_general.py          125   bash / read_file / write_file / ask_user（解码和杀进程树在 platform_support.common）
 │   ├── tools_vscode.py           246   check_vscode / install_vscode / install_claude_extension / open_vscode（连 Claude 面板一起开）
@@ -398,7 +412,7 @@ agent_demo/
 │   ├── make_version_info.py       80   生成 Windows 文件版本信息（build/version_info.txt）
 │   ├── make_manifest.py          113   四个产物 → latest.json（校验版本、算 sha256 / size）
 │   └── deploy_downloads.sh            发布：传 nginx + 传 COS → 两边验大小 → 换清单 → 改下载页版本号
-├── tests/                            离线单元测试（313 个，stdlib unittest）
+├── tests/                            离线单元测试（stdlib unittest）
 │   ├── test_version.py                版本解析 / 比较 / 清单校验
 │   ├── test_download.py               本地假服务器：下载、哈希、404、缓存回退
 │   ├── test_apply.py                  备份、回滚、失败上限、锁、更新提示
@@ -414,6 +428,7 @@ agent_demo/
 │   ├── test_agent_core.py             install_done 什么时候触发（自动退出的判定）
 │   ├── test_tool_specs.py             tools[] 和 tool_map 一一对上
 │   ├── test_server_cli.py             服务器版：参数、退出码、--dry-run 不落地、无 TTY 不阻塞、不重复注册、密钥不进报错
+│   ├── test_claude_config.py          配置自愈：没 diff 不写、坏文件不覆盖、外家中转不碰、顶层 model 不动、日志不含 token
 │   ├── test_node_setup.py             Node 选版本 / 资产名 / SHASUMS / 校验失败 / PATH 块只写一次
 │   ├── test_claude_setup.py           npm argv 精确 / npm_config_* 被清掉 / 失败映射到 6
 │   ├── test_console_ui.py             终端进度条：管道里不打 \r、静默模式、流坏了不抛

@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
 
@@ -13,8 +14,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import server_main  # noqa: E402
+from server import claude_config as cc  # noqa: E402
 from server.cli import (  # noqa: E402
-    EXIT_ACCOUNT, EXIT_CONFIG, EXIT_ENV, CliContext, CliError,
+    EXIT_ACCOUNT, EXIT_CONFIG, EXIT_ENV, EXIT_OK, CliContext, CliError,
 )
 
 
@@ -46,6 +48,7 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(a.dry_run)
         self.assertFalse(a.allow_root)
         self.assertFalse(a.new_account)
+        self.assertFalse(a.repair)
 
     def test_help_and_version_exit_zero(self):
         self.assertEqual(server_main.main(["--help"]), 0)
@@ -256,6 +259,84 @@ class ConfigStepTests(unittest.TestCase):
             with self.assertRaises(CliError) as cm:
                 server_main._config_step(ctx, _args())
         self.assertEqual(cm.exception.exit_code, EXIT_CONFIG)
+
+
+class RepairTests(unittest.TestCase):
+    """`--repair`：只对账配置，不装 Node、不装 claude、不注册账号。"""
+
+    IDENT = {"api_key": "sk-test-repair", "api_base": "https://aikaui.com/v1",
+             "model": "pro-x", "fast_model": "fast-x", "account_code": "AB-1"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.config = self.root / ".claude.json"
+        self.settings = self.root / ".claude" / "settings.json"
+        self._saved = (cc.CLAUDE_CONFIG, cc.CLAUDE_SETTINGS)
+        cc.CLAUDE_CONFIG, cc.CLAUDE_SETTINGS = self.config, self.settings
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        cc.CLAUDE_CONFIG, cc.CLAUDE_SETTINGS = self._saved
+
+    def run_repair(self, *extra, identity="default", tty=False):
+        ident = self.IDENT if identity == "default" else identity
+        with ExitStack() as stack:
+            guard = stack.enter_context(mock.patch.object(server_main, "_no_tty_guard"))
+            node = stack.enter_context(mock.patch.object(server_main.node_setup, "ensure_node"))
+            claude = stack.enter_context(
+                mock.patch.object(server_main.claude_setup, "ensure_claude"))
+            reg = stack.enter_context(
+                mock.patch.object(server_main.identity, "register_device"))
+            stack.enter_context(mock.patch.object(server_main, "_is_tty", return_value=tty))
+            stack.enter_context(mock.patch.object(server_main.identity, "load_identity",
+                                                  return_value=ident))
+            code = server_main.main(["--repair", *extra])
+        guard.assert_not_called()          # 没终端也不重开终端、不假装成功
+        node.assert_not_called()
+        claude.assert_not_called()
+        reg.assert_not_called()
+        return code
+
+    def test_conflicts_with_account_flags(self):
+        self.assertEqual(server_main.main(["--repair", "--account-code", "AB-1"]),
+                         server_main.EXIT_ARGS)
+        self.assertEqual(server_main.main(["--repair", "--new-account"]),
+                         server_main.EXIT_ARGS)
+
+    def test_no_identity_exits_4(self):
+        self.assertEqual(self.run_repair(identity=None), EXIT_ACCOUNT)
+        self.assertFalse(self.config.exists())
+
+    def test_repairs_without_a_tty(self):
+        self.assertEqual(self.run_repair(), EXIT_OK)
+        self.assertIs(self.config.exists(), True)
+        self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8"))
+                         ["env"]["ANTHROPIC_AUTH_TOKEN"], self.IDENT["api_key"])
+
+    def test_dry_run_writes_nothing(self):
+        self.assertEqual(self.run_repair("--dry-run"), EXIT_OK)
+        self.assertFalse(self.config.exists())
+        self.assertFalse(self.settings.exists())
+
+    def test_broken_file_exits_7(self):
+        self.config.write_text("{ broken", encoding="utf-8")
+        self.assertEqual(self.run_repair(), EXIT_CONFIG)
+        self.assertEqual(self.config.read_text(encoding="utf-8"), "{ broken")
+
+    def test_foreign_provider_is_reported_not_forced(self):
+        self.settings.parent.mkdir(parents=True)
+        self.settings.write_text(json.dumps(
+            {"env": {"ANTHROPIC_BASE_URL": "https://example.invalid"}}), encoding="utf-8")
+        raw = self.settings.read_bytes()
+        self.assertEqual(self.run_repair(), EXIT_OK)
+        self.assertEqual(self.settings.read_bytes(), raw)
+        self.assertFalse(self.config.exists(),
+                         "另一份是别人的中转，不能顺手再建一份我们的配置")
+
+    def test_missing_base_is_exit_7(self):
+        self.assertEqual(self.run_repair(identity={"api_key": "k"}), EXIT_CONFIG)
 
 
 class DryRunFlowTests(unittest.TestCase):

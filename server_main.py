@@ -60,9 +60,25 @@ def _log_line(text: str) -> None:
         pass
 
 
-def _step(n: int, text: str) -> None:
+def _step(n: int, text: str, total: int = TOTAL_STEPS) -> None:
     try:
-        print(f"[{n}/{TOTAL_STEPS}] {text}", flush=True)
+        print(f"[{n}/{total}] {text}", flush=True)
+    except Exception:
+        pass
+
+
+def _say(text: str = "") -> None:
+    """打印一行。★ 吞掉编码错误：Windows 的 GBK 控制台连 ✅ 都会抛，
+    不能因为装饰字符把整条流程判成崩溃。"""
+    try:
+        print(text, flush=True)
+    except Exception:
+        pass
+
+
+def _say_err(text: str = "") -> None:
+    try:
+        print(text, file=sys.stderr, flush=True)
     except Exception:
         pass
 
@@ -102,6 +118,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="指定 @anthropic-ai/claude-code 的版本（默认 latest）")
     p.add_argument("--new-account", action="store_true",
                    help="即使本机保险箱里还留着旧账号，也开一个新账号")
+    p.add_argument("--repair", action="store_true",
+                   help="只检查并修复 Claude Code 的配置（不装 Node、不装 claude、不注册）")
     p.add_argument("--yes", "-y", action="store_true",
                    help="不问任何问题，全按默认走")
     p.add_argument("--force", action="store_true",
@@ -235,6 +253,58 @@ def _config_step(ctx, args) -> dict:
         raise CliError(str(text), EXIT_CONFIG,
                        hint="身份文件可能坏了，删掉后加 --new-account 重跑")
     return {"ok": True, "notes": notes}
+
+
+# ================= 只对账配置 =================
+
+def _repair_only(args) -> int:
+    """`--repair`：拿 identity.json 对一次账，只碰 Claude Code 的两份配置。
+
+    ★ 不做平台/架构/root 预检、不碰 Node 和 claude：这条路径要能在 cron 里、
+      在别的机器上都跑得起来，只要求"本机有账号 + 配置文件可写"。
+    ★ 坏文件不覆盖（那是用户别处的配置）；配置指向别人家的中转时也不动，
+      除非显式加 --force。"""
+    from server import claude_config
+
+    _step(1, "检查 Claude Code 配置", total=1)
+    if args.dry_run:
+        _say("  （--dry-run）只对账，不备份、不写盘")
+
+    ident = identity.load_identity()
+    if not ident:
+        raise CliError(
+            "这台机器还没有账号，没有可以对账的凭证",
+            EXIT_ACCOUNT,
+            hint="先装一遍：curl -fsSL https://aikaui.com/install.sh | sh\n"
+                 "或者用 --account-code <账户码> 绑一个已有账号")
+
+    result = claude_config.check_and_repair(
+        identity=ident, force=args.force, dry_run=args.dry_run,
+        create_missing=True)
+
+    for line in result.lines():
+        _say(line)
+
+    if result.problem == "bad-identity":
+        raise CliError("身份文件不完整（缺 api_base），没法判断该写什么",
+                       EXIT_CONFIG,
+                       hint="重新跑一遍安装器，或加 --new-account 领个新账号")
+    if result.problem.startswith("error:"):
+        raise CliError(f"对账时出错：{result.problem[6:].strip()}", EXIT_CONFIG)
+    if not result.ok or result.hard_problems:
+        # 坏文件/软链/写不进去：不能报"修好了"。部分写成功也算失败。
+        raise CliError("配置没修好（见上面逐条结果）", EXIT_CONFIG,
+                       hint="上一条写着「跳过」的文件需要你自己看一眼；"
+                            "改坏了想强制按账号重写，加 --force")
+
+    if result.changes:
+        verb = "需要补齐（--dry-run 没写）" if result.planned else "已补齐"
+        _say(f"\n✅ {verb}：{result.summary}")
+    elif result.skipped:
+        _say("\n✅ 没有要补的键；有文件按上面的原因跳过了，没动。")
+    else:
+        _say("\n✅ 配置和账号一致，什么都没动。")
+    return EXIT_OK
 
 
 # ================= 无 TTY 保护 =================
@@ -373,26 +443,32 @@ def main(argv=None) -> int:
         return int(e.code or 0)
 
     interactive = _is_tty(sys.stdin) and _is_tty(sys.stdout)
-    if not interactive and not args.yes and not args.dry_run:
+    if args.repair and (args.account_code or args.new_account):
+        _say_err("✖ --repair 只对账配置，不能和 --account-code / --new-account 一起用")
+        return EXIT_ARGS
+    # --repair 本身就是非交互的：没终端也照跑，不走"重开终端"那套
+    if not interactive and not args.yes and not args.dry_run and not args.repair:
         return _no_tty_guard(argv, args)
 
     try:
+        if args.repair:
+            return _repair_only(args)
         return _run(args)
     except CliError as e:
-        print(f"\n✖ {e.message}", file=sys.stderr, flush=True)
+        _say_err(f"\n✖ {e.message}")
         if e.hint:
-            print("  " + str(e.hint).replace("\n", "\n  "), file=sys.stderr, flush=True)
-        print(f"  日志：{LOG_FILE}", file=sys.stderr, flush=True)
+            _say_err("  " + str(e.hint).replace("\n", "\n  "))
+        _say_err(f"  日志：{LOG_FILE}")
         _log_line(f"failed({e.exit_code}): {e.message}")
         return e.exit_code
     except KeyboardInterrupt:
-        print("\n已取消。", file=sys.stderr, flush=True)
+        _say_err("\n已取消。")
         return 130
     except Exception as e:                  # 兜底：绝不吐一整屏 traceback 给用户
         import traceback
         _log_line("crash: " + traceback.format_exc())
-        print(f"\n✖ 意外的错误：{e}", file=sys.stderr, flush=True)
-        print(f"  详细堆栈在 {LOG_FILE}", file=sys.stderr, flush=True)
+        _say_err(f"\n✖ 意外的错误：{e}")
+        _say_err(f"  详细堆栈在 {LOG_FILE}")
         return EXIT_FAILED
 
 

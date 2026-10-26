@@ -26,6 +26,21 @@ from server.ui_bridge import set_ui
 from ui.gui import GUI
 
 
+def _repair_config_worker():
+    """开机对一次账：两份 Claude Code 配置跟 identity.json 不一致就静默补齐。
+
+    ★ 只在**真的改了东西**时说一句，而且只进对话区（不弹窗、不打扰）：
+      没账号、没有 diff、配置指向别人家的中转 —— 一个字都不说。
+    ★ 任何异常都吞掉：自愈是顺手的事，不能把启动拖垮。"""
+    try:
+        from server.claude_config import check_and_repair
+        result = check_and_repair()
+        if result.repaired:
+            msg_queue.put(("log", f"[系统] {result.summary}"))
+    except Exception:
+        pass
+
+
 def main():
     """程序入口"""
     # ---------- 自动更新：把上次下载好的新版本换上去 ----------
@@ -120,6 +135,12 @@ def main():
     # ---------- 启动后台线程 ----------
     threading.Thread(target=agent_worker, daemon=True).start()     # Agent 主循环
     threading.Thread(target=balance_worker, daemon=True).start()   # 余额定时刷新
+
+    # ---------- 配置自愈（静默，见 server/claude_config.check_and_repair）----------
+    # 重装 Claude Code / 上次写盘中断 / 服务端换了 token，都会让配置文件跟我们
+    # 记的账号对不上。这条线程只负责"对账 + 补齐"，改了什么会在对话区留一行。
+    # ★ 只办充值的启动方式不跑（那条路上面已经 return）。
+    threading.Thread(target=_repair_config_worker, daemon=True).start()
 
     # ---------- 后台检查更新（静默下载，下次启动生效）----------
     # 只办充值的启动方式不查——那种场景用户只想赶紧付钱，别抢网络。

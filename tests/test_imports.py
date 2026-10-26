@@ -68,6 +68,24 @@ class ServerEntryImportTests(unittest.TestCase):
         self.assertEqual(r.stdout.strip(), "[]",
                          "服务器版入口把不该要的模块拖进来了")
 
+    def test_claude_config_imports_no_gui(self):
+        """配置自愈会被 server_main 和桌面版两边用 —— 它自己必须是"干净"的。"""
+        code = (
+            "import sys, server.claude_config as c;"
+            "print([m for m in %r if m in sys.modules])"
+            % (list(self.FORBIDDEN),)
+        )
+        r = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "[]",
+                         "server/claude_config.py 把界面/Agent 模块拖进来了")
+
     def test_server_main_help_works_without_display(self):
         """没有 $DISPLAY 也必须能起来 —— 服务器就是这样。"""
         import os

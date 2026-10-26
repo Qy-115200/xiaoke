@@ -83,6 +83,20 @@ class PollQueueTests(unittest.TestCase):
         bus.poll_queue(gui)
         self.assertIn(("show_recovered_notice",), gui.calls)
 
+    def test_config_repair_log_is_quiet(self):
+        """配置自愈只往对话区写一行：不弹窗、不打断用户。"""
+        from server import claude_config as cc
+        gui = _FakeGUI()
+        result = cc.Result(ok=True, repaired=True,
+                           changes=[cc.Change(path=Path("/h/.claude/settings.json"),
+                                              data={}, keys=["ANTHROPIC_AUTH_TOKEN"])])
+        bus.msg_queue.put(("log", f"[系统] {result.summary}"))
+        bus.poll_queue(gui)
+
+        self.assertEqual([c[0] for c in gui.calls], ["write"])
+        self.assertIn("settings.json", gui.calls[0][1])
+        self.assertNotIn("sk-", gui.calls[0][1], "日志里不许出现 token")
+
     def test_unknown_kind_is_ignored(self):
         gui = _FakeGUI()
         bus.msg_queue.put(("no_such_kind", {"x": 1}))
