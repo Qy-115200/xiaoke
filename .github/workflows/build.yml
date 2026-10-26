@@ -27,15 +27,22 @@ jobs:
         include:
           - runner: windows-latest
             key: windows-x64
+            spec: agent.spec
             artifact: ClaudeCodeAssistant-win-x64.exe
           - runner: macos-15            # Apple Silicon
             key: macos-arm64
+            spec: agent.spec
             artifact: ClaudeCodeAssistant-macos-arm64.zip
           - runner: macos-15-intel      # Intel
             key: macos-x64
+            spec: agent.spec
             artifact: ClaudeCodeAssistant-macos-x64.zip
           - runner: ubuntu-22.04        # 老一点保证 glibc 兼容
             key: linux-x64
+            # ★ Linux 发的是**服务器版**（没有图形界面）：server.spec 用
+            #   server_main.py 当入口，并把 tkinter / customtkinter / openai 整包排除。
+            #   `python main.py` 在没有 $DISPLAY 的机器上根本起不来。
+            spec: server.spec
             artifact: ClaudeCodeAssistant-linux-x64.tar.gz
 
     steps:
@@ -67,7 +74,16 @@ jobs:
         run: python build_tools/make_version_info.py
 
       - name: Build
-        run: python -m PyInstaller agent.spec --noconfirm --clean
+        run: python -m PyInstaller ${{ matrix.spec }} --noconfirm --clean
+
+      # 服务器版没有界面，CI 里就能验：--version 必须能跑通（顺带证明
+      # 没有把 tkinter 拖进来，也没有缺 lzma 之类的隐式依赖）。
+      - name: Smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          ./dist/ClaudeCodeAssistant --version
+          ./dist/ClaudeCodeAssistant --help > /dev/null
 
       # ---------------- Windows ----------------
       - name: Package (Windows)
@@ -87,6 +103,8 @@ jobs:
           ls -l "${{ matrix.artifact }}"
 
       # ---------------- Linux ----------------
+      # 服务器版：一个可执行文件就够了。**不要**再塞 .desktop —— 那是给
+      # "双击在图形桌面里打开" 用的，这个包是终端程序，装进去只会误导。
       - name: Package (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -97,7 +115,6 @@ jobs:
           mkdir -p "$DIR"
           cp dist/ClaudeCodeAssistant "$DIR/"
           cp agent.png "$DIR/"
-          cp packaging/claude-code-assistant.desktop "$DIR/"
           chmod +x "$DIR/ClaudeCodeAssistant"
           tar -czf "${{ matrix.artifact }}" "$DIR"
           ls -l "${{ matrix.artifact }}"

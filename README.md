@@ -145,27 +145,134 @@ python main.py
 python -m unittest discover -s tests
 ```
 
-## 打包
+**服务器上没有图形界面怎么办？** 用服务器版（见下一节），它不需要 `$DISPLAY`。
 
-三平台共用一份 [`agent.spec`](agent.spec)（文件名用 ASCII，CI 和命令行都能直接引用）：
+## 服务器版（Linux，无图形界面）
+
+服务器上没有 X11 / Wayland，`python main.py` 一进来就 `import customtkinter`，
+`ctk.CTk()` 会直接抛 `TclError`。所以 Linux 发的是**另一份产物**：一个纯终端程序，
+把"装 Node → 装 claude → 领账号 → 写配置"这四件事按固定顺序做完，不跑 Agent、不调模型。
+
+一条命令装好（脚本会自动下 [latest.json](https://aikaui.com/latest.json) 里 `linux-x64`
+那一条，校验 sha256，不需要 root）：
 
 ```bash
-python -m PyInstaller agent.spec --noconfirm --clean
+curl -fsSL https://aikaui.com/install.sh | sh
+```
+
+装到 `~/.local/lib/claude-code-assistant/`，软链成 `~/.local/bin/claude-code-assistant`，
+并往 `~/.bashrc` / `~/.profile` 写一段带标记的 PATH（`# >>> aikaui >>>`，重跑不会重复写）。
+装完会跑一次 `--version`：**跑不起来就退 4，不会留下一个"装上了但用不了"的状态**。
+
+装完直接启动（四个步骤会一步步问，缺什么补什么）：
+
+```bash
+claude-code-assistant                 # 首次运行：注册账号 → 写 ~/.claude.json → 提示怎么用
+claude-code-assistant --account-code <账户码> --account-key <账户密钥>   # 用已有账号绑这台机器
+claude-code-assistant --yes           # 全默认，适合写进 Dockerfile / cloud-init
+claude-code-assistant --dry-run       # 只打印要做什么，不下载、不写任何文件
+```
+
+| 参数 | 作用 |
+|---|---|
+| `--dir PATH` | claude 的工作目录，默认 `$HOME` |
+| `--account-code` / `--account-key` | 绑已有账号（比在新机器上再注册一个更常见） |
+| `--new-account` | 上次注册没走完、留下了旧账户码时，明确放弃它重新注册 |
+| `--node-version` / `--claude-version` | 钉版本；默认 Node 取 LTS、claude 取 latest |
+| `--yes` / `--force` / `--quiet` | 不提问 / 已装也重装 / 只输出错误 |
+| `--allow-root` | 允许 root 跑（默认拒绝：root 装出来的东西后面普通用户用不了） |
+
+**四步和三处"自动"**
+
+1. **环境自检**：不是 Linux、架构不是 x86_64/aarch64、`~/.local` 不可写，都会在下载任何
+   东西之前就失败（退出码 3）。
+2. **Node**：`node` 主版本 ≥ 22 就复用；否则从 `cdn.npmmirror.com` 下
+   `node-v<ver>-linux-<arch>.tar.xz`，对 `SHASUMS256.txt` 校验，装到 `~/.local/node-v<ver>`
+   再软链成 `~/.local/node`。**全程不 sudo。**
+3. **claude CLI**：`npm install -g --prefix ~/.local @anthropic-ai/claude-code
+   --include=optional`。这行必须显式带 `--include=optional`：原生二进制是靠 postinstall
+   装进来的，用户的 `.npmrc` 里只要有 `ignore-scripts=true` 或 `omit=optional`，
+   npm 会"成功"退出但 `claude` 是个空壳。所以 `npm_env()` 把所有继承来的 `npm_config_*`
+   全部清掉再显式设一遍。
+4. **账号 + 配置**：本地已有 identity 就复用（不会偷偷重注册）；`--account-code` 走
+   `bind_account()`；都没有才 `register_device()`（PoW 进度在终端里画一行）。
+   最后 `bypass_region_check()` + `set_model_config()` 写 `~/.claude.json` 和
+   `~/.claude/settings.json`。
+
+**退出码**。两个程序的码各有各的含义，脚本化部署时靠它判断，别只 grep 输出：
+
+`install.sh`（下载和落地这一段）：
+
+| 码 | 含义 |
+|---|---|
+| 0 | 装好了 |
+| 1 | 拉不到 `latest.json`、下载失败，或清单里缺字段 |
+| 2 | 被前置检查拒绝：root、`HOME` 为空或 `/`、缺 tar/awk/curl |
+| 3 | 包不对：非 https、大小不符、sha256 不符、tar 读不了、包里有 `../`、包内没有可执行文件 |
+| 4 | 装上了但 `--version` 跑不起来（glibc / 架构不兼容） |
+
+`claude-code-assistant`（四步向导）：
+
+| 码 | 含义 |
+|---|---|
+| 0 | 四步全部完成 |
+| 2 | 参数不对（argparse） |
+| 3 | 环境不支持 / `~/.local` 不可写，或没有 TTY 又没给 `--yes` |
+| 4 | 账号：注册失败、绑账号失败、或本地留着未完成注册的旧账户码却没给 `--new-account` |
+| 5 | Node 装不上（镜像挂了、校验失败） |
+| 6 | npm 装不上（网络、权限、包缺原生二进制） |
+| 7 | 配置写不进 `~/.claude.json` / `~/.claude/settings.json` |
+
+装完 `install.sh` 会**直接进向导**，并把向导的退出码原样透传出来 ——
+所以 `curl … | sh` 返回 5/6/7 时，问题在向导那一步，照第二张表查。
+
+**没有 TTY 的时候**（CI、`ssh host cmd`、被别的脚本调用）：不阻塞、不假装成功。
+`DISPLAY` 在就试着用 `x-terminal-emulator`/`gnome-terminal` 之类把向导开在真终端里，
+否则打一行提示 + 写 `~/.claude-agent/cli.log`，退 3。`--yes` 可以完全绕过这个分支。
+
+**`install.sh` 认这几个环境变量**（都是给测试和特殊部署用的，正常安装不用管）：
+`AIKAUI_SITE`（换站点，默认 `https://aikaui.com`）、`AIKAUI_LIB`（换安装目录）、
+`AIKAUI_NO_RUN`（只装不启动）、`AIKAUI_ALLOW_ROOT=1`（允许 root）。
+
+**边界**：一台机器一个账号 —— 同一个 `$HOME` 下的所有用户共用一份凭证，本版不做多租户。
+
+## 打包
+
+Windows / macOS 用 [`agent.spec`](agent.spec)，Linux 用 [`server.spec`](server.spec)
+（两份的入口不同：`main.py` / `server_main.py`）。文件名都用 ASCII，CI 和命令行都能直接引用：
+
+```bash
+python -m PyInstaller agent.spec --noconfirm --clean     # Windows / macOS
+python -m PyInstaller server.spec --noconfirm --clean    # Linux（服务器版）
 ```
 
 | 平台 | 产物 | 说明 |
 |---|---|---|
 | Windows | `dist/ClaudeCode安装助手.exe` | 单文件、无控制台；先跑 `python build_tools/make_version_info.py` 才有文件版本信息 |
 | macOS | `dist/ClaudeCodeAssistant.app` | 未签名；Info.plist 里声明了 `aikaui://` |
-| Linux | `dist/ClaudeCodeAssistant` | 单文件；发行时和 `packaging/claude-code-assistant.desktop`、`agent.png` 一起打 tar.gz |
+| Linux | `dist/ClaudeCodeAssistant` | 单文件、**有控制台**（服务器版）；发行时和 `agent.png` 一起打 tar.gz |
 
-`.spec` 里的入口只写了 `main.py`，PyInstaller 会顺着 import 图自己把 `ui/`、`server/`、
-`platform_support/` 收进去，不用手工维护模块清单。要手工列的数据文件只有图标
+`.spec` 里的入口只写了 `main.py` / `server_main.py`，PyInstaller 会顺着 import 图自己把
+`ui/`、`server/`、`platform_support/` 收进去，不用手工维护模块清单。要手工列的数据文件只有图标
 （Windows 的 `agent.ico`、macOS/Linux 的 `agent.png`）和 macOS 的 `agent.icns`。
+
+`server.spec` 另外做了三件和 `agent.spec` 不同的事，改的时候别照抄漏掉：
+
+- **`console=True`**。GUI 版没有控制台是有意的；服务器版没有控制台等于把所有报错吞掉。
+- **`excludes` 里点名 `tkinter` / `customtkinter` / `PIL` / `openai` / `pydantic` /
+  `agent_core` / `bus` / `llm` / `ui` / `updater`**。这不是省体积，是**保证界面和 Agent 链
+  进不来** —— `tests/test_imports.py` 会断言 `import server_main` 之后这些模块不在
+  `sys.modules` 里，所以"不小心 import 了 `ui.something`"会在测试阶段就红。
+- **hiddenimports 带 `lzma` / `_lzma` 和 `platform_support.linux`**。前者是解 Node 的
+  `.tar.xz` 用的（PyInstaller 不会自动收 C 扩展），后者是 `platform_support/__init__.py`
+  按平台延迟 import 的，静态分析看不到。
 
 **CI**：打 `v*` tag（或手动触发）时 [`.github/workflows/build.yml`](.github/workflows/build.yml)
 在四个 runner 上并行构建（windows-x64 / macos-arm64 / macos-x64 / linux-x64），产物传到
-Actions artifact。macOS 两个包都**没有签名**：首次打开要右键 →「打开」，
+Actions artifact。矩阵每一行带 `spec:`，Linux 那行指向 `server.spec`；构建完还有一个
+**Linux smoke test** 步骤跑 `./dist/ClaudeCodeAssistant --version` 和 `--help` ——
+这两条能过就说明没有把 tkinter 拖进来、`lzma` 也在，省得下载下来才发现跑不起来。
+macOS 两个包都**没有签名**：首次打开要右键 →「打开」，
 或者终端跑 `xattr -dr com.apple.quarantine /Applications/ClaudeCodeAssistant.app`。
 
 ## 自动更新
@@ -209,7 +316,7 @@ Actions artifact。macOS 两个包都**没有签名**：首次打开要右键 �
    NOTES="这一版改了什么" DEPLOY_HOST=… ./build_tools/deploy_downloads.sh 1.1.0 ./release/1.1.0            # 真发
    ```
 
-**发布时有两个容易踩的坑，脚本已经处理好了，但你要知道它在干什么：**
+**发布时有三个容易踩的坑，脚本已经处理好了，但你要知道它在干什么：**
 
 - **同一份包有两个源，两个都要传。** 下载页的 HTML 用相对路径走 `aikaui.com`（nginx 的
   `/var/www/aikaui/releases/`），而 `latest.json` 里给自动更新用的 url 指向 `dl.aikaui.com`
@@ -220,6 +327,11 @@ Actions artifact。macOS 两个包都**没有签名**：首次打开要右键 �
   `/releases/<版本>/…` 的链接，只换 `latest.json` 的话，新用户从下载页拿到的还是旧包。
   脚本在换完清单之后用正则把这两页的版本号改成新的（备份成 `*.bak-<时间戳>`，
   同目录 `mv` 原子替换）。用正则而不是替换某个固定字符串，所以不用每次改脚本。
+- **`install.sh` 和版本号无关，但每次发版都要重传。** 官网那行
+  `curl -fsSL https://aikaui.com/install.sh | sh` 拉的是服务器上的一个固定文件，
+  它自己去读 `latest.json`，所以没有版本号要改 —— 也正因如此，**改了脚本却忘了传**，
+  线上还是老脚本，比发错包更难发现。脚本先 `sh -n` 语法校验，再 `scp` 成 `.tmp` 后 `mv`，
+  最后 `curl` 回来 `cmp` 一次字节一致，不一致就退出。
 
 顺序是刻意的：**传包 → 两边都验 → 才换 `latest.json` → 再改下载页**。
 清单永远不会指向一个取不到的文件。`DRY_RUN=1` 只生成清单并用客户端自己的
@@ -235,6 +347,7 @@ Actions artifact。macOS 两个包都**没有签名**：首次打开要右键 �
 agent_demo/
 │
 ├── main.py                       134   程序入口：先换新版本 → 建窗口 → 起线程 → 事件循环
+├── server_main.py                400   服务器版入口：环境自检 → Node → claude → 账号 → 配置（不 import tkinter）
 │
 ├── config.py                      98   唯一的常量源：版本、服务器地址、凭证、路径、配色、更新参数、MAX_STEPS
 ├── updater.py                    660   自动更新：清单校验 / 静默下载 / 下次启动替换自己（不 import tkinter）
@@ -256,6 +369,10 @@ agent_demo/
 │
 ├── server/                            服务端与工具层（不 import 界面）
 │   ├── ui_bridge.py               31   GUI 注入桥：set_ui / get_ui
+│   ├── cli.py                    335   服务器版共用的地基：退出码、子进程封装、sha256、安全解包、shell PATH 块、HttpClient
+│   ├── console_ui.py             128   终端里的进度实现（实现 ui_bridge 那几个钩子，不阻塞、没 tty 也不卡住）
+│   ├── node_setup.py             346   Node 检测 / 选 LTS / 从 npmmirror 下载校验 / 解到 ~/.local/node / 软链命令
+│   ├── claude_setup.py           231   npm install -g --prefix ~/.local（清掉继承的 npm_config_*，显式 --include=optional）
 │   ├── identity.py               515   设备指纹、PoW 注册、本地凭证、换设备登录、_ensure_account_code / _ensure_user_id、pending_recovery
 │   ├── fingerprint.py            147   硬件指纹：主板序列号 + CPU ID → SHA-256 前 32 位（不是凭据，只在注册时上报）
 │   ├── vault.py                  213   凭证的"第二份"：账户码存注册表（DPAPI 加密）/ 配置目录
@@ -281,7 +398,7 @@ agent_demo/
 │   ├── make_version_info.py       80   生成 Windows 文件版本信息（build/version_info.txt）
 │   ├── make_manifest.py          113   四个产物 → latest.json（校验版本、算 sha256 / size）
 │   └── deploy_downloads.sh            发布：传 nginx + 传 COS → 两边验大小 → 换清单 → 改下载页版本号
-├── tests/                            离线单元测试（196 个，stdlib unittest）
+├── tests/                            离线单元测试（313 个，stdlib unittest）
 │   ├── test_version.py                版本解析 / 比较 / 清单校验
 │   ├── test_download.py               本地假服务器：下载、哈希、404、缓存回退
 │   ├── test_apply.py                  备份、回滚、失败上限、锁、更新提示
@@ -296,12 +413,20 @@ agent_demo/
 │   ├── test_tools_vscode.py           四个 VSCode 工具的返回值、失败归类、Claude 面板什么时候发链接
 │   ├── test_agent_core.py             install_done 什么时候触发（自动退出的判定）
 │   ├── test_tool_specs.py             tools[] 和 tool_map 一一对上
-│   └── test_imports.py                工具层导入不依赖 Windows
+│   ├── test_server_cli.py             服务器版：参数、退出码、--dry-run 不落地、无 TTY 不阻塞、不重复注册、密钥不进报错
+│   ├── test_node_setup.py             Node 选版本 / 资产名 / SHASUMS / 校验失败 / PATH 块只写一次
+│   ├── test_claude_setup.py           npm argv 精确 / npm_config_* 被清掉 / 失败映射到 6
+│   ├── test_console_ui.py             终端进度条：管道里不打 \r、静默模式、流坏了不抛
+│   ├── test_install_sh.py             真跑 sh：假 curl + 真 tar，装到哪、校验失败退几、包里有 ../ 会不会接
+│   ├── test_updater_linux_payload.py  server.spec / CI 矩阵 / updater 还认得这个包
+│   └── test_imports.py                工具层导入不依赖 Windows；服务器版入口不拖界面
 ├── packaging/
-│   └── claude-code-assistant.desktop   Linux 启动器（tar.gz 里一起发）
+│   ├── install.sh               295   官网那一行 `curl … | sh` 拉的就是它（POSIX sh，上线前 sh -n 校验）
+│   └── claude-code-assistant.desktop   Linux 桌面启动器（服务器版不再发它，留着给手动装桌面版的人）
 ├── .github/workflows/build.yml        四平台 CI 构建 + tag 时发布
 │
-├── agent.spec                          PyInstaller 打包配置（三平台共用）
+├── agent.spec                          PyInstaller 打包配置（Windows / macOS，入口 main.py）
+├── server.spec                   105   PyInstaller 打包配置（Linux 服务器版，入口 server_main.py）
 ├── requirements.txt                    第三方依赖（按平台带 marker）
 ├── agent.ico / agent.png / agent.icns  窗口 / 应用图标
 ├── 文件执行或调用顺序.md                一次对话里各模块的出场顺序
@@ -555,6 +680,13 @@ Windows 上用一次 PowerShell 的 `Get-CimInstance` 读，非 Windows 或取�
 
 ## 已知限制
 
+- **Linux 发的是服务器版，不是桌面版。** 从发这一版起，`linux-x64` 那个包没有图形界面：
+  老的 Linux 桌面用户被自动更新换上之后，双击图标（如果他们手动装过 `.desktop`）
+  或者在终端里直接跑，看到的都是一个终端向导而不是窗口。这是"一个包只服务一类机器"
+  的代价，换来的是服务器上真的能用。要在 Linux 桌面上用界面版，得自己
+  `python main.py`（源码）或自己用 `agent.spec` 打包。
+- **服务器版一台机器一个账号。** 凭证在 `$HOME` 下，同一个 `$HOME` 的多个用户共用一份；
+  不做多租户，也不支持同一台机器上切换多个账户码。
 - **三平台功能一致，但细节依赖系统**。Windows 的快捷方式是 `.lnk`、协议写注册表；
   macOS 的协议写在 Info.plist 里、链接靠 pyobjc 收 Apple Event、快捷方式是桌面符号链接；
   Linux 的协议靠 `.desktop` + `xdg-mime`、快捷方式也是 `.desktop`。桌面图标和终端启动

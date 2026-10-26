@@ -1,0 +1,5 @@
+# 这两个 .sh 会在 Linux 上执行（install.sh 是用户 `curl | sh` 直接跑的那一份）。
+# Windows 上 core.autocrlf=true 的机器会把它们检出成 CRLF，而 CRLF 的
+# `#!/bin/sh\r` 在 Linux 上是"找不到解释器"；写进 PATH 的行尾也会带上 \r，
+# 变成一条永远不生效的 PATH。所以这里钉死 LF，跟机器配置无关。
+*.sh text eol=lf

@@ -129,7 +129,8 @@ if [ "$DRY_RUN" = "1" ]; then
   fi
   echo "   4. 两边 HEAD 校验大小"
   echo "   5. 原子换 $REMOTE_BASE/latest.json"
-  echo "   6. 把 ${PAGES[*]} 里的 /releases/<旧版本>/ 改成 /releases/$VERSION/"
+  echo "   6. 传 packaging/install.sh 到 $REMOTE_BASE/install.sh"
+  echo "   7. 把 ${PAGES[*]} 里的 /releases/<旧版本>/ 改成 /releases/$VERSION/"
   echo "✔ 完成（DRY_RUN）"
   exit 0
 fi
@@ -205,6 +206,27 @@ for attempt in 1 2 3 4 5; do
 done
 cmp -s "$SRC/latest.json" "$live" \
   || die "线上 latest.json 和本地不一致（等了一会儿还是旧的）—— 去服务器上看一眼"
+
+echo "▶ 上传 install.sh"
+# 官网那一行 `curl -fsSL https://aikaui.com/install.sh | sh` 拉的就是这个文件。
+# ★ 它和版本号无关（自己去读 latest.json），所以每次发版都顺手更新一遍：
+#   改过它却忘了传，线上还是老脚本 —— 这种漏比发错包还难发现。
+INSTALL_SH="$ROOT/packaging/install.sh"
+[ -f "$INSTALL_SH" ] || die "缺 $INSTALL_SH"
+sh -n "$INSTALL_SH" || die "packaging/install.sh 有语法错误，先修好再发"
+scp -q "${KEY_OPTS[@]}" "$INSTALL_SH" "$USER_NAME@$HOST:$REMOTE_BASE/install.sh.tmp"
+"${SSH[@]}" "chmod 644 '$REMOTE_BASE/install.sh.tmp' && mv '$REMOTE_BASE/install.sh.tmp' '$REMOTE_BASE/install.sh'"
+
+live_sh="$(mktemp)"
+trap 'rm -f "$live" "$live_sh"' EXIT
+for attempt in 1 2 3 4 5; do
+  curl -fsS --max-time 30 -o "$live_sh" "$SITE_BASE/install.sh" || true
+  cmp -s "$INSTALL_SH" "$live_sh" && break
+  sleep 3
+done
+cmp -s "$INSTALL_SH" "$live_sh" \
+  || die "线上 install.sh 和本地不一致 —— 用户 curl 到的是别的脚本"
+echo "  ✔ $SITE_BASE/install.sh"
 
 echo "▶ 改下载页里的版本号"
 # 页面里有四处写死了版本号，少改一处就会误导用户：

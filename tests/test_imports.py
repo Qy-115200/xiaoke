@@ -44,5 +44,43 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(r.stdout.strip(), "False False False")
 
 
+class ServerEntryImportTests(unittest.TestCase):
+    """服务器版入口不许把界面和 Agent 链拖进来（server.spec 靠这个成立）。"""
+
+    FORBIDDEN = ("tkinter", "_tkinter", "customtkinter", "PIL",
+                 "openai", "pydantic", "agent_core", "bus", "llm",
+                 "ui", "updater")
+
+    def test_server_main_imports_no_gui(self):
+        code = (
+            "import sys, server_main;"
+            "print([m for m in %r if m in sys.modules])"
+            % (list(self.FORBIDDEN),)
+        )
+        r = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "[]",
+                         "服务器版入口把不该要的模块拖进来了")
+
+    def test_server_main_help_works_without_display(self):
+        """没有 $DISPLAY 也必须能起来 —— 服务器就是这样。"""
+        import os
+        env = dict(os.environ)
+        env.pop("DISPLAY", None)
+        env.pop("WAYLAND_DISPLAY", None)
+        r = subprocess.run(
+            [sys.executable, "server_main.py", "--version"],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=120, env=env,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ClaudeCodeAssistant", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
