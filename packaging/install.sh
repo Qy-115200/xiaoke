@@ -192,7 +192,12 @@ done < "$TMP/list.txt"
 mkdir -p "$TMP/x"
 tar -xzf "$PKG" -C "$TMP/x" || die "解压失败" 3
 
-BIN="$(find "$TMP/x" -maxdepth 3 -type f -name ClaudeCodeAssistant | head -n 1)"
+# 先 cd 到解压目录再用相对路径 find：`curl | sh` 的 cwd 可能是用户自己的目录，
+# find 收工时想"回到原目录"，没权限就会多打一行无关的报错吓人。
+# 拿到的还是相对路径，所以立刻拼回绝对路径 —— 后面的 cp / --version 都在别处执行。
+BIN_REL="$(cd "$TMP/x" && find . -maxdepth 3 -type f -name ClaudeCodeAssistant | head -n 1)"
+BIN=""
+if [ -n "$BIN_REL" ]; then BIN="$TMP/x/${BIN_REL#./}"; fi
 [ -n "$BIN" ] || die "压缩包里找不到 ClaudeCodeAssistant 可执行文件" 3
 [ -s "$BIN" ] || die "解出来的 ClaudeCodeAssistant 是空文件" 3
 
