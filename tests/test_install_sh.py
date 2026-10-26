@@ -176,6 +176,21 @@ class InstallShTests(unittest.TestCase):
         self.assertIn("版本 " + GOOD_VERSION, r.stdout)
         self.assertNotIn("9.9.9", r.stdout)
 
+    def test_crlf_manifest_is_understood(self):
+        """清单可能是在 Windows 上生成的（CRLF）—— 按行匹配的 awk 不能因此认不出平台块。
+
+        2026-10-26 真踩到了：make_manifest.py 在 Windows 上写出 CRLF，线上脚本
+        报「清单里没有 linux-x64 的 version」。修法是两边都改：写清单固定 LF，
+        读清单时再容忍 \\r（线上已经发出去的那份还是 CRLF）。
+        """
+        pkg = self._good_pkg()
+        (self.fake_root / PKG_NAME).write_bytes(pkg)
+        manifest = _manifest(hashlib.sha256(pkg).hexdigest(), len(pkg))
+        (self.fake_root / "latest.json").write_bytes(manifest.replace(b"\n", b"\r\n"))
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("版本 " + GOOD_VERSION, r.stdout)
+
     def test_user_rc_content_is_preserved(self):
         (self.home / ".bashrc").write_text("# 我自己的配置\nalias ll='ls -l'\n",
                                            encoding="utf-8")

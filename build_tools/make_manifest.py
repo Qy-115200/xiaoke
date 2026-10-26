@@ -100,8 +100,12 @@ def main(argv=None) -> int:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.name + ".tmp")
+    # ★ newline="\n" 不能省：Windows 上 write_text 默认会把 \n 翻译成 \r\n，
+    #   清单就带着 CRLF 上线了。JSON 解析不怕 CRLF（updater 用 json.loads），
+    #   但 packaging/install.sh 里那段按行匹配的 awk 会把 "\r" 当成字段内容的一部分，
+    #   结果就是"清单里没有 linux-x64 的 version"。2026-10-26 真的踩到了。
     tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-                   encoding="utf-8")
+                   encoding="utf-8", newline="\n")
     tmp.replace(out)
     print(f"已生成 {out}（v{args.version}，{len(manifest['latest'])} 个平台）")
     for key, entry in manifest["latest"].items():

@@ -8,6 +8,7 @@
 """
 
 import io
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -107,6 +108,40 @@ class ExtractTests(unittest.TestCase):
             archive.write_bytes(data)
             with self.assertRaises(Exception):
                 updater._extract_linux(archive, Path(tmp) / "out")
+
+
+class ManifestFormatTests(unittest.TestCase):
+    """latest.json 必须是 LF —— install.sh 里是按行匹配的 awk。
+
+    2026-10-26 踩过：在 Windows 上生成清单，write_text 把 \\n 翻译成 \\r\\n，
+    上线后 `curl | sh` 报「清单里没有 linux-x64 的 version」。JSON 解析不怕 CRLF，
+    所以 updater 那边一切正常，问题只在 shell 里才露出来。
+    """
+
+    def test_make_manifest_writes_lf(self):
+        names = ("windows-x64:ClaudeCodeAssistant-win-x64.exe",
+                 "macos-arm64:ClaudeCodeAssistant-macos-arm64.zip",
+                 "macos-x64:ClaudeCodeAssistant-macos-x64.zip",
+                 "linux-x64:ClaudeCodeAssistant-linux-x64.tar.gz")
+        with tempfile.TemporaryDirectory() as tmp:
+            args = []
+            for key, name in (n.split(":") for n in names):
+                pkg = Path(tmp) / name
+                pkg.write_bytes(b"x" * 123)
+                args += ["--file", f"{key}={pkg}"]
+            out = Path(tmp) / "latest.json"
+            r = subprocess.run(
+                [sys.executable, str(ROOT / "build_tools" / "make_manifest.py"),
+                 "--version", "1.3.0",
+                 "--base-url", "https://dl.example.invalid/releases/1.3.0",
+                 *args, "--out", str(out)],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=120)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            raw = out.read_bytes()
+        self.assertNotIn(b"\r", raw, "清单里混进了 CRLF，install.sh 会解析不出来")
+        import json
+        self.assertEqual(json.loads(raw)["latest"]["linux-x64"]["version"], "1.3.0")
 
 
 class DeployScriptTests(unittest.TestCase):

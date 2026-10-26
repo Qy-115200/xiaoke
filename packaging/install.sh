@@ -93,6 +93,7 @@ manifest_field() {
     BEGIN { inplat = 0 }
     {
       line = $0
+      sub(/\r$/, "", line)                      # 清单可能是在 Windows 上生成的（CRLF）
       sub(/^[ \t]+/, "", line)
       if (!inplat) {
         if (line == "\"" plat "\": {") { inplat = 1 }
