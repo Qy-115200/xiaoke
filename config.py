@@ -16,7 +16,7 @@ from pathlib import Path
 
 # 唯一真源：git tag、Windows 文件版本、macOS Info.plist、更新清单都用它。
 # 只允许 X.Y.Z 三个数字段（自动更新按数字比较，不要写 beta/日期）。
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 APP_NAME = "Claude Code 助手"
 APP_ID = "com.aikaui.claudeassistant"
 
