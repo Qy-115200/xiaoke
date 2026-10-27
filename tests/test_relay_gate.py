@@ -133,6 +133,19 @@ class SwitchTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("注册太频繁", message)
 
+    def test_half_written_config_is_not_reported_as_success(self):
+        """apply() 是逐文件写的：一份成功一份失败时它照样说 ok，这里必须再判一次，
+        不然"已换成我们的"是假的，终端可能还在走别人的通道。"""
+        with mock.patch("server.claude_config.apply", return_value=(True, "已更新 一份")), \
+             mock.patch.object(relay_gate, "check") as chk:
+            chk.return_value = relay_gate.Gate(
+                conflicts=[relay_gate.Conflict(path=Path("/home/u/.claude/settings.json"),
+                                               host="118.190.105.66")])
+            ok, message = relay_gate.switch_to_ours({"api_key": "k", "api_base": OURS})
+        self.assertFalse(ok)
+        self.assertIn("settings.json", message)
+        self.assertIn("手动改", message)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

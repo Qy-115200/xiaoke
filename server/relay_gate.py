@@ -116,4 +116,14 @@ def switch_to_ours(identity=None) -> tuple:
         return False, "没领到账号，配置没动"
 
     from server.claude_config import apply
-    return apply(identity)
+    ok, message = apply(identity)
+
+    # ★ 写完再判一次：apply() 是逐文件写的，一份成功一份失败时它照样返回
+    #   ok=True（只把失败的那份写在话里）。这里必须确认两份都不再指向别处，
+    #   否则"切换成功"就是假的 —— 终端可能还在用别人的通道。
+    still = check(identity)
+    if still.blocked:
+        return False, (message + "\n还有文件没能改成我们的：" +
+                       "、".join(c.path.name for c in still.conflicts) +
+                       "。那份可能需要你自己手动改一下。")
+    return ok, message
