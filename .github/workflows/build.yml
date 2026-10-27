@@ -183,21 +183,28 @@ jobs:
 
       - name: Configure SSH
         if: steps.cfg.outputs.ok == 'true'
+        id: ssh
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          KEY="$RUNNER_TEMP/deploy_key"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$KEY"
+          chmod 600 "$KEY"
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          # ★ 路径必须通过 output 传给下一步。原来写成 `DEPLOY_SSH_KEY: $HOME/.ssh/deploy_key`
+          #   是不行的：env: 的值不经过 shell，$HOME 原样传下去，ssh 拿到一个字面量
+          #   路径 "…$HOME/.ssh/deploy_key"，报 "Identity file not accessible" 再
+          #   Permission denied —— 1.4.1 第一次自动发布就是这么挂的。
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
 
       - name: Publish
         if: steps.cfg.outputs.ok == 'true'
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_SSH_KEY: $HOME/.ssh/deploy_key
+          DEPLOY_SSH_KEY: ${{ steps.ssh.outputs.key }}
           NOTES: ${{ steps.notes.outputs.notes }}
         run: bash build_tools/deploy_downloads.sh "${GITHUB_REF_NAME#v}" release
