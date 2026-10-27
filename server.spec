@@ -47,6 +47,16 @@ for pkg in ("requests", "certifi", "urllib3", "charset_normalizer", "idna",
 # platform_support 是按 sys.platform 延迟 import 的，PyInstaller 跟不到
 hiddenimports += ["platform_support.linux"]
 
+# 终端里画二维码（--recharge）。它在函数里被 try/except 包着延迟 import，
+# 静态分析有时候会把这种当成"可选的"漏掉，点名带上。没装就跳过 ——
+# 画不出来会退回打印付款链接，不影响充值本身。
+try:
+    import segno  # noqa: F401
+except Exception:
+    pass
+else:
+    hiddenimports += ["segno"]
+
 # 解 Node 的 .tar.xz 要 lzma。标准库里它是可选扩展，不点名可能漏掉
 hiddenimports += ["lzma", "_lzma"]
 

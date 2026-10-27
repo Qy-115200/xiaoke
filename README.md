@@ -172,6 +172,8 @@ claude-code-assistant --account-code <账户码> --account-key <账户密钥>   
 claude-code-assistant --yes           # 全默认，适合写进 Dockerfile / cloud-init
 claude-code-assistant --dry-run       # 只打印要做什么，不下载、不写任何文件
 claude-code-assistant --repair        # 只对账配置：跟 identity.json 不一致就补齐（见下）
+claude-code-assistant --balance       # 查余额和用量
+claude-code-assistant --recharge 20   # 充 20 元：在终端里打印付款二维码
 ```
 
 | 参数 | 作用 |
@@ -182,7 +184,28 @@ claude-code-assistant --repair        # 只对账配置：跟 identity.json 不�
 | `--node-version` / `--claude-version` | 钉版本；默认 Node 取 LTS、claude 取 latest |
 | `--yes` / `--force` / `--quiet` | 不提问 / 已装也重装 / 只输出错误 |
 | `--repair` | 只检查并修复 `~/.claude.json` 和 `~/.claude/settings.json`，不装 Node、不装 claude、不注册账号 |
+| `--balance` | 只查余额和用量（今日 / 本月 token），不装东西 |
+| `--recharge 金额` | 创建充值订单并打印二维码；`--channel wechat` 可指定微信（默认支付宝） |
 | `--allow-root` | 1.4.4 起 root 默认就能装，这个参数只为兼容老脚本保留 |
+
+`--repair` / `--balance` / `--recharge` 是"只做一件事"的模式，互相不能组合，
+也不能和 `--account-code` / `--new-account` 一起用（那是安装路径的事）。
+
+**余额和充值（服务器版）**。没有图形界面，所以付款走终端：
+[`server/billing_console.py`](server/billing_console.py) 把
+[`server/api.py`](server/api.py) 拿到的数据变成几行字，二维码用 `segno` 画成方块 ——
+黑字白底（深色终端里不这么做，黑白是反的，有些扫码器不认）。**画不出来不影响充值**：
+没装 `segno`、或者服务器没给二维码内容时，退回打印 `pay_url` 和二维码图片地址。
+
+余额跌破 ¥1（和桌面版同一条线）时，`--balance` 和装完最后那屏都会把两条路摆出来：
+
+1. `claude-code-assistant --recharge 20` —— 就地充，二维码直接打在终端里；
+2. 绑到桌面版扫码 —— 用同一个账户码，余额记在账号上，这台服务器立刻能用
+   （账户密钥在 `~/.claude-agent/identity.json` 的 `account_key`，只填进桌面版，别外传）。
+
+账户码、金额、订单号可以打；`api_key` / `account_key` 的值**任何一行都不打印**，
+提示里只出现 `<密钥>` 这样的占位符。
+
 
 **四步和三处"自动"**
 
@@ -390,7 +413,7 @@ macOS 两个包都**没有签名**：首次打开要右键 →「打开」，
 agent_demo/
 │
 ├── main.py                       182   程序入口：先换新版本 → 建窗口 → 别家中转就拦下 → 起线程（含配置自愈）→ 事件循环
-├── server_main.py                484   服务器版入口：环境自检 → Node → claude → 账号 → 配置（--repair 只对账）
+├── server_main.py                618   服务器版入口：环境自检 → Node → claude → 账号 → 配置（--repair 只对账，--balance / --recharge 只查账收钱）
 │
 ├── config.py                      98   唯一的常量源：版本、服务器地址、凭证、路径、配色、更新参数、MAX_STEPS
 ├── updater.py                    660   自动更新：清单校验 / 静默下载 / 下次启动替换自己（不 import tkinter）
@@ -422,7 +445,8 @@ agent_demo/
 │   ├── pow.py                    128   PoW 求解（进度 / 取消 / 90 秒超时），和服务器 pow.js 逐位对齐
 │   ├── api.py                    504   余额 / 用量 / 充值 HTTP 层（永远不抛异常）
 │   ├── claude_config.py          495   把身份写进两份配置 + 事后对账自愈（坏文件不覆盖、外家中转不碰）
-│   ├── relay_gate.py             119   别家中转的判定：有 base 且不是我们的就拦住（不 import 界面，可离线测）
+│   ├── relay_gate.py             132   别家中转的判定：有 base 且不是我们的就拦住（不 import 界面，可离线测）
+│   ├── billing_console.py        226   服务器版的措辞层：余额/用量排版、终端二维码、装完能敲的命令（不联网、不 import 界面）
 │   ├── tools_fixed.py            148   五个固定工具 + aikaui:// 协议注册（转发 platform_support）
 │   ├── tools_general.py          125   bash / read_file / write_file / ask_user（解码和杀进程树在 platform_support.common）
 │   ├── tools_vscode.py           246   check_vscode / install_vscode / install_claude_extension / open_vscode（连 Claude 面板一起开）
@@ -459,6 +483,7 @@ agent_demo/
 │   ├── test_agent_core.py             install_done 什么时候触发（自动退出的判定）
 │   ├── test_tool_specs.py             tools[] 和 tool_map 一一对上
 │   ├── test_server_cli.py             服务器版：参数、退出码、--dry-run 不落地、无 TTY 不阻塞、不重复注册、密钥不进报错
+│   ├── test_billing_console.py        余额/充值措辞：读不懂的余额不编成 0、二维码每行等宽、没装 segno 就退回链接、密钥不出现
 │   ├── test_claude_config.py          配置自愈：没 diff 不写、坏文件不覆盖、外家中转不碰、顶层 model 不动、日志不含 token
 │   ├── test_relay_gate.py             别家中转一律拦：带不带 /v1 都认得出、坏文件不拦、切换留备份、文字不含 token
 │   ├── test_node_setup.py             Node 选版本 / 资产名 / SHASUMS / 校验失败 / PATH 块只写一次

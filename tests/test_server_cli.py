@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """server_main：参数、退出码、无 TTY 保护、账号那一步的"绝不默默开新号"。"""
 
+import io
 import json
 import os
 import sys
@@ -16,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 import server_main  # noqa: E402
 from server import claude_config as cc  # noqa: E402
 from server.cli import (  # noqa: E402
-    EXIT_ACCOUNT, EXIT_CONFIG, EXIT_ENV, EXIT_OK, CliContext, CliError,
+    EXIT_ACCOUNT, EXIT_ARGS, EXIT_CONFIG, EXIT_ENV, EXIT_OK, CliContext, CliError,
 )
 
 
@@ -363,6 +364,205 @@ class RepairTests(unittest.TestCase):
 
     def test_missing_base_is_exit_7(self):
         self.assertEqual(self.run_repair(identity={"api_key": "k"}), EXIT_CONFIG)
+
+
+class BillingModeArgTests(unittest.TestCase):
+    """--balance / --recharge 是"只做一件事"的模式，参数组合要先挡住。"""
+
+    def test_defaults(self):
+        a = _args()
+        self.assertFalse(a.balance)
+        self.assertIsNone(a.recharge)
+        self.assertEqual(a.channel, "")
+
+    def test_only_one_mode_at_a_time(self):
+        for argv in (["--repair", "--balance"],
+                     ["--repair", "--recharge", "20"],
+                     ["--balance", "--recharge", "20"]):
+            self.assertEqual(server_main.main(argv), EXIT_ARGS, argv)
+
+    def test_channel_only_makes_sense_with_recharge(self):
+        self.assertEqual(server_main.main(["--channel", "wechat"]), EXIT_ARGS)
+
+    def test_recharge_amount_is_bounded(self):
+        for bad in ("0", "-5", "10001"):
+            self.assertEqual(server_main.main(["--recharge", bad]), EXIT_ARGS, bad)
+
+    def test_read_only_modes_refuse_account_flags(self):
+        """--account-code 是"装的时候绑账号"，和只查账/只充值的路径冲突。"""
+        self.assertEqual(server_main.main(["--balance", "--account-code", "AB-1"]),
+                         EXIT_ARGS)
+        self.assertEqual(server_main.main(["--recharge", "20", "--new-account"]),
+                         EXIT_ARGS)
+
+
+class BalanceTests(unittest.TestCase):
+    IDENT = {"api_key": "k", "account_code": "CC-1", "user_id": 7}
+
+    def run_balance(self, *extra, balance=None, usage=None, identity="default"):
+        ident = self.IDENT if identity == "default" else identity
+        out = io.StringIO()
+        with mock.patch.object(server_main, "_no_tty_guard") as guard, \
+             mock.patch.object(server_main.identity, "load_identity",
+                               return_value=ident), \
+             mock.patch.object(server_main.api, "query_balance",
+                               return_value=json.dumps(balance or {})) as bal, \
+             mock.patch.object(server_main.api, "query_usage",
+                               return_value=json.dumps(usage or {})) as use, \
+             mock.patch.object(sys, "stdout", out):
+            code = server_main.main(["--balance", *extra])
+        guard.assert_not_called()          # 没终端也照跑，不重开终端
+        return code, out.getvalue(), bal, use
+
+    def test_without_an_account_it_says_so_and_queries_nothing(self):
+        code, out, bal, use = self.run_balance(identity=None)
+        self.assertEqual(code, EXIT_ACCOUNT)
+        bal.assert_not_called()
+        use.assert_not_called()
+
+    def test_shows_balance_and_usage(self):
+        code, out, _, _ = self.run_balance(
+            balance={"account_code": "CC-1", "yuan": "5.00", "quota": 2500000},
+            usage={"today": {"tokens": 12000}, "month": {"tokens": 345000}})
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("¥5.00", out)
+        self.assertIn("12,000 tokens", out)
+        self.assertIn("345,000 tokens", out)
+
+    def test_empty_balance_points_at_both_ways_to_pay(self):
+        code, out, _, _ = self.run_balance(balance={"account_code": "CC-1", "yuan": "0"})
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("--recharge 20", out)       # 就地充
+        self.assertIn("桌面版", out)               # 或者绑桌面版
+        self.assertIn("CC-1", out)
+
+    def test_healthy_balance_does_not_nag(self):
+        _, out, _, _ = self.run_balance(balance={"account_code": "CC-1", "yuan": "30"})
+        self.assertNotIn("余额不够", out)
+
+    def test_a_broken_usage_endpoint_does_not_hide_the_balance(self):
+        """用量查不到是小事，余额该照常显示（quiet 调用）。"""
+        code, out, _, _ = self.run_balance(
+            balance={"account_code": "CC-1", "yuan": "8.00"},
+            usage={"error": "试得太频繁了"})
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("¥8.00", out)
+
+    def test_balance_error_is_reported_not_swallowed(self):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(server_main, "_no_tty_guard"), \
+             mock.patch.object(server_main.identity, "load_identity",
+                               return_value=self.IDENT), \
+             mock.patch.object(server_main.api, "query_balance",
+                               return_value=json.dumps({"error": "没找到这个账户码"})), \
+             mock.patch.object(sys, "stdout", out), \
+             mock.patch.object(sys, "stderr", err):
+            code = server_main.main(["--balance"])
+        self.assertNotEqual(code, EXIT_OK)
+        self.assertIn("没找到这个账户码", err.getvalue())
+
+    def test_dry_run_does_not_touch_the_network(self):
+        code, out, bal, _ = self.run_balance("--dry-run")
+        self.assertEqual(code, EXIT_OK)
+        bal.assert_not_called()
+        self.assertIn("--dry-run", out)
+
+
+class RechargeTests(unittest.TestCase):
+    IDENT = {"api_key": "k", "account_code": "CC-1", "user_id": 7}
+    ORDER = {"order_no": "AI1", "amount": 20, "money": "20.00",
+             "channel": "wechat", "qrcode": "weixin://wxpay/bizpayurl?pr=abc",
+             "img": "https://aikaui.com/qrcode/abc.jpg"}
+
+    def run_recharge(self, *extra, order="default", identity="default"):
+        ident = self.IDENT if identity == "default" else identity
+        payload = json.dumps(self.ORDER if order == "default" else order)
+        out = io.StringIO()
+        with mock.patch.object(server_main, "_no_tty_guard") as guard, \
+             mock.patch.object(server_main.identity, "load_identity",
+                               return_value=ident), \
+             mock.patch.object(server_main.api, "create_recharge",
+                               return_value=payload) as create, \
+             mock.patch.object(sys, "stdout", out):
+            code = server_main.main(["--recharge", "20", *extra])
+        guard.assert_not_called()
+        return code, out.getvalue(), create
+
+    def test_prints_the_qr_and_the_order(self):
+        code, out, create = self.run_recharge()
+        self.assertEqual(code, EXIT_OK)
+        create.assert_called_once_with(20, None)
+        self.assertIn("AI1", out)
+        self.assertIn("█", out)                      # 终端里画出来的二维码
+        self.assertIn("aikaui.com/qrcode/abc.jpg", out)
+
+    def test_channel_is_passed_through(self):
+        _, _, create = self.run_recharge("--channel", "wechat")
+        create.assert_called_once_with(20, "wechat")
+
+    def test_without_an_account_it_does_not_create_an_order(self):
+        code, _, create = self.run_recharge(identity=None)
+        self.assertEqual(code, EXIT_ACCOUNT)
+        create.assert_not_called()
+
+    def test_creation_error_is_a_failure_not_a_fake_order(self):
+        err = io.StringIO()
+        with mock.patch.object(server_main, "_no_tty_guard"), \
+             mock.patch.object(server_main.identity, "load_identity",
+                               return_value=self.IDENT), \
+             mock.patch.object(server_main.api, "create_recharge",
+                               return_value=json.dumps({"error": "支付平台那边开单失败"})), \
+             mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", err):
+            code = server_main.main(["--recharge", "20"])
+        self.assertNotEqual(code, EXIT_OK)
+        self.assertIn("支付平台那边开单失败", err.getvalue())
+
+    def test_dry_run_creates_nothing(self):
+        code, out, create = self.run_recharge("--dry-run")
+        self.assertEqual(code, EXIT_OK)
+        create.assert_not_called()
+        self.assertIn("--dry-run", out)
+
+
+class InstallReportTests(unittest.TestCase):
+    """装完最后那屏：要能一眼看到钱还剩多少、下一步敲什么。"""
+
+    def report(self, balance):
+        out = io.StringIO()
+        ctx = CliContext(home=Path(tempfile.mkdtemp()), env={"PATH": ""})
+        with mock.patch.object(server_main, "_peek_balance", return_value=balance), \
+             mock.patch.object(server_main.claude_setup, "needs_path_reload",
+                               return_value=False), \
+             mock.patch.object(sys, "stdout", out):
+            server_main._report(ctx, _args(), {"version": "v24"},
+                                {"version": "2.1.310"},
+                                {"account_code": "CC-1"})
+        return out.getvalue()
+
+    def test_lists_the_commands_that_work_here(self):
+        text = self.report({"yuan": "3.00", "account_code": "CC-1"})
+        self.assertIn("--balance", text)
+        self.assertIn("--recharge 20", text)
+        self.assertIn("--repair", text)
+
+    def test_shows_the_balance(self):
+        self.assertIn("¥3.00", self.report({"yuan": "3.00"}))
+
+    def test_zero_balance_warns_right_away(self):
+        text = self.report({"yuan": "0", "account_code": "CC-1"})
+        self.assertIn("余额不够", text)
+        self.assertIn("桌面版", text)
+
+    def test_unreachable_balance_does_not_break_the_ending(self):
+        text = self.report(None)
+        self.assertIn("✅ 装好了", text)
+        self.assertNotIn("None", text)
+
+    def test_no_secrets_in_the_ending(self):
+        text = self.report({"yuan": "0", "account_code": "CC-1"})
+        self.assertNotIn("api_key", text)
+        self.assertNotIn("sk-", text)
 
 
 class DryRunFlowTests(unittest.TestCase):

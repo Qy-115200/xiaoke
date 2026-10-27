@@ -19,6 +19,7 @@
 """
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -27,7 +28,7 @@ import time
 from pathlib import Path
 
 from config import APP_VERSION, CLAUDE_CONFIG, CLAUDE_SETTINGS
-from server import claude_setup, console_ui, identity, node_setup
+from server import api, billing_console, claude_setup, console_ui, identity, node_setup
 from server import ui_bridge
 from server.cli import (
     EXIT_ACCOUNT, EXIT_ARGS, EXIT_CONFIG, EXIT_ENV, EXIT_FAILED, EXIT_NODE,
@@ -103,8 +104,9 @@ def _ask(question: str, default: bool = True) -> bool:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog=PROG,
-        description="在服务器上装好 Claude Code（不需要图形界面、不需要 root）。",
-        epilog="装完之后直接输入 claude 开始用。",
+        description="在服务器上装好 Claude Code（不需要图形界面、也不需要 root）。",
+        epilog=("装完之后直接输入 claude 开始用。"
+                "查余额：--balance；充值：--recharge 20（会打印二维码）。"),
     )
     p.add_argument("--dir", default="",
                    help="Claude Code 的工作目录（默认 $HOME）")
@@ -120,6 +122,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="即使本机保险箱里还留着旧账号，也开一个新账号")
     p.add_argument("--repair", action="store_true",
                    help="只检查并修复 Claude Code 的配置（不装 Node、不装 claude、不注册）")
+    p.add_argument("--balance", action="store_true",
+                   help="查余额和用量（不装东西）")
+    p.add_argument("--recharge", type=int, metavar="金额",
+                   help="充值：创建订单并打印付款二维码（单位：元）")
+    p.add_argument("--channel", default="",
+                   help="支付渠道：alipay（默认）/ wechat，配合 --recharge 用")
     p.add_argument("--yes", "-y", action="store_true",
                    help="不问任何问题，全按默认走")
     p.add_argument("--force", action="store_true",
@@ -252,6 +260,92 @@ def _config_step(ctx, args) -> dict:
         raise CliError(str(text), EXIT_CONFIG,
                        hint="身份文件可能坏了，删掉后加 --new-account 重跑")
     return {"ok": True, "notes": notes}
+
+
+# ================= 余额 / 充值（只查账，不装东西） =================
+
+_NO_ACCOUNT_HINT = ("先装一遍：curl -fsSL https://aikaui.com/install.sh | sh\n"
+                    "或者用 --account-code <账户码> --account-key <账户密钥> 绑一个已有账号")
+
+
+def _api_json(call, what: str, quiet: bool = False) -> dict:
+    """调 api.py 里"返回 JSON 字符串"的函数，把错误翻译成 CliError。
+
+    ★ api.py 自己永远不抛异常（它同时是给模型用的工具），所以这里要判 error 字段；
+      quiet=True 用于"查不到也不影响主结论"的调用（比如用量）。"""
+    try:
+        data = json.loads(call())
+    except Exception as e:
+        if quiet:
+            return {}
+        raise CliError(f"查{what}失败：{e}", EXIT_FAILED,
+                       hint="检查一下这台机器的网络（能不能打开 https://aikaui.com）")
+    if not isinstance(data, dict):
+        return {}
+    err = str(data.get("error") or "").strip()
+    if not err:
+        return data
+    if quiet:
+        return data
+    hint = ""
+    if data.get("rate_limited"):
+        hint = f"服务器说 {data.get('retry_after') or 60} 秒后再试（太频繁了）"
+    elif "账号" in err or "账户" in err:
+        hint = "这台机器的凭证不完整，重新装一遍或者 --account-code 绑一下"
+    raise CliError(f"查{what}失败：{err}", EXIT_ACCOUNT if hint else EXIT_FAILED,
+                   hint=hint)
+
+
+def _balance_only(args) -> int:
+    """`--balance`：查余额和用量。不装 Node、不装 claude、不注册。
+
+    ★ 余额见底时把两条路都摆出来：就地 --recharge（打印二维码），或者绑到桌面版。"""
+    if not identity.load_identity():
+        raise CliError("这台机器还没有账号，没有可查的余额", EXIT_ACCOUNT,
+                       hint=_NO_ACCOUNT_HINT)
+
+    _step(1, "查余额和用量", total=1)
+    if args.dry_run:
+        _say("  （--dry-run）不联网、不查，直接结束")
+        return EXIT_OK
+
+    balance = _api_json(api.query_balance, "余额")
+    usage = _api_json(api.query_usage, "用量", quiet=True)
+
+    for line in billing_console.balance_lines(balance, usage):
+        _say(line)
+
+    yuan = billing_console.yuan_of(balance.get("yuan"))
+    if billing_console.is_low(yuan):
+        account_code = balance.get("account_code") or (identity.load_identity() or {}).get("account_code")
+        for line in billing_console.recharge_hint_lines(str(account_code or "")):
+            _say(line)
+    return EXIT_OK
+
+
+def _recharge_only(args) -> int:
+    """`--recharge N`：创建订单，把二维码直接打到终端上。
+
+    ★ 服务器只给二维码"内容"和图片地址；这里用 segno 画成方块，没装 segno 或
+      画不出来就退回打印链接，绝不因为装饰失败让用户付不了钱。"""
+    if not identity.load_identity():
+        raise CliError("这台机器还没有账号，不能充值", EXIT_ACCOUNT,
+                       hint=_NO_ACCOUNT_HINT)
+
+    _step(1, f"创建充值订单（{args.recharge} 元）", total=1)
+    if args.dry_run:
+        _say(f"  （--dry-run）会向服务器要一张 {args.recharge} 元的订单，这里没发请求")
+        return EXIT_OK
+
+    order = _api_json(
+        lambda: api.create_recharge(args.recharge, args.channel or None), "充值订单")
+    if not order.get("order_no") and not order.get("qrcode") and not order.get("pay_url"):
+        raise CliError("服务器没给订单，充值没开出来", EXIT_FAILED,
+                       hint="过一会儿重跑一次；一直不行就去 https://aikaui.com 用桌面版充")
+
+    for line in billing_console.recharge_lines(order, color=_is_tty(sys.stdout)):
+        _say(line)
+    return EXIT_OK
 
 
 # ================= 只对账配置 =================
@@ -436,11 +530,30 @@ def _report(ctx, args, node_info, claude_info, account) -> None:
         lines.append("  ★ 新开的终端才会认得 claude。当前这个窗口请先执行：")
         lines.append(f"    {claude_setup.claude_env_hint(ctx.prefix)}")
     lines.append("")
-    lines.append(f"  充值 / 查余额：{SITE_URL}")
+    # ★ 顺手查一次余额：新领的账号带着试用额度，绑来的老账号可能一分不剩 ——
+    #   在这里就说清楚，别等用户撞上 claude 的「额度不足」再回头找。
+    balance = _peek_balance()
+    yuan = billing_console.yuan_of((balance or {}).get("yuan"))
+    if yuan is not None:
+        lines.append(f"  余额      ¥{yuan:.2f}")
+    lines.extend(billing_console.command_lines())
+    if billing_console.is_low(yuan):
+        code = account.get("account_code") or (balance or {}).get("account_code") or ""
+        lines.extend(billing_console.recharge_hint_lines(str(code)))
     try:
         print("\n".join(lines), flush=True)
     except Exception:
         pass
+
+
+def _peek_balance():
+    """装完顺手查一次余额。★ 查不到就返回 None —— 安装已经成功了，
+    不能因为余额接口抽风就把结束语变成报错。"""
+    try:
+        data = json.loads(api.query_balance())
+    except Exception:
+        return None
+    return data if isinstance(data, dict) and not data.get("error") else None
 
 
 def main(argv=None) -> int:
@@ -451,16 +564,37 @@ def main(argv=None) -> int:
         return int(e.code or 0)
 
     interactive = _is_tty(sys.stdin) and _is_tty(sys.stdout)
-    if args.repair and (args.account_code or args.new_account):
-        _say_err("✖ --repair 只对账配置，不能和 --account-code / --new-account 一起用")
+    # 这几条都是"只做一件事"的路径，一次只能选一个
+    modes = [name for name, on in (("--repair", args.repair),
+                                   ("--balance", args.balance),
+                                   ("--recharge", args.recharge is not None)) if on]
+    if len(modes) > 1:
+        _say_err(f"✖ {modes[0]} 和 {modes[1]} 不能一起用：一次只做一件事")
         return EXIT_ARGS
-    # --repair 本身就是非交互的：没终端也照跑，不走"重开终端"那套
-    if not interactive and not args.yes and not args.dry_run and not args.repair:
+    if (args.repair or args.balance or args.recharge is not None) and \
+            (args.account_code or args.new_account):
+        _say_err("✖ --repair / --balance / --recharge 不装东西，"
+                 "不能和 --account-code / --new-account 一起用")
+        return EXIT_ARGS
+    if args.channel and args.recharge is None:
+        _say_err("✖ --channel 只能配合 --recharge 用，比如 --recharge 20 --channel wechat")
+        return EXIT_ARGS
+    if args.recharge is not None and not 0 < args.recharge <= billing_console.MAX_RECHARGE:
+        _say_err(f"✖ 充值金额要在 1 ~ {billing_console.MAX_RECHARGE} 元之间，"
+                 f"收到 {args.recharge}")
+        return EXIT_ARGS
+    # 这几条本身就是非交互的：没终端也照跑，不走"重开终端"那套
+    if not interactive and not args.yes and not args.dry_run and not args.repair \
+            and not args.balance and args.recharge is None:
         return _no_tty_guard(argv, args)
 
     try:
         if args.repair:
             return _repair_only(args)
+        if args.balance:
+            return _balance_only(args)
+        if args.recharge is not None:
+            return _recharge_only(args)
         return _run(args)
     except CliError as e:
         _say_err(f"\n✖ {e.message}")

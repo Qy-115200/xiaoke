@@ -86,6 +86,28 @@ class ServerEntryImportTests(unittest.TestCase):
         self.assertEqual(r.stdout.strip(), "[]",
                          "server/claude_config.py 把界面/Agent 模块拖进来了")
 
+    def test_billing_console_imports_no_gui(self):
+        """余额/充值的措辞模块会被 server_main 直接 import —— 它也得是干净的。
+
+        另外它用 segno 画二维码，那是延迟 import：导入这个模块本身不该把
+        segno（或任何第三方包）拖进来。"""
+        code = (
+            "import sys, server.billing_console;"
+            "bad = [m for m in %r if m in sys.modules];"
+            "print(bad, 'segno' in sys.modules)"
+            % (list(self.FORBIDDEN),)
+        )
+        r = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "[] False",
+                         "server/billing_console.py 把界面模块或 segno 拖进来了")
+
     def test_server_main_help_works_without_display(self):
         """没有 $DISPLAY 也必须能起来 —— 服务器就是这样。"""
         import os
