@@ -263,6 +263,16 @@ class InstallShTests(unittest.TestCase):
         self.assertIn("root", r.stderr)
         self.assertFalse((self.home / ".local" / "lib").exists())
 
+    def test_root_refusal_prints_a_copy_pasteable_command(self):
+        """只写「请加 AIKAUI_ALLOW_ROOT=1」不够：curl|sh 里变量加在 curl 前面
+        根本传不到 sh，用户照着想当然改一遍，回来还是一样的错。
+        也别把退出码当正文印出来（die 的 $2 曾经混进消息里，用户看到 …=1 2）。"""
+        self._serve(self._good_pkg())
+        r = self._run(FAKE_UID="0")
+        self.assertIn("| AIKAUI_ALLOW_ROOT=1 sh", r.stderr)
+        self.assertNotIn("AIKAUI_ALLOW_ROOT=1 sh 2", r.stderr)
+        self.assertNotIn("=1 2\n", r.stderr)
+
     def test_allow_root_env_lets_it_through(self):
         self._serve(self._good_pkg())
         r = self._run(FAKE_UID="0", AIKAUI_ALLOW_ROOT="1")

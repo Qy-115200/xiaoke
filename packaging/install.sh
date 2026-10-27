@@ -36,7 +36,9 @@ BIN_LINK="$PREFIX/bin/claude-code-assistant"
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf '  ⚠ %s\n' "$*" >&2; }
-die()  { printf '✖ %s\n' "$*" >&2; exit "${2:-1}"; }
+# ★ 只有 $1 是给人看的；$2 是退出码。原来写 "$*" 会把退出码也印出来，
+#   用户看到的是「…请加：AIKAUI_ALLOW_ROOT=1 2」—— 照着敲就多一个参数。
+die()  { printf '✖ %s\n' "$1" >&2; exit "${2:-1}"; }
 
 TMP=""
 cleanup() { if [ -n "$TMP" ]; then rm -rf "$TMP"; fi; }
@@ -50,8 +52,12 @@ IS_ROOT=0
 if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then IS_ROOT=1; fi
 
 if [ "$IS_ROOT" = "1" ] && [ "${AIKAUI_ALLOW_ROOT:-}" != "1" ]; then
+  # 给一条能原样复制的命令。写成「请加 AIKAUI_ALLOW_ROOT=1」是不够的 ——
+  # curl|sh 里变量加在哪一边（curl 前面还是 sh 前面）结果完全不同，用户很容易
+  # 加在 curl 前面，于是 sh 根本看不到它，跑回来还是一样的错。
   die "请不要用 root 运行。装到 /root 下面的东西，普通用户以后用不了。
-   确实要这样请加：AIKAUI_ALLOW_ROOT=1" 2
+   确实要这样，把下面这一行原样再跑一遍：
+   curl -fsSL $SITE/install.sh | AIKAUI_ALLOW_ROOT=1 sh" 2
 fi
 if [ "$IS_ROOT" = "1" ]; then
   warn "以 root 安装：东西全部落在 /root 下，只有 root 能用。"
