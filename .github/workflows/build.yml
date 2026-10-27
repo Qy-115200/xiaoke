@@ -139,7 +139,11 @@ jobs:
     runs-on: ubuntu-22.04
     environment: production
     steps:
+      # fetch-depth: 0 —— 注释 tag 的对象要拿得到，下面「读发版说明」那步
+      # 才用 git tag --format 读得出 tag 的标题。默认浅克隆只拿 commit。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
@@ -148,6 +152,19 @@ jobs:
 
       - name: Show artifacts
         run: ls -lR release
+
+      # 清单里的 notes 原来是空字符串（脚本默认值）—— 1.3.0 / 1.4.0 的说明
+      # 都是本机手工发时补的。CI 发的版本也该带上，否则排查时对着清单看不出
+      # 这一版改了什么。说明就直接取注释 tag 的标题，一处维护（tag 本身）。
+      - name: Read release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          NOTE="$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME" || true)"
+          # 换行会破坏 GITHUB_OUTPUT 的多行格式，压成一行
+          NOTE="$(printf '%s' "$NOTE" | tr '\n\r' '  ' | sed 's/  */ /g; s/^ //; s/ $//')"
+          echo "notes=$NOTE" >> "$GITHUB_OUTPUT"
+          echo "notes: ${NOTE:-(空)}"
 
       # 没配 secrets 时明确跳过，而不是让整个 release 变红；
       # 这种情况可以手动跑 build_tools/deploy_downloads.sh。
@@ -182,4 +199,5 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_SSH_KEY: $HOME/.ssh/deploy_key
+          NOTES: ${{ steps.notes.outputs.notes }}
         run: bash build_tools/deploy_downloads.sh "${GITHUB_REF_NAME#v}" release
