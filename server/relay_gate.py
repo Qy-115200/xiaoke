@@ -18,7 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from config import CLAUDE_CONFIG, CLAUDE_SETTINGS, SERVER_URL
+from config import SERVER_URL
+from server import claude_config
 from server.claude_config import normalize_base, read_strict
 
 
@@ -74,9 +75,11 @@ def check(identity=None, config_path=None, settings_path=None) -> Gate:
     · 文件不在 / 是软链 / 读不出来 → 不拦（判断不了就不替用户做主，repair 会报）
     · env 里没有 ANTHROPIC_BASE_URL → 不拦（还没配，或只配了 token）
     · 有、且不是我们的 → 拦
-    """
-    config_path = Path(config_path or CLAUDE_CONFIG)
-    settings_path = Path(settings_path or CLAUDE_SETTINGS)
+
+    ★ 路径从 claude_config 模块上取（而不是 import 时就绑死一份）：check() 必须
+      和 apply() 读写的是**同一份文件**，否则可能出现"判过的地方没写、写了的地方没判"。"""
+    config_path = Path(config_path or claude_config.CLAUDE_CONFIG)
+    settings_path = Path(settings_path or claude_config.CLAUDE_SETTINGS)
     gate = Gate(expected=expected_base(identity))
 
     for path in (config_path, settings_path):
