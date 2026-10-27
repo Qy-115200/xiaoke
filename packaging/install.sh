@@ -7,7 +7,8 @@
 #         → 跑一次自检 → 把 ~/.local/bin 写进 PATH → 直接进安装向导。
 #
 # 五条设计约束（改这个文件之前先看一遍）：
-#   1. **不提权**。全程只写 $HOME，不调 sudo。root 直接拒绝（AIKAUI_ALLOW_ROOT=1 才行）。
+#   1. **不提权**。全程只写 $HOME，不调 sudo。root 也照装（只警告）：容器里常常
+#      只有 root，卡在这里等于装不了。代价是东西全落在 /root 下。
 #   2. **不写死版本号**。版本、下载地址、sha256、大小全部来自 latest.json。
 #   3. **不假装成功**。sha256 不对、大小不对、包里有 `../`、跑不起来 —— 一律退出非零。
 #   4. **幂等**。重跑就是升级：二进制原位置原子替换，PATH 块已经有过就不再写。
@@ -17,7 +18,7 @@
 #   AIKAUI_SITE=https://aikaui.com   清单地址的前缀（测试时指向本地）
 #   AIKAUI_VERSION=1.2.0             只装指定版本（默认取清单里的）
 #   AIKAUI_NO_RUN=1                  装完不启动向导
-#   AIKAUI_ALLOW_ROOT=1              允许 root 运行（不推荐）
+#   AIKAUI_ALLOW_ROOT=1              1.4.4 起不需要了（root 默认放行），留着只为兼容
 #   AIKAUI_LIB=~/.local/lib/claude-code-assistant   安装目录
 #
 # 退出码：0 成功 / 1 失败 / 2 用法或环境 / 3 校验失败 / 4 装上了但跑不起来
@@ -51,24 +52,18 @@ say "▶ 小克 · Claude Code 服务器版安装器"
 IS_ROOT=0
 if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then IS_ROOT=1; fi
 
-if [ "$IS_ROOT" = "1" ] && [ "${AIKAUI_ALLOW_ROOT:-}" != "1" ]; then
-  # 给一条能原样复制的命令。写成「请加 AIKAUI_ALLOW_ROOT=1」是不够的 ——
-  # curl|sh 里变量加在哪一边（curl 前面还是 sh 前面）结果完全不同，用户很容易
-  # 加在 curl 前面，于是 sh 根本看不到它，跑回来还是一样的错。
-  die "请不要用 root 运行。装到 /root 下面的东西，普通用户以后用不了。
-   确实要这样，把下面这一行原样再跑一遍：
-   curl -fsSL $SITE/install.sh | AIKAUI_ALLOW_ROOT=1 sh" 2
-fi
 if [ "$IS_ROOT" = "1" ]; then
-  warn "以 root 安装：东西全部落在 /root 下，只有 root 能用。"
+  warn "以 root 安装：东西全部落在 /root 下，只有 root 能用。
+        想换个人用，请用那个账号重新跑一遍。"
 fi
 
-# 给用户看的那句「手动继续」要带上 --allow-root，否则照着敲还是会被拦。
+# root 下仍然把 --allow-root 传给向导：1.4.4 起向导自己就放行 root 了，但
+# AIKAUI_VERSION 可以钉一个老版本（1.4.3 及以前会再拦一次），传了才不白跑一趟。
 WIZARD_HINT=""
 if [ "$IS_ROOT" = "1" ]; then WIZARD_HINT=" --allow-root"; fi
 
-# 向导怎么启动。★ root 下必须显式带上 --allow-root：这个环境变量只在这段 shell 里
-# 起作用，向导是另一个进程，它自己还会拦一次 root（2026-10-27 就是这么卡住的）。
+# 向导怎么启动。root 下带 --allow-root：这个变量只在这段 shell 里有效，向导是
+# 另一个进程；老版本向导（1.4.3 及以前）会自己再拦一次 root。
 run_wizard() {
   if [ "$IS_ROOT" = "1" ]; then
     "$BIN" --allow-root "$@"

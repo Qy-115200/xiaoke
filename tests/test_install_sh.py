@@ -256,38 +256,36 @@ class InstallShTests(unittest.TestCase):
         self.assertIn("拉不到", r.stderr)
 
     # ---------- root ----------
-    def test_root_is_refused_by_default(self):
+    def test_root_installs_with_a_warning(self):
+        """root 直接装。容器里常常只有 root，之前那道开关把用户卡在第一步
+        （2026-10-27 连着两次），代价只是东西落在 /root 下 —— 警告说清楚就够了。"""
         self._serve(self._good_pkg())
         r = self._run(FAKE_UID="0")
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("root", r.stderr)
-        self.assertFalse((self.home / ".local" / "lib").exists())
+        self.assertTrue((self.home / ".local" / "lib").exists())
 
-    def test_root_refusal_prints_a_copy_pasteable_command(self):
-        """只写「请加 AIKAUI_ALLOW_ROOT=1」不够：curl|sh 里变量加在 curl 前面
-        根本传不到 sh，用户照着想当然改一遍，回来还是一样的错。
-        也别把退出码当正文印出来（die 的 $2 曾经混进消息里，用户看到 …=1 2）。"""
+    def test_root_warning_says_where_things_land(self):
         self._serve(self._good_pkg())
         r = self._run(FAKE_UID="0")
-        self.assertIn("| AIKAUI_ALLOW_ROOT=1 sh", r.stderr)
-        self.assertNotIn("AIKAUI_ALLOW_ROOT=1 sh 2", r.stderr)
-        self.assertNotIn("=1 2\n", r.stderr)
+        self.assertIn("/root", r.stderr)
 
-    def test_allow_root_env_lets_it_through(self):
+    def test_allow_root_env_is_still_accepted(self):
+        """老文档、老脚本还在传这个变量，别让它变成错误。"""
         self._serve(self._good_pkg())
         r = self._run(FAKE_UID="0", AIKAUI_ALLOW_ROOT="1")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    def test_allow_root_env_tells_the_wizard_too(self):
-        """★ 环境变量只在这段 shell 里有效；向导是另一个进程，会再拦一次 root。
+    def test_root_still_passes_allow_root_to_the_wizard(self):
+        """★ 向导是另一个进程。1.4.4 起它自己就放行 root，但 AIKAUI_VERSION
+        可以钉一个老版本（1.4.3 及以前会再拦一次），所以参数照传。
 
         2026-10-27 的两个坑都在这条上：装了 tar 包、PATH 也配了，最后卡在 [1/5]
-        说"请用你自己的账号运行"。所以那句「手动继续」必须带上 --allow-root。"""
+        说"请用你自己的账号运行"。"""
         self._serve(self._good_pkg())
         r = self._run(FAKE_UID="0", AIKAUI_ALLOW_ROOT="1")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("--allow-root", r.stdout)
-        self.assertIn("root", r.stderr)          # 也提醒一句：东西都落在 /root 下
 
     def test_normal_user_is_not_given_allow_root(self):
         self._serve(self._good_pkg())

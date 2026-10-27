@@ -182,12 +182,12 @@ claude-code-assistant --repair        # 只对账配置：跟 identity.json 不�
 | `--node-version` / `--claude-version` | 钉版本；默认 Node 取 LTS、claude 取 latest |
 | `--yes` / `--force` / `--quiet` | 不提问 / 已装也重装 / 只输出错误 |
 | `--repair` | 只检查并修复 `~/.claude.json` 和 `~/.claude/settings.json`，不装 Node、不装 claude、不注册账号 |
-| `--allow-root` | 允许 root 跑（默认拒绝：root 装出来的东西后面普通用户用不了） |
+| `--allow-root` | 1.4.4 起 root 默认就能装，这个参数只为兼容老脚本保留 |
 
 **四步和三处"自动"**
 
 1. **环境自检**：不是 Linux、架构不是 x86_64/aarch64、`~/.local` 不可写，都会在下载任何
-   东西之前就失败（退出码 3）。
+   东西之前就失败（退出码 3）。root 不拦，只警告一句：东西全落在 `/root` 下，换个人用不了。
 2. **Node**：`node` 主版本 ≥ 22 就复用；否则从 `cdn.npmmirror.com` 下
    `node-v<ver>-linux-<arch>.tar.xz`，对 `SHASUMS256.txt` 校验，装到 `~/.local/node-v<ver>`
    再软链成 `~/.local/node`。**全程不 sudo。**
@@ -271,7 +271,11 @@ claude-code-assistant --repair        # 只对账配置：跟 identity.json 不�
 
 **`install.sh` 认这几个环境变量**（都是给测试和特殊部署用的，正常安装不用管）：
 `AIKAUI_SITE`（换站点，默认 `https://aikaui.com`）、`AIKAUI_LIB`（换安装目录）、
-`AIKAUI_NO_RUN`（只装不启动）、`AIKAUI_ALLOW_ROOT=1`（允许 root；向导那边也会被显式传上 `--allow-root`）。
+`AIKAUI_NO_RUN`（只装不启动）、`AIKAUI_ALLOW_ROOT=1`（1.4.4 起不需要了：root 默认就装，只打一行警告；
+留着只为兼容老文档。向导那边照旧传 `--allow-root`，钉老版本时才用得上）。
+
+**root**：容器里常常只有 root，所以不拦。代价是 Node、claude 和配置全落在 `/root` 下，
+换个人用不了 —— 警告里直说这一点。
 
 **边界**：一台机器一个账号 —— 同一个 `$HOME` 下的所有用户共用一份凭证，本版不做多租户。
 
@@ -386,7 +390,7 @@ macOS 两个包都**没有签名**：首次打开要右键 →「打开」，
 agent_demo/
 │
 ├── main.py                       182   程序入口：先换新版本 → 建窗口 → 别家中转就拦下 → 起线程（含配置自愈）→ 事件循环
-├── server_main.py                474   服务器版入口：环境自检 → Node → claude → 账号 → 配置（--repair 只对账）
+├── server_main.py                484   服务器版入口：环境自检 → Node → claude → 账号 → 配置（--repair 只对账）
 │
 ├── config.py                      98   唯一的常量源：版本、服务器地址、凭证、路径、配色、更新参数、MAX_STEPS
 ├── updater.py                    660   自动更新：清单校验 / 静默下载 / 下次启动替换自己（不 import tkinter）
@@ -464,7 +468,7 @@ agent_demo/
 │   ├── test_updater_linux_payload.py  server.spec / CI 矩阵 / updater 还认得这个包
 │   └── test_imports.py                工具层导入不依赖 Windows；服务器版入口不拖界面
 ├── packaging/
-│   ├── install.sh               295   官网那一行 `curl … | sh` 拉的就是它（POSIX sh，上线前 sh -n 校验）
+│   ├── install.sh               322   官网那一行 `curl … | sh` 拉的就是它（POSIX sh，上线前 sh -n 校验）
 │   └── claude-code-assistant.desktop   Linux 桌面启动器（服务器版不再发它，留着给手动装桌面版的人）
 ├── .github/workflows/build.yml        四平台 CI 构建 + tag 时发布
 │

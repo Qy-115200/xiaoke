@@ -81,33 +81,30 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(cm.exception.exit_code, EXIT_ENV)
         self.assertIn("Linux", cm.exception.message)
 
-    def test_rejects_root_unless_allowed(self):
+    def test_root_is_allowed_with_a_warning(self):
+        """root 默认放行。容器里常常只有 root，之前那道开关把人卡在第一步
+        （2026-10-27 两次），挡住的不是风险，是安装本身。"""
         ctx = self._ctx()
         clean_env = {k: v for k, v in os.environ.items() if k != "AIKAUI_ALLOW_ROOT"}
         with mock.patch.object(sys, "platform", "linux"), \
              mock.patch.object(server_main.node_setup, "detect_node_arch",
                                return_value="x64"), \
              mock.patch.dict(os.environ, clean_env, clear=True), \
+             mock.patch.object(ctx, "log") as log, \
              mock.patch.object(os, "geteuid", lambda: 0, create=True):
-            with self.assertRaises(CliError) as cm:
-                server_main._preflight(ctx, _args())
-            self.assertEqual(cm.exception.exit_code, EXIT_ENV)
-            # 明确给 root 一个出口，但不推荐
-            self.assertIn("--allow-root", cm.exception.hint)
-            server_main._preflight(ctx, _args("--allow-root"))   # 不抛
+            server_main._preflight(ctx, _args())                  # 不抛
+        said = " ".join(str(c.args[0]) for c in log.call_args_list)
+        self.assertIn("/root", said, "得说清楚东西落在哪")
 
-    def test_allow_root_env_var_also_works(self):
-        """install.sh 传的是 --allow-root，但容器里有人只能 export 这个变量。
-
-        2026-10-27 踩到过：install.sh 认了 AIKAUI_ALLOW_ROOT=1，向导是另一个进程，
-        自己又拦了一次 —— 装完 tar 包后卡在 [1/5]。"""
+    def test_allow_root_flag_is_still_accepted(self):
+        """老的 install.sh / 文档还在传 --allow-root，别让它变成错误。"""
         ctx = self._ctx()
         with mock.patch.object(sys, "platform", "linux"), \
              mock.patch.object(server_main.node_setup, "detect_node_arch",
                                return_value="x64"), \
-             mock.patch.dict(os.environ, {"AIKAUI_ALLOW_ROOT": "1"}), \
+             mock.patch.dict(os.environ, {}, clear=True), \
              mock.patch.object(os, "geteuid", lambda: 0, create=True):
-            server_main._preflight(ctx, _args())                  # 不抛
+            server_main._preflight(ctx, _args("--allow-root"))    # 不抛
 
     def test_dry_run_creates_nothing(self):
         ctx = self._ctx(dry_run=True)

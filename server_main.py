@@ -127,7 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true",
                    help="只打印要做什么，不下载、不写盘")
     p.add_argument("--allow-root", action="store_true",
-                   help="允许以 root 身份运行（不推荐）")
+                   help="已经默认允许 root 了，这个参数只为兼容老脚本保留")
     p.add_argument("--quiet", action="store_true", help="只打错误和结果")
     p.add_argument("--version", action="version",
                    version=f"{PROG} {APP_VERSION}")
@@ -137,7 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
 # ================= 五步 =================
 
 def _preflight(ctx, args) -> dict:
-    """① 环境自检：Linux / 架构 / 可写 / 不是 root。"""
+    """① 环境自检：Linux / 架构 / 可写 / root（只警告）。"""
     if not sys.platform.startswith("linux"):
         raise CliError(
             f"这个安装器是给 Linux 服务器用的（当前系统：{sys.platform}）",
@@ -148,15 +148,11 @@ def _preflight(ctx, args) -> dict:
     if not arch:
         raise CliError("只支持 x86_64 / aarch64 架构", EXIT_ENV)
 
-    # ★ 两条路都认：install.sh 会显式传 --allow-root，用户也可以自己 export
-    #   AIKAUI_ALLOW_ROOT=1（某些容器里只有 root、又没法给子进程加参数）。
-    root_ok = args.allow_root or os.environ.get("AIKAUI_ALLOW_ROOT") == "1"
-    if hasattr(os, "geteuid") and os.geteuid() == 0 and not root_ok:
-        raise CliError(
-            "请用你自己的账号运行，不要用 root",
-            EXIT_ENV,
-            hint="用 root 装的东西会落在 /root 下，以后普通用户用不了；"
-                 "确实要这样请加 --allow-root（或 export AIKAUI_ALLOW_ROOT=1）")
+    # ★ root 默认放行，只警告。容器里常常只有 root，之前那道开关连着把用户卡在
+    #   第一步（2026-10-27 两次）。代价照实说：东西全落在 /root 下，只有 root 能用。
+    #   --allow-root / AIKAUI_ALLOW_ROOT 仍然认，只是不再必要 —— 老文档、老脚本还在传。
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        ctx.log("    ⚠ 以 root 运行：Node、claude 和配置都会落在 /root 下，只有 root 能用")
 
     if not ctx.dry_run:
         try:
