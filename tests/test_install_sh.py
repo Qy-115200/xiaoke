@@ -268,6 +268,23 @@ class InstallShTests(unittest.TestCase):
         r = self._run(FAKE_UID="0", AIKAUI_ALLOW_ROOT="1")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_allow_root_env_tells_the_wizard_too(self):
+        """★ 环境变量只在这段 shell 里有效；向导是另一个进程，会再拦一次 root。
+
+        2026-10-27 的两个坑都在这条上：装了 tar 包、PATH 也配了，最后卡在 [1/5]
+        说"请用你自己的账号运行"。所以那句「手动继续」必须带上 --allow-root。"""
+        self._serve(self._good_pkg())
+        r = self._run(FAKE_UID="0", AIKAUI_ALLOW_ROOT="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("--allow-root", r.stdout)
+        self.assertIn("root", r.stderr)          # 也提醒一句：东西都落在 /root 下
+
+    def test_normal_user_is_not_given_allow_root(self):
+        self._serve(self._good_pkg())
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("--allow-root", r.stdout)
+
 
 class ScriptShapeTests(unittest.TestCase):
     """不跑，只检查脚本本身的几条硬约束。"""

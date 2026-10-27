@@ -46,10 +46,30 @@ trap cleanup EXIT INT TERM HUP
 
 say "▶ 小克 · Claude Code 服务器版安装器"
 
-if [ "$(id -u 2>/dev/null || echo 1)" = "0" ] && [ "${AIKAUI_ALLOW_ROOT:-}" != "1" ]; then
+IS_ROOT=0
+if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then IS_ROOT=1; fi
+
+if [ "$IS_ROOT" = "1" ] && [ "${AIKAUI_ALLOW_ROOT:-}" != "1" ]; then
   die "请不要用 root 运行。装到 /root 下面的东西，普通用户以后用不了。
    确实要这样请加：AIKAUI_ALLOW_ROOT=1" 2
 fi
+if [ "$IS_ROOT" = "1" ]; then
+  warn "以 root 安装：东西全部落在 /root 下，只有 root 能用。"
+fi
+
+# 给用户看的那句「手动继续」要带上 --allow-root，否则照着敲还是会被拦。
+WIZARD_HINT=""
+if [ "$IS_ROOT" = "1" ]; then WIZARD_HINT=" --allow-root"; fi
+
+# 向导怎么启动。★ root 下必须显式带上 --allow-root：这个环境变量只在这段 shell 里
+# 起作用，向导是另一个进程，它自己还会拦一次 root（2026-10-27 就是这么卡住的）。
+run_wizard() {
+  if [ "$IS_ROOT" = "1" ]; then
+    "$BIN" --allow-root "$@"
+  else
+    "$BIN" "$@"
+  fi
+}
 
 case "${HOME:-}" in
   ""|"/") die "HOME 没设置或等于 /，不敢往下装" 2 ;;
@@ -271,7 +291,7 @@ fi
 if [ "${AIKAUI_NO_RUN:-0}" = "1" ]; then
   say ""
   say "✅ 装好了（AIKAUI_NO_RUN=1，没有启动向导）。"
-  say "   手动继续：$BIN"
+  say "   手动继续：$BIN$WIZARD_HINT"
   exit 0
 fi
 
@@ -279,7 +299,7 @@ say ""
 if [ -t 0 ] && [ -t 1 ]; then
   # 直接在终端里跑：让向导继承这个终端
   set +e
-  "$BIN"
+  run_wizard
   code=$?
   set -e
   exit $code
@@ -289,7 +309,7 @@ if [ -r /dev/tty ] && ( : < /dev/tty ) 2>/dev/null; then
   # `curl … | sh` 的情况：stdin 是脚本本身，把它接回终端
   say "▶ 启动安装向导"
   set +e
-  "$BIN" < /dev/tty
+  run_wizard < /dev/tty
   code=$?
   set -e
   exit $code
@@ -297,5 +317,5 @@ fi
 
 say "✅ 装好了。这里没有终端，向导没启动。"
 say "   在终端里执行这一句继续："
-say "     $BIN"
+say "     $BIN$WIZARD_HINT"
 exit 0

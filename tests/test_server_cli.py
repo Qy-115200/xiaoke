@@ -83,9 +83,11 @@ class PreflightTests(unittest.TestCase):
 
     def test_rejects_root_unless_allowed(self):
         ctx = self._ctx()
+        clean_env = {k: v for k, v in os.environ.items() if k != "AIKAUI_ALLOW_ROOT"}
         with mock.patch.object(sys, "platform", "linux"), \
              mock.patch.object(server_main.node_setup, "detect_node_arch",
                                return_value="x64"), \
+             mock.patch.dict(os.environ, clean_env, clear=True), \
              mock.patch.object(os, "geteuid", lambda: 0, create=True):
             with self.assertRaises(CliError) as cm:
                 server_main._preflight(ctx, _args())
@@ -93,6 +95,19 @@ class PreflightTests(unittest.TestCase):
             # 明确给 root 一个出口，但不推荐
             self.assertIn("--allow-root", cm.exception.hint)
             server_main._preflight(ctx, _args("--allow-root"))   # 不抛
+
+    def test_allow_root_env_var_also_works(self):
+        """install.sh 传的是 --allow-root，但容器里有人只能 export 这个变量。
+
+        2026-10-27 踩到过：install.sh 认了 AIKAUI_ALLOW_ROOT=1，向导是另一个进程，
+        自己又拦了一次 —— 装完 tar 包后卡在 [1/5]。"""
+        ctx = self._ctx()
+        with mock.patch.object(sys, "platform", "linux"), \
+             mock.patch.object(server_main.node_setup, "detect_node_arch",
+                               return_value="x64"), \
+             mock.patch.dict(os.environ, {"AIKAUI_ALLOW_ROOT": "1"}), \
+             mock.patch.object(os, "geteuid", lambda: 0, create=True):
+            server_main._preflight(ctx, _args())                  # 不抛
 
     def test_dry_run_creates_nothing(self):
         ctx = self._ctx(dry_run=True)

@@ -12,10 +12,16 @@
 3. **认准 `claude` 在哪**：npm 的 bin 软链、包内 `bin/claude.exe` 都要试，
    最后用 `claude --version` 定论 —— 文件存在不等于能跑（架构/glibc 不对时
    报的是 `Exec format error`）。
+4. **原生包单独兜一次**：主包只有 29KB，`bin/claude.exe` 是个 500 字节的占位，
+   真正的二进制在 optionalDependencies 的平台子包里（linux-x64：132MB 下载 /
+   293MB 解压）。★ npm 对 optional 依赖的失败**不报错**，退出码还是 0 —— 下载
+   断一次，结果就是「装好了但没有 claude」。所以拿不到可执行文件时单独装一次
+   平台包（这次是普通依赖，失败会真的报错），再手动跑一遍壳的 postinstall。
 """
 
 import os
 import subprocess
+import time
 from pathlib import Path
 
 from server.cli import EXIT_NPM, CliError, atomic_symlink
@@ -23,8 +29,10 @@ from server.cli import EXIT_NPM, CliError, atomic_symlink
 CLAUDE_PACKAGE = "@anthropic-ai/claude-code"
 NPM_REGISTRY = "https://registry.npmmirror.com"
 
-INSTALL_TIMEOUT = 900          # 原生二进制几十兆，慢网络下要几分钟
+INSTALL_TIMEOUT = 1800         # 原生包 132MB，慢网络下十几分钟；900 秒不够
 VERSION_TIMEOUT = 60
+POSTINSTALL_TIMEOUT = 300      # postinstall 要把 293MB 硬链/拷成 claude.exe
+NATIVE_DOWNLOAD_MB = 130       # 给用户看的量级，别写精确值（会随版本变）
 
 
 # ================= 纯函数（离线可测）=================
@@ -44,6 +52,12 @@ def npm_env(base_env, prefix) -> dict:
     env["npm_config_fund"] = "false"
     env["npm_config_audit"] = "false"
     env["npm_config_update_notifier"] = "false"
+    # ★ 132MB 的原生包是最容易断的一步，而 optional 依赖断了 npm 不报错。
+    #   多给它几次机会：默认只重试 2 次、单次 5 分钟。
+    env["npm_config_fetch_retries"] = "5"
+    env["npm_config_fetch_timeout"] = "300000"
+    env["npm_config_fetch_retry_mintimeout"] = "10000"
+    env["npm_config_fetch_retry_maxtimeout"] = "120000"
     return env
 
 
@@ -72,6 +86,86 @@ def install_argv(node_info, prefix, version: str = "",
         "--registry", registry,
         # ★ include=optional 不能省：原生二进制就在 optionalDependencies 里
         "--include=optional",
+        "--no-audit", "--no-fund",
+    ]
+
+
+# ================= 原生包（那 130MB）=================
+#
+# 主包只有 29KB，`bin/claude.exe` 是个 500 字节的占位；真正的可执行文件在
+# optionalDependencies 的平台子包里。★ npm 对 optional 依赖的失败**不报错**：
+# 断网、超时、校验不过都只在 stderr 里留一句警告，退出码仍然是 0。
+# 所以「npm 说装好了」根本不等于装好了。
+
+# 判断本机要哪个平台包。逻辑必须和壳里 install.cjs 的 getPlatformKey() 一致：
+# musl 靠 process.report 里有没有 glibcVersionRuntime 判断（容器里未必有 ldd）。
+_ARCH_PROBE = (
+    "const r=process.report&&process.report.getReport?process.report.getReport():null;"
+    "process.stdout.write(process.arch+"
+    "(r&&r.header&&r.header.glibcVersionRuntime!==undefined?'':'-musl'))"
+)
+_ARCH_TAGS = ("x64", "arm64", "x64-musl", "arm64-musl")
+_MACHINE_ALIASES = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64"}
+
+
+def fallback_arch_tag(machine: str = "", musl=None) -> str:
+    """问不到 node 时的退路：看内核报的机器名 + 有没有 musl 的 loader。"""
+    if not machine:
+        import platform as _platform
+        machine = _platform.machine()
+    tag = _MACHINE_ALIASES.get(machine.lower(), machine.lower())
+    if tag not in ("x64", "arm64"):
+        return ""
+    if musl is None:
+        try:
+            musl = bool(list(Path("/lib").glob("ld-musl-*.so.1")))
+        except OSError:
+            musl = False
+    return tag + ("-musl" if musl else "")
+
+
+def platform_arch_tag(ctx, node_info) -> str:
+    """x64 / arm64 / x64-musl / arm64-musl；认不出来返回空串。"""
+    node = str((node_info or {}).get("node") or "")
+    if node and ctx is not None:
+        res = ctx.runner.run([node, "-e", _ARCH_PROBE],
+                             timeout=VERSION_TIMEOUT, stdin=subprocess.DEVNULL)
+        tag = (res.out or "").strip()
+        if res.ok and tag in _ARCH_TAGS:
+            return tag
+    return fallback_arch_tag()
+
+
+def native_package_name(arch_tag: str) -> str:
+    return f"{CLAUDE_PACKAGE}-linux-{arch_tag}" if arch_tag else ""
+
+
+def wrapper_dir(prefix) -> Path:
+    """壳（那个 29KB 的 npm 包）装在哪儿。"""
+    return Path(prefix) / "lib" / "node_modules" / "@anthropic-ai" / "claude-code"
+
+
+def wrapper_version(prefix) -> str:
+    """壳的版本 = 平台包的版本（同一批发布的），补装时按它钉版本。"""
+    import json
+    try:
+        data = json.loads((wrapper_dir(prefix) / "package.json")
+                          .read_text(encoding="utf-8"))
+        return str(data.get("version") or "")
+    except Exception:
+        return ""
+
+
+def native_install_argv(node_info, prefix, package: str, version: str = "",
+                        registry: str = NPM_REGISTRY) -> list:
+    """单独装平台子包。★ 这次是普通依赖，失败会真的报错 —— 这正是要的：
+    别再把「132MB 没下下来」伪装成「装好了」。"""
+    spec = f"{package}@{version}" if version else package
+    return npm_argv_prefix(node_info) + [
+        "install", "-g",
+        "--prefix", str(Path(prefix)),
+        spec,
+        "--registry", registry,
         "--no-audit", "--no-fund",
     ]
 
@@ -168,36 +262,90 @@ def ensure_claude(ctx, node_info, version: str = "") -> dict:
                        hint="Node 是装好了，但里面没有 npm；重新跑一次安装器试试")
 
     ctx.log(f"    安装 {CLAUDE_PACKAGE}{('@' + version) if version else ''} …")
+    ctx.note(f"    要下约 {NATIVE_DOWNLOAD_MB}MB 的原生包，慢网络要几分钟；"
+             f"这一步不刷进度是正常的")
     env = npm_env(ctx.env, ctx.prefix)
     old_env = getattr(ctx.runner, "env", None)
     ctx.runner.env = env
+    started = time.monotonic()
     try:
         res = ctx.runner.run(argv, timeout=INSTALL_TIMEOUT,
                              stdin=subprocess.DEVNULL)
     finally:
         if old_env is not None:
             ctx.runner.env = old_env
+    elapsed = int(time.monotonic() - started)
 
     if res.timed_out:
         raise CliError(f"npm 安装超时（{INSTALL_TIMEOUT} 秒）", EXIT_NPM,
                        hint="换个网络或者稍后重跑；已下载的部分会留在缓存里")
+    tail = res.text(limit=600)
     if not res.ok:
-        tail = res.text(limit=600)
         raise CliError(f"npm 安装失败（退出码 {res.code}）：\n{tail}", EXIT_NPM,
                        hint="检查一下网络能不能连 registry.npmmirror.com")
 
     found = find_installed_claude(ctx)
     if not found:
+        # ★ 走到这里千万别直接说「装好了」：npm 退出码 0 只代表**它自己**没出错，
+        #   optional 依赖（也就是那 132MB 的原生包）下载失败它是不会报错的。
+        ctx.note(f"    npm 跑完了（{elapsed} 秒），但没有可用的 claude —— 补装原生包")
+        found = _repair_native(ctx, node_info, tail)
+    if not found:
         raise CliError(
-            "npm 说装好了，但找不到能跑的 claude",
+            "npm 说装好了，但找不到能跑的 claude\n" + (tail or "（npm 没有输出）"),
             EXIT_NPM,
             hint=f"看看 {Path(ctx.prefix) / 'lib' / 'node_modules' / CLAUDE_PACKAGE} 在不在；"
-                 f"多半是 npm 的 ignore-scripts/omit=optional 把原生二进制省了")
+                 f"多半是 npm 的 ignore-scripts/omit=optional 或原生包没下完。"
+                 f"重跑一次安装器通常就能补上")
     ver = claude_version(ctx, found)
     _ensure_bin_link(ctx, found)
     _prepend_bin(ctx)
-    ctx.note(f"    claude {ver}（{found}）")
+    ctx.note(f"    claude {ver}（{found}，{elapsed} 秒）")
     return {"claude": found, "version": ver, "installed": True}
+
+
+def _repair_native(ctx, node_info, npm_text: str) -> str:
+    """壳装上了、但壳里没有可执行文件时，单独把原生包补上。
+
+    三步，任一步失败就抛错并把 npm 的原话带出来：
+      1. 认出本机要哪个平台包（x64 / arm64 / -musl）；
+      2. `npm install -g` 那个平台包 —— 普通依赖，失败会真的报错；
+      3. 跑一遍壳里的 postinstall，它会把 `bin/claude.exe` 那个占位换成真二进制。
+    返回能找到的 claude 路径；还是找不到就返回空串（由调用方报错）。"""
+    pkg_dir = wrapper_dir(ctx.prefix)
+    if not pkg_dir.is_dir():
+        return ""
+
+    tag = platform_arch_tag(ctx, node_info)
+    package = native_package_name(tag)
+    if not package:
+        ctx.note("    （认不出这台机器的架构，没法单独补装原生包）")
+        return ""
+
+    version = wrapper_version(ctx.prefix)
+    spec = f"{package}{('@' + version) if version else ''}"
+    ctx.note(f"    补装 {spec} …")
+    res = ctx.runner.run(native_install_argv(node_info, ctx.prefix, package,
+                                             version=version),
+                         timeout=INSTALL_TIMEOUT, stdin=subprocess.DEVNULL)
+    if res.timed_out or not res.ok:
+        reason = "超时" if res.timed_out else f"退出码 {res.code}"
+        raise CliError(
+            f"{spec} 装不上（{reason}）：\n" + res.text(limit=600),
+            EXIT_NPM,
+            hint="这多半是网络问题：原生包一百多兆，断一次就装不完整。"
+                 "换个网络或者稍后重跑安装器（已下载的部分会留在缓存里）"
+                 + (f"\n第一次 npm 的输出：\n{npm_text}" if npm_text else ""))
+
+    node = str((node_info or {}).get("node") or "")
+    install_cjs = pkg_dir / "install.cjs"
+    if node and install_cjs.is_file():
+        ctx.note("    跑一遍 postinstall，把占位换成真二进制 …")
+        ran = ctx.runner.run([node, str(install_cjs)], timeout=POSTINSTALL_TIMEOUT,
+                             stdin=subprocess.DEVNULL)
+        if not ran.ok:
+            ctx.note("    postinstall 没跑通：" + ran.text(limit=300))
+    return find_installed_claude(ctx)
 
 
 def _ensure_bin_link(ctx, path: str) -> None:
