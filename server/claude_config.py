@@ -152,10 +152,16 @@ def _write_json(path: Path, data: dict) -> None:
     _write_json_atomic(path, data)
 
 
-def _backup(path: Path) -> Path:
-    """写之前存一份原样。只留最新一份（旧的不停堆着，token 也到处是）。"""
+def _backup(path: Path, keep_existing: bool = False) -> Path:
+    """写之前存一份原样。只留一份（旧的不停堆着，token 也到处是）。
+
+    keep_existing=True：已经有备份就不动它。apply() 用这个 —— 那份备份代表
+    「装我们之前的样子」，重装 / 换账号再跑一次时不能拿我们自己的配置把它顶掉，
+    否则用户原来那套中转就真的找不回来了。"""
     path = Path(path)
     bak = path.with_name(path.name + BACKUP_SUFFIX)
+    if keep_existing and bak.exists():
+        return bak
     raw = path.read_bytes()
     bak.write_bytes(raw)
     try:
@@ -179,6 +185,7 @@ def apply(identity: dict):
 
     written = []
     failed = []
+    backed = []
     fast_model = env.get("ANTHROPIC_MODEL")
 
     # ---------- ~/.claude.json ----------
@@ -187,6 +194,10 @@ def apply(identity: dict):
         if status not in ("ok", "missing"):
             raise ValueError(f"文件读不出来（{status}），没有覆盖")
         data = data or {}
+        # ★ 覆盖前先留底：这里可能是用户原来那套别家中转（含它自己的 token）。
+        #   备份不成就不写 —— 说好「能换回来」就得真能换回来。
+        if status == "ok":
+            backed.append(_backup(CLAUDE_CONFIG, keep_existing=True))
         merged = dict(data.get("env") or {})
         merged.update(env)
         data["env"] = merged
@@ -202,6 +213,8 @@ def apply(identity: dict):
         if status not in ("ok", "missing"):
             raise ValueError(f"文件读不出来（{status}），没有覆盖")
         s = s or {}
+        if status == "ok":
+            backed.append(_backup(CLAUDE_SETTINGS, keep_existing=True))
         merged = dict(s.get("env") or {})
         merged.update(env)                      # ★ 这里就是这次 bug 的修复点
         s["env"] = merged
@@ -212,11 +225,13 @@ def apply(identity: dict):
     except Exception as e:
         failed.append(f"{CLAUDE_SETTINGS.name}: {e}")
 
+    # 备份说给用户听：他原来那套配置还在，想换回去拷一下就回来
+    note = ("；原来的配置已备份到 " + "、".join(Path(p).name for p in backed)) if backed else ""
     if not written:
         return False, "命令行配置没写进去：" + "；".join(failed)
     if failed:
-        return True, "已更新 " + "、".join(written) + "；没写成的：" + "；".join(failed)
-    return True, "已更新 " + "、".join(written)
+        return True, "已更新 " + "、".join(written) + "；没写成的：" + "；".join(failed) + note
+    return True, "已更新 " + "、".join(written) + note
 
 
 def sync_from_identity_file():
@@ -449,7 +464,9 @@ def check_and_repair(identity=None, force=False, dry_run=False,
             path = Path(change.path)
             try:
                 if path.exists():
-                    _backup(path)
+                    # ★ 也走 keep_existing：`*.aikaui-bak` 的定义是"装我们之前的样子"，
+                    #   不能被后来任何一次自动修复拿我们自己的配置顶掉。
+                    _backup(path, keep_existing=True)
                 _writer(path, change.data)
                 # 写完重读：落盘失败（磁盘满、权限、被别的进程抢写）不能报成功
                 back, status = read_strict(path)

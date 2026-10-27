@@ -1,10 +1,10 @@
-# Claude Code 安装助手
+# 小克 · Claude Code 一键配置
 
 一个 Windows / macOS / Linux 桌面小程序：把「装 Claude Code」这件折腾半天的事，变成跟 AI 说一句话。
 
 窗口左边一条导航栏，右边三个页面：**💬 对话**、**📊 用量信息** 和 **🔐 账户信息**。对话页背后是一个能调工具的
 Agent —— 它会自己检测环境、装 Node、装 Claude Code、写好配置、问清楚工作目录、在桌面放个图标，
-然后把 Claude Code 打开。它也是个能用的 AI 管家：能陪你聊天、答疑、查余额、扫码充值。
+然后把 Claude Code 打开。它也是个能聊的「小克」：能陪你聊天、答疑、查余额、扫码充值。
 
 ## 功能
 
@@ -56,7 +56,7 @@ CLI 一律用安装目录里的 `bin\code.cmd`（`Code.exe --list-extensions` �
 `ELECTRON_RUN_AS_NODE` / `VSCODE_*`（带着它们 `Code.exe <目录>` 会当 node 脚本跑完就退，
 不报错也不弹窗）。
 
-**对话式 AI 管家**
+**对话式的「小克」**
 
 不装东西的时候它就是个普通助手，问它什么都行。系统提示词里写死了：用户只是在打招呼或
 提问时，**不要**自作主张去装东西。
@@ -213,6 +213,12 @@ claude-code-assistant --repair        # 只对账配置：跟 identity.json 不�
   `settings.json` 顶层的 `model` 不碰 —— 那是用户在 `/model` 里的选择；
 - 桌面版只在**真的补了东西**时往对话区留一行日志，不弹窗。
 
+**`<文件名>.aikaui-bak` 的定义是"装我们之前的样子"**，不是"上一次写入前的样子"：
+`apply()`（安装 / 换账号时那次覆盖）和 `check_and_repair()`（自动修复）
+都只在备份还不存在时才写它。这样用户原来那套别家中转（连同它自己的 token）
+永远留在备份里 —— 管家给的选项写着「换成我们的（原来的会备份，随时能换回）」，
+这条承诺就得对后来每一次自动修复都成立。
+
 **退出码**。两个程序的码各有各的含义，脚本化部署时靠它判断，别只 grep 输出：
 
 `install.sh`（下载和落地这一段）：
@@ -360,7 +366,7 @@ macOS 两个包都**没有签名**：首次打开要右键 →「打开」，
 ```
 agent_demo/
 │
-├── main.py                       156   程序入口：先换新版本 → 建窗口 → 起线程（含配置自愈）→ 事件循环
+├── main.py                       157   程序入口：先换新版本 → 建窗口 → 起线程（含配置自愈）→ 事件循环
 ├── server_main.py                474   服务器版入口：环境自检 → Node → claude → 账号 → 配置（--repair 只对账）
 │
 ├── config.py                      98   唯一的常量源：版本、服务器地址、凭证、路径、配色、更新参数、MAX_STEPS
@@ -372,7 +378,7 @@ agent_demo/
 ├── bus.py                        112   线程间队列 + poll_queue（每 100ms 把消息翻译成界面操作）
 ├── llm.py                        126   大模型客户端（走 aikaui.com 代理，用本机账号的 api_key）
 ├── agent_core.py                 285   Agent 主循环：run_one_task / agent_worker / balance_worker
-├── prompts.py                    577   系统提示词（按平台给安装指令 + 工作目录 + VSCode 询问分支 + 余额分寸）
+├── prompts.py                    611   系统提示词（按平台给安装指令 + 工作目录 + VSCode 询问分支 + 余额分寸）
 │
 ├── platform_support/                  三平台差异（调用方只 import 这个包）
 │   ├── __init__.py               122   按 sys.platform 延迟加载并转发
@@ -392,7 +398,7 @@ agent_demo/
 │   ├── vault.py                  213   凭证的"第二份"：账户码存注册表（DPAPI 加密）/ 配置目录
 │   ├── pow.py                    128   PoW 求解（进度 / 取消 / 90 秒超时），和服务器 pow.js 逐位对齐
 │   ├── api.py                    504   余额 / 用量 / 充值 HTTP 层（永远不抛异常）
-│   ├── claude_config.py          471   把身份写进两份配置 + 事后对账自愈（坏文件不覆盖、外家中转不碰）
+│   ├── claude_config.py          495   把身份写进两份配置 + 事后对账自愈（坏文件不覆盖、外家中转不碰）
 │   ├── tools_fixed.py            148   五个固定工具 + aikaui:// 协议注册（转发 platform_support）
 │   ├── tools_general.py          125   bash / read_file / write_file / ask_user（解码和杀进程树在 platform_support.common）
 │   ├── tools_vscode.py           246   check_vscode / install_vscode / install_claude_extension / open_vscode（连 Claude 面板一起开）

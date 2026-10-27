@@ -334,6 +334,48 @@ class ApplyTests(Base):
         self.assertTrue(ok)
         self.assertEqual(self.read(self.settings)["env"], ENV)
 
+    def test_apply_backs_up_the_old_provider_first(self):
+        # 选项里写着「换成我们的（原来的会备份，随时能换回）」，那就必须真的备份
+        _dump(self.settings, {"env": {"ANTHROPIC_BASE_URL": "https://example.invalid",
+                                      "ANTHROPIC_AUTH_TOKEN": "sk-mine"},
+                              "model": "opus"})
+        raw = self.settings.read_bytes()
+        ok, note = cc.apply(IDENT)
+        self.assertTrue(ok, note)
+        self.assertEqual(self.backup(self.settings).read_bytes(), raw, "原来的配置没备份")
+        self.assertIn("备份", note)
+        self.assertEqual(self.read(self.settings)["env"], ENV)
+
+    def test_second_apply_keeps_the_original_backup(self):
+        # 重装 / 换账号会再跑一次 apply，不能把自己前一次写的配置顶成"备份"
+        _dump(self.settings, {"env": {"ANTHROPIC_BASE_URL": "https://example.invalid"}})
+        raw = self.settings.read_bytes()
+        cc.apply(IDENT)
+        cc.apply(IDENT)
+        self.assertEqual(self.backup(self.settings).read_bytes(), raw,
+                         "第二份备份把真正有价值的原件顶掉了")
+
+    def test_no_backup_when_file_did_not_exist(self):
+        ok, note = cc.apply(IDENT)
+        self.assertTrue(ok, note)
+        self.assertFalse(self.backup(self.config).exists())
+        self.assertFalse(self.backup(self.settings).exists())
+
+    def test_repair_does_not_clobber_the_original_backup(self):
+        # apply() 留下的是「装我们之前的样子」；之后自动修复再写一次，不许把它顶掉
+        _dump(self.settings, {"env": {"ANTHROPIC_BASE_URL": "https://example.invalid"}})
+        raw = self.settings.read_bytes()
+        cc.apply(IDENT)
+        settings = self.read(self.settings)
+        settings["env"]["ANTHROPIC_AUTH_TOKEN"] = "sk-old"
+        _dump(self.settings, settings)
+
+        cc.check_and_repair(identity=IDENT, config_path=self.config,
+                            settings_path=self.settings)
+
+        self.assertEqual(self.backup(self.settings).read_bytes(), raw,
+                         "自动修复把用户原来的配置顶掉了")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
