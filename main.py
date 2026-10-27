@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Claude Code 安装助手 —— 程序入口。
+"""小克 —— 程序入口。
 
 这里只做四件事：建窗口、起后台线程、打欢迎信息、进事件循环。
 具体实现都在各自的模块里：
@@ -20,6 +20,7 @@ import customtkinter as ctk
 import platform_support
 import updater
 from agent_core import agent_worker, balance_worker, refresh_balance
+from config import APP_NAME
 from bus import msg_queue, poll_queue
 from server.tools_fixed import parse_protocol_arg, parse_protocol_url, register_protocol
 from server.ui_bridge import set_ui
@@ -122,10 +123,10 @@ def main():
 
     # ---------- 欢迎信息 ----------
     gui.write("=" * 55)
-    gui.write("  Claude Code 助手")
+    gui.write(f"  {APP_NAME} · Claude Code 一键配置")
     gui.write("=" * 55)
     gui.write("")
-    gui.write("我是你的 AI 管家，随时可以问我任何问题。")
+    gui.write(f"我是{APP_NAME}，随时可以问我任何问题。")
     gui.write("")
     gui.write("• 想装 Claude Code？点下面蓝色按钮，或直接说\"帮我装 Claude Code\"")
     gui.write("• 左边有三个页面：💬 对话（在这儿聊天）、📊 用量信息（余额 / token 用量 / 充值）、"

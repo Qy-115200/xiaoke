@@ -27,6 +27,7 @@ import customtkinter as ctk
 
 from agent_core import refresh_balance
 from config import (
+    APP_NAME,
     APP_VERSION,
     AXIS,
     BG,
@@ -123,7 +124,7 @@ class UsageMixin:
         #   否则它会被挤到图表下面、窗口一矮就看不见了。
         #   报问题时让用户说这个版本号，比问"你什么时候下的"靠谱。
         ctk.CTkLabel(
-            view, text=f"v{APP_VERSION} · Claude Code 助手",
+            view, text=f"v{APP_VERSION} · {APP_NAME}",
             font=font(S_TINY), text_color=DIM,
         ).pack(side=tk.BOTTOM, pady=(0, 8))
 

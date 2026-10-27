@@ -323,7 +323,7 @@ def register_url_protocol() -> str:
 
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\aikaui") as key:
-            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "URL:AI 管家")   # 描述
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "URL:小克")   # 描述
             winreg.SetValueEx(key, "URL Protocol", 0, winreg.REG_SZ, "")  # ★ 有这行才被认成协议
         with winreg.CreateKey(
             winreg.HKEY_CURRENT_USER, r"Software\Classes\aikaui\shell\open\command"
@@ -408,7 +408,7 @@ def notify(title: str, message: str) -> None:
     # ③ PowerShell 的 WinRT toast（Windows 10/11 自带，啥都不用装）
     try:
         app_id = str(Path(sys.executable).resolve()) if getattr(sys, "frozen", False) \
-            else "Claude Code 助手"
+            else "小克"
 
         def _esc(s):
             """XML 转义，避免标题/正文里的特殊字符把模板弄坏"""

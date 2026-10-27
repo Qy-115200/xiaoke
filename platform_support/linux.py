@@ -99,7 +99,7 @@ def register_url_protocol() -> str:
         _write_desktop(entry, [
             "[Desktop Entry]",
             "Type=Application",
-            "Name=Claude Code 助手",
+            "Name=小克",
             "Comment=安装与配置 Claude Code",
             f"Exec={_app_command()} %u",
             "Icon=utilities-terminal",

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Claude Code 助手 · 服务器版一键安装
+# 小克 · Claude Code 服务器版一键安装
 #
 #   curl -fsSL https://aikaui.com/install.sh | sh
 #
@@ -44,7 +44,7 @@ trap cleanup EXIT INT TERM HUP
 
 # ---------------------------------------------------------------- 环境
 
-say "▶ Claude Code 助手 · 服务器版安装器"
+say "▶ 小克 · Claude Code 服务器版安装器"
 
 if [ "$(id -u 2>/dev/null || echo 1)" = "0" ] && [ "${AIKAUI_ALLOW_ROOT:-}" != "1" ]; then
   die "请不要用 root 运行。装到 /root 下面的东西，普通用户以后用不了。

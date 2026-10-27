@@ -27,6 +27,7 @@ import customtkinter as ctk
 
 from bus import input_event, input_holder, msg_queue, user_input_queue
 from config import (
+    APP_NAME,
     BG,
     DIM,
     OPTION_HOVER,
@@ -77,7 +78,7 @@ class WindowMixin:
         self._auto_quit_id = None                # 安装完成后"几秒后自动退出"的 after id
         self._quitting = False                   # 防止连点 X / 自动退出重复 destroy
 
-        root.title("Claude Code 助手")
+        root.title(APP_NAME)
         root.geometry("960x780")
         root.minsize(860, 660)
         root.configure(fg_color=BG)
@@ -118,11 +119,11 @@ class WindowMixin:
         rail.pack_propagate(False)               # 固定宽度，不让子控件把它撑开
 
         ctk.CTkLabel(
-            rail, text="Claude Code", anchor="w",
+            rail, text=APP_NAME, anchor="w",
             font=font(S_LOGO, "bold"), text_color=TEXT,
         ).pack(fill=tk.X, padx=16, pady=(18, 0))
         ctk.CTkLabel(
-            rail, text="助手", anchor="w",
+            rail, text="Claude Code", anchor="w",
             font=font(S_SMALL), text_color=DIM,
         ).pack(fill=tk.X, padx=16, pady=(0, 18))
 
@@ -461,7 +462,7 @@ class WindowMixin:
         # --- 跌破 ¥2 弹一次系统通知 ---
         if low and not self._low_notified:
             self._low_notified = True
-            _notify("Claude Code 助手", f"余额只剩 ¥{yuan:.2f}，需要的话点「用量信息」页充值")
+            _notify(APP_NAME, f"余额只剩 ¥{yuan:.2f}，需要的话点「用量信息」页充值")
         elif not low:
             self._low_notified = False           # 充过值了，下次再跌破重新提醒
             self._prompt_shown = False
