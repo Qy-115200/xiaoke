@@ -294,6 +294,15 @@ def _repair_only(args) -> int:
                        hint="重新跑一遍安装器，或加 --new-account 领个新账号")
     if result.problem.startswith("error:"):
         raise CliError(f"对账时出错：{result.problem[6:].strip()}", EXIT_CONFIG)
+    foreign = [p for p, why in result.skipped if why == "foreign"]
+    if foreign:
+        # 这个客户端只配合我们的中转工作：终端还指着别处就是"没配好"，
+        # 不能报 0 让人以为一切正常。
+        raise CliError(
+            "有配置还指向别处，终端不会走我们的通道",
+            EXIT_CONFIG,
+            hint="加 --force 换成我们的（原来的会备份成 *.aikaui-bak，随时能换回），"
+                 "或者自己把上一条里的 ANTHROPIC_BASE_URL 改成我们的")
     if not result.ok or result.hard_problems:
         # 坏文件/软链/写不进去：不能报"修好了"。部分写成功也算失败。
         raise CliError("配置没修好（见上面逐条结果）", EXIT_CONFIG,

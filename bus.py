@@ -62,6 +62,9 @@ def poll_queue(gui):
             elif kind == "login_result":
                 # 用户点了「换设备登录」→ 绑定结果回来了
                 gui.show_login_result(data)
+            elif kind == "relay_gate":
+                # 检测到别家中转 → 用户点了"换成我们的"，切换结果回来了（ui/gate.py）
+                gui.on_relay_gate_result(data)
             elif kind == "recovery":
                 # 本地凭证没了、但 server/vault.py 里还留着上次的凭证 →
                 # 打开登录弹窗并预填好，**由用户点一下确认**才恢复。

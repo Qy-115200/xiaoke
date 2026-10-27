@@ -22,6 +22,7 @@ import updater
 from agent_core import agent_worker, balance_worker, refresh_balance
 from config import APP_NAME
 from bus import msg_queue, poll_queue
+from server import relay_gate
 from server.tools_fixed import parse_protocol_arg, parse_protocol_url, register_protocol
 from server.ui_bridge import set_ui
 from ui.gui import GUI
@@ -71,6 +72,11 @@ def main():
     gui = GUI(root)                      # 创建 GUI 对象
     set_ui(gui)                          # ★ 把 gui 注入给工具层（server/ui_bridge.py）
 
+    # ★ 队列轮询从这里就开始，而不是等 mainloop 之前那一次：下面「别人的中转」
+    #   那个模态窗是 wait_window（嵌套事件循环），它自己也得收后台线程的回话。
+    #   只在这里排一次 —— 两处都排会变成两条轮询链，越跑越多。
+    root.after(100, lambda: poll_queue(gui))
+
     # ---------- macOS：运行中收到 aikaui:// 链接 ----------
     # 回调一定在主线程（Apple Event 只在主线程分发），所以可以直接操作界面。
     def _on_url(url):
@@ -117,9 +123,29 @@ def main():
                 root.after(100, lambda: _open_recharge_when_ready(attempt + 1))
 
         root.after(300, _open_recharge_when_ready)   # 先让窗口画出来
-        root.after(100, lambda: poll_queue(gui))     # 充值结果也要靠队列回到主线程
         root.mainloop()
         return
+
+    # ---------- 别人的中转：拒绝继续 ----------
+    # 这个客户端只配合 aikaui 中转工作。终端要是还指着别处，我们既收不到那台
+    # 机器的用量，也不该继续发我们的对话额度 —— 所以拦在这里，直到换成我们的。
+    # ★ 只办充值的启动方式上面已经 return 了：那条路只付钱、不碰终端配置。
+    # ★ 读盘出错就当判断不了，不拦（不能因为一个坏文件让人开不了程序）。
+    try:
+        from server.identity import load_identity
+        gate = relay_gate.check(load_identity())
+    except Exception:
+        gate = None
+    if gate is not None and gate.blocked:
+        switched, message = gui.ask_relay_conflict(gate, relay_gate.switch_to_ours)
+        if not switched:
+            gui.write("[系统] 已退出：这台电脑上的 Claude Code 还指向别处，"
+                      "本客户端只配合 aikaui 中转使用。")
+            gui.write("       想继续用，重新打开后选「换成 aikaui 中转」，"
+                      "原来的配置会先备份成 *.aikaui-bak。")
+            root.destroy()
+            return
+        gui.write(f"[系统] {message}")
 
     # ---------- 欢迎信息 ----------
     gui.write("=" * 55)
@@ -149,7 +175,6 @@ def main():
         on_ready=lambda text: msg_queue.put(("log", f"[系统] {text}")),
     )
 
-    root.after(100, lambda: poll_queue(gui))   # 100ms 后启动第一次轮询
     root.mainloop()                      # ★ 进入 GUI 事件循环（阻塞在这里）
 
 

@@ -207,7 +207,9 @@ claude-code-assistant --repair        # 只对账配置：跟 identity.json 不�
 （[`server/claude_config.py`](server/claude_config.py) 的 `check_and_repair`）：
 
 - **只修自己的**：磁盘上的 `ANTHROPIC_BASE_URL` 与 identity 一致（或一个受管键都没有）
-  才算我们的；指向别处的不动，除非 `--repair --force`；
+  才算我们的；指向别处的不自动改（那是用户自己的东西），但也**不算配好了** ——
+  桌面版会拦下来（见下面「别人的中转」），服务器版 `--repair` 报成失败（退出码 7），
+  加 `--force` 才换成我们的；
 - **坏文件绝不覆盖**（JSON 解析不了、`env` 不是对象、路径是软链 → 跳过并说明）；
 - **没有 diff 就不写**；写之前留一份 `<文件名>.aikaui-bak`；
   `settings.json` 顶层的 `model` 不碰 —— 那是用户在 `/model` 里的选择；
@@ -218,6 +220,23 @@ claude-code-assistant --repair        # 只对账配置：跟 identity.json 不�
 都只在备份还不存在时才写它。这样用户原来那套别家中转（连同它自己的 token）
 永远留在备份里 —— 管家给的选项写着「换成我们的（原来的会备份，随时能换回）」，
 这条承诺就得对后来每一次自动修复都成立。
+
+**别人的中转：拒绝使用，除非换成我们的。** 这个客户端只配合 aikaui 中转工作 ——
+终端要是还指着别处，我们既收不到那台机器的用量，也不该继续发它对话额度。
+[`server/relay_gate.py`](server/relay_gate.py) 只看两个文件的 `env.ANTHROPIC_BASE_URL`：
+
+| 情况 | 判定 |
+|---|---|
+| 没写 base / 只写了 token | 不算（还没接别家） |
+| 与 identity 的 `api_base` 规范化后相同（带不带 `/v1` 都算） | 我们的 |
+| 是别的地址 | **拦** —— 桌面版弹窗只给「换成 aikaui 中转」和「退出」两条路 |
+| 文件坏了 / 是软链 / `env` 不是对象 | 判断不了就不拦，交给 `--repair` 报 |
+
+- 「换成 aikaui 中转」= 先备份再覆盖（`apply()`），原配置随时能换回；
+- 还没有账号时它顺带注一个（首次运行就是这样），注册失败照实说，不假装切换成功；
+- 用户选「退出」，程序直接关，**不会**起 Agent；
+- `--recharge` 那条只付钱、不碰终端配置，不拦；
+- 服务器版从来只写我们的配置，`--repair` 发现还指着别处就退出 7。
 
 **退出码**。两个程序的码各有各的含义，脚本化部署时靠它判断，别只 grep 输出：
 
@@ -241,7 +260,7 @@ claude-code-assistant --repair        # 只对账配置：跟 identity.json 不�
 | 4 | 账号：注册失败、绑账号失败、本地留着未完成注册的旧账户码却没给 `--new-account`（`--repair` 时是"本机没有账号"） |
 | 5 | Node 装不上（镜像挂了、校验失败） |
 | 6 | npm 装不上（网络、权限、包缺原生二进制） |
-| 7 | 配置写不进 `~/.claude.json` / `~/.claude/settings.json`；`--repair` 遇到坏文件或写入校验失败 |
+| 7 | 配置写不进 `~/.claude.json` / `~/.claude/settings.json`；`--repair` 遇到坏文件、写入校验失败，或者配置还指向别家中转（加 `--force` 才换成我们的） |
 
 装完 `install.sh` 会**直接进向导**，并把向导的退出码原样透传出来 ——
 所以 `curl … | sh` 返回 5/6/7 时，问题在向导那一步，照第二张表查。
@@ -252,7 +271,7 @@ claude-code-assistant --repair        # 只对账配置：跟 identity.json 不�
 
 **`install.sh` 认这几个环境变量**（都是给测试和特殊部署用的，正常安装不用管）：
 `AIKAUI_SITE`（换站点，默认 `https://aikaui.com`）、`AIKAUI_LIB`（换安装目录）、
-`AIKAUI_NO_RUN`（只装不启动）、`AIKAUI_ALLOW_ROOT=1`（允许 root）。
+`AIKAUI_NO_RUN`（只装不启动）、`AIKAUI_ALLOW_ROOT=1`（允许 root；向导那边也会被显式传上 `--allow-root`）。
 
 **边界**：一台机器一个账号 —— 同一个 `$HOME` 下的所有用户共用一份凭证，本版不做多租户。
 
@@ -366,7 +385,7 @@ macOS 两个包都**没有签名**：首次打开要右键 →「打开」，
 ```
 agent_demo/
 │
-├── main.py                       157   程序入口：先换新版本 → 建窗口 → 起线程（含配置自愈）→ 事件循环
+├── main.py                       182   程序入口：先换新版本 → 建窗口 → 别家中转就拦下 → 起线程（含配置自愈）→ 事件循环
 ├── server_main.py                474   服务器版入口：环境自检 → Node → claude → 账号 → 配置（--repair 只对账）
 │
 ├── config.py                      98   唯一的常量源：版本、服务器地址、凭证、路径、配色、更新参数、MAX_STEPS
@@ -378,7 +397,7 @@ agent_demo/
 ├── bus.py                        112   线程间队列 + poll_queue（每 100ms 把消息翻译成界面操作）
 ├── llm.py                        126   大模型客户端（走 aikaui.com 代理，用本机账号的 api_key）
 ├── agent_core.py                 285   Agent 主循环：run_one_task / agent_worker / balance_worker
-├── prompts.py                    611   系统提示词（按平台给安装指令 + 工作目录 + VSCode 询问分支 + 余额分寸）
+├── prompts.py                    614   系统提示词（按平台给安装指令 + 工作目录 + VSCode 询问分支 + 余额分寸）
 │
 ├── platform_support/                  三平台差异（调用方只 import 这个包）
 │   ├── __init__.py               122   按 sys.platform 延迟加载并转发
@@ -392,13 +411,14 @@ agent_demo/
 │   ├── cli.py                    335   服务器版共用的地基：退出码、子进程封装、sha256、安全解包、shell PATH 块、HttpClient
 │   ├── console_ui.py             128   终端里的进度实现（实现 ui_bridge 那几个钩子，不阻塞、没 tty 也不卡住）
 │   ├── node_setup.py             346   Node 检测 / 选 LTS / 从 npmmirror 下载校验 / 解到 ~/.local/node / 软链命令
-│   ├── claude_setup.py           231   npm install -g --prefix ~/.local（清掉继承的 npm_config_*，显式 --include=optional）
+│   ├── claude_setup.py           379   npm install -g --prefix ~/.local（清掉继承的 npm_config_*，显式 --include=optional；原生包没下来时单独补装）
 │   ├── identity.py               515   设备指纹、PoW 注册、本地凭证、换设备登录、_ensure_account_code / _ensure_user_id、pending_recovery
 │   ├── fingerprint.py            147   硬件指纹：主板序列号 + CPU ID → SHA-256 前 32 位（不是凭据，只在注册时上报）
 │   ├── vault.py                  213   凭证的"第二份"：账户码存注册表（DPAPI 加密）/ 配置目录
 │   ├── pow.py                    128   PoW 求解（进度 / 取消 / 90 秒超时），和服务器 pow.js 逐位对齐
 │   ├── api.py                    504   余额 / 用量 / 充值 HTTP 层（永远不抛异常）
 │   ├── claude_config.py          495   把身份写进两份配置 + 事后对账自愈（坏文件不覆盖、外家中转不碰）
+│   ├── relay_gate.py             119   别家中转的判定：有 base 且不是我们的就拦住（不 import 界面，可离线测）
 │   ├── tools_fixed.py            148   五个固定工具 + aikaui:// 协议注册（转发 platform_support）
 │   ├── tools_general.py          125   bash / read_file / write_file / ask_user（解码和杀进程树在 platform_support.common）
 │   ├── tools_vscode.py           246   check_vscode / install_vscode / install_claude_extension / open_vscode（连 Claude 面板一起开）
@@ -406,13 +426,14 @@ agent_demo/
 │
 ├── ui/                                界面层
 │   ├── fonts.py                  179   全界面字体表：按平台选字体 + 字号常量 + 画布缩放
-│   ├── gui.py                     27   class GUI(WindowMixin, OptionsMixin, RechargeMixin, UsageMixin, LoginMixin, AccountMixin)
+│   ├── gui.py                     31   class GUI(WindowMixin, OptionsMixin, RechargeMixin, UsageMixin, LoginMixin, AccountMixin, GateMixin)
 │   ├── window.py                 513   WindowMixin：窗口壳、左侧导航、对话页、底部询问条、余额回流
 │   ├── usage.py                  625   UsageMixin：用量信息页（余额卡 + 两张按模型的时间分布图 + 充值入口）
 │   ├── account.py                272   AccountMixin：账户信息页（账户码 / 密钥打码、眼睛、复制、防泄露红字）
 │   ├── options.py                219   OptionsMixin：ask_user 选项面板（点击 / ↑↓ / 回车 / Esc）
 │   ├── recharge.py               627   RechargeMixin：充值弹窗两页 + 创单 + 付款后刷新 + 只办充值时的靠右定位
-│   └── login.py                  323   LoginMixin：换设备登录弹窗（账户码 + 账户密钥；也承担"本地凭证丢了"时的自动找回）
+│   ├── login.py                  323   LoginMixin：换设备登录弹窗（账户码 + 账户密钥；也承担"本地凭证丢了"时的自动找回）
+│   └── gate.py                   156   GateMixin：检测到别家中转时的模态窗（换成我们的 / 退出）
 │
 ├── build_tools/
 │   ├── make_version_info.py       80   生成 Windows 文件版本信息（build/version_info.txt）
@@ -435,8 +456,9 @@ agent_demo/
 │   ├── test_tool_specs.py             tools[] 和 tool_map 一一对上
 │   ├── test_server_cli.py             服务器版：参数、退出码、--dry-run 不落地、无 TTY 不阻塞、不重复注册、密钥不进报错
 │   ├── test_claude_config.py          配置自愈：没 diff 不写、坏文件不覆盖、外家中转不碰、顶层 model 不动、日志不含 token
+│   ├── test_relay_gate.py             别家中转一律拦：带不带 /v1 都认得出、坏文件不拦、切换留备份、文字不含 token
 │   ├── test_node_setup.py             Node 选版本 / 资产名 / SHASUMS / 校验失败 / PATH 块只写一次
-│   ├── test_claude_setup.py           npm argv 精确 / npm_config_* 被清掉 / 失败映射到 6
+│   ├── test_claude_setup.py           npm argv 精确 / npm_config_* 被清掉 / 失败映射到 6 / 原生包没下来时补装
 │   ├── test_console_ui.py             终端进度条：管道里不打 \r、静默模式、流坏了不抛
 │   ├── test_install_sh.py             真跑 sh：假 curl + 真 tar，装到哪、校验失败退几、包里有 ../ 会不会接
 │   ├── test_updater_linux_payload.py  server.spec / CI 矩阵 / updater 还认得这个包

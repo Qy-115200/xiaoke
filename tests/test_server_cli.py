@@ -340,15 +340,29 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(self.run_repair(), EXIT_CONFIG)
         self.assertEqual(self.config.read_text(encoding="utf-8"), "{ broken")
 
-    def test_foreign_provider_is_reported_not_forced(self):
+    def test_foreign_provider_is_a_failure_not_silence(self):
+        """指向别人的中转 = 没配好。以前这里返回 0，等于告诉用户"一切正常"，
+        可终端根本不会走我们的通道（用户 52 就是这么漏过去的）。"""
         self.settings.parent.mkdir(parents=True)
         self.settings.write_text(json.dumps(
             {"env": {"ANTHROPIC_BASE_URL": "https://example.invalid"}}), encoding="utf-8")
         raw = self.settings.read_bytes()
-        self.assertEqual(self.run_repair(), EXIT_OK)
-        self.assertEqual(self.settings.read_bytes(), raw)
+        self.assertEqual(self.run_repair(), EXIT_CONFIG)
+        self.assertEqual(self.settings.read_bytes(), raw)      # 不加 --force 不动它
         self.assertFalse(self.config.exists(),
                          "另一份是别人的中转，不能顺手再建一份我们的配置")
+
+    def test_force_takes_over_and_keeps_a_backup(self):
+        self.settings.parent.mkdir(parents=True)
+        self.settings.write_text(json.dumps(
+            {"env": {"ANTHROPIC_BASE_URL": "https://example.invalid",
+                     "ANTHROPIC_AUTH_TOKEN": "sk-theirs"}}), encoding="utf-8")
+        self.assertEqual(self.run_repair("--force"), EXIT_OK)
+        merged = json.loads(self.settings.read_text(encoding="utf-8"))["env"]
+        self.assertEqual(merged["ANTHROPIC_BASE_URL"], "https://aikaui.com")
+        bak = self.settings.with_name(self.settings.name + ".aikaui-bak")
+        self.assertEqual(json.loads(bak.read_text(encoding="utf-8"))["env"]
+                         ["ANTHROPIC_BASE_URL"], "https://example.invalid")
 
     def test_missing_base_is_exit_7(self):
         self.assertEqual(self.run_repair(identity={"api_key": "k"}), EXIT_CONFIG)
