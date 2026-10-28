@@ -87,6 +87,10 @@ EXCLUDES = [
     "tkinter", "_tkinter", "customtkinter", "PIL", "Pillow",
     "ui", "images", "deps",
     # ★ `helpers` 不在排除之列：term_render 要用它的选项语义（见文件头说明）。
+    # 桌面版的提示词和 tk 版的消息队列：agent_core 里那句 `from prompts import …`
+    # 在 `agent_worker()` 里，服务器版从不调它。排掉省得把 VSCode/托盘那一大段
+    # （以及 `bus` 拖进来的 tkinter）带进包。
+    "bus", "prompts",
     # 桌面版专属
     "updater", "notify",
     "platform_support.windows", "platform_support.macos", "win32com", "winreg",

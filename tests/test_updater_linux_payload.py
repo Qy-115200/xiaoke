@@ -86,6 +86,22 @@ class ServerSpecTests(unittest.TestCase):
             with self.subTest(pkg=pkg):
                 self.assertIn(pkg, self.collected)
 
+    def test_the_desktop_prompt_and_tk_queue_stay_out(self):
+        """`prompts`（整篇讲桌面/VSCode）和 `bus`（拖 tkinter）都不该进服务器包。
+
+        ★ 这两条容易悄悄漏：`agent_core` 里确实写了 `from prompts import …`，
+          只是挪进了 `agent_worker()`。PyInstaller 的静态分析跟得到**缩进后的**
+          import（apply_hidden_imports 之后一样会收），所以这里连"是不是写在
+          函数里"一起断言 —— 上一次 CI 产物里 `prompts` 就在包里。"""
+        for mod in ("prompts", "bus"):
+            with self.subTest(mod=mod):
+                self.assertIn(mod, self.excludes)
+        src = (ROOT / "agent_core.py").read_text(encoding="utf-8")
+        for line in src.splitlines():
+            if re.match(r"(from|import)\s+(prompts|bus)\b", line):
+                self.fail(f"agent_core.py 顶层 import 了 {line.strip()!r}；"
+                          "冻结包里会 ModuleNotFoundError")
+
     def test_new_server_modules_are_hidden_imports(self):
         """这些模块是函数里 import 的，PyInstaller 的静态分析跟不到。"""
         for mod in ("agent_bus", "agent_core", "llm",
