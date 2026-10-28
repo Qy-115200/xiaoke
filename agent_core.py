@@ -143,10 +143,11 @@ def run_one_task(messages, task_text, *, tools=None, tool_map=None,
             reason = insufficient_balance(e)
             if reason:
                 _mark(status, "balance", reason)
+                # ★ 这句话两边共用（桌面版 / 服务器版），所以只写"怎么解决"的公共部分：
+                #   桌面版自己会冒「立即充值」的按钮，服务器版自己会打印 --recharge。
                 emit(("log", (
-                    f"\n[系统] {reason}，模型暂时用不了了。\n"
-                    f"       点下面「立即充值」（或左边「用量信息」页右上角），扫码付完款，"
-                    f"把刚才那句话再发一次就行。"
+                    f"\n[系统] {reason}，模型暂时用不了。"
+                    f"充值之后再试（桌面版点「立即充值」，服务器版用 --recharge）。"
                 )))
                 emit(("recharge", {"reason": reason}))
             else:

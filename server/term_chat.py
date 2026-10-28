@@ -33,16 +33,23 @@ ABORTED = "已中断。"
 
 
 class Outcome:
-    """一次会话怎么结束的。"""
+    """一次会话怎么结束的。
 
-    __slots__ = ("aborted", "error")
+    aborted  用户按了两次 Ctrl-C / Ctrl-D
+    error    收场时要说给用户听的一句话（成功是 None）
+    exit_code 带出去给 `main()` 用的退出码
+    """
 
-    def __init__(self, aborted=False, error=None):
+    __slots__ = ("aborted", "error", "exit_code")
+
+    def __init__(self, aborted=False, error=None, exit_code=None):
         self.aborted = bool(aborted)
         self.error = error
+        self.exit_code = exit_code
 
     def __repr__(self):
-        return f"Outcome(aborted={self.aborted}, error={self.error!r})"
+        return (f"Outcome(aborted={self.aborted}, error={self.error!r}, "
+                f"exit_code={self.exit_code!r})")
 
 
 # ================= 纯状态机（离线可测）=================
@@ -506,10 +513,6 @@ class TerminalChat:
             self._busy_text = label
         elif kind == "recovered":
             self._commit("    服务器认出了你原来的账号，余额已经还回来了。")
-        elif kind == "recharge":
-            reason = (data or {}).get("reason") or "余额不足"
-            self._commit(f"\n[系统] {reason}。装完可以用 `ClaudeCodeAssistant --recharge 20` "
-                         f"扫码充值。")
         elif kind == "done":
             self._done = data if isinstance(data, Outcome) else Outcome()
             return
@@ -534,11 +537,20 @@ class TerminalChat:
             self._commit(R.dim_line(ABORT_ARMED, self._size()[0]))
         elif kind == "abort":
             self._deliver("（用户中断）")
+            self._wake_worker()
             self._done = Outcome(aborted=True)
         elif kind == "eof":
             self._deliver("（用户退出）")
+            self._wake_worker()
             self._done = Outcome(aborted=True)
         self._redraw()
+
+    def _wake_worker(self):
+        """万一工作线程正停在"等用户打字"上，把它叫醒，别留一个挂死的线程。"""
+        try:
+            user_input_queue.put(None)
+        except Exception:
+            pass
 
     def _handle_keys(self, data):
         for kind, value in self._decoder.feed(data):

@@ -58,7 +58,7 @@ def _fail(err) -> str:
 
 # ================= 验收 =================
 
-def _config_problems(config_path=None, settings_path=None) -> list:
+def config_problems(config_path=None, settings_path=None) -> list:
     """两份配置是不是真的写对了。只报**缺哪个键**，绝不带值。"""
     problems = []
     config_path = Path(config_path or CLAUDE_CONFIG)
@@ -166,7 +166,7 @@ def build_tools(ctx, args, state, ui=None):
         ident = identity.load_identity()
         if not ident:
             problems.append("本机还没有账号凭证（这个不该发生，让用户重跑一次安装器）")
-        problems.extend(_config_problems())
+        problems.extend(config_problems())
 
         if problems:
             state["finished"] = False
