@@ -202,9 +202,9 @@ jobs:
             echo "部署在本机跑（runner 上行只有 ~17KB/s，传不动）："
             echo
             echo '```bash'
-            echo "gh release download ${GITHUB_REF_NAME} --dir release"
+            echo "python build_tools/fetch_release.py ${GITHUB_REF_NAME} --dir release"
             echo "DEPLOY_HOST=… DEPLOY_USER=root DEPLOY_SSH_KEY=… \\"
-            echo "  NOTES=\"\$(git tag -l --format='%(contents:subject)' ${GITHUB_REF_NAME})\" \\"
+            echo "  NOTES=\"\$(git tag -l --format='%(contents)' ${GITHUB_REF_NAME})\" \\"
             echo "  bash build_tools/deploy_downloads.sh ${GITHUB_REF_NAME#v} ./release"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

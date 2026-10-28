@@ -173,6 +173,11 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("gh release view", self.text)
         self.assertIn("--clobber", self.text)
 
+    def test_summary_tells_you_the_command_that_works_here(self):
+        """这台机器上没有 gh CLI，摘要里给的命令必须是仓库自带的那个脚本。"""
+        self.assertIn("build_tools/fetch_release.py", self.text)
+        self.assertTrue((ROOT / "build_tools" / "fetch_release.py").is_file())
+
 
 class ExtractTests(unittest.TestCase):
     """用真的 tar 跑一遍 updater 的解包逻辑（它和客户端同一份代码）。"""

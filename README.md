@@ -417,9 +417,11 @@ python -m PyInstaller server.spec --noconfirm --clean    # Linux（服务器版�
 `./dist/ClaudeCodeAssistant --version` 和 `--help` —— 这两条能过就说明没有把 tkinter 拖进来、
 `lzma` 也在，省得下载下来才发现跑不起来。
 
-产物有两个去处：**GitHub Release**（打 tag 时 `release` job 挂上去，`gh release download`
-一条命令就能拿回本机）和 Actions artifact（保留 30 天）。**CI 不部署到服务器** —— 见上面
-「发布新版本」里的分工表和原因；Actions 的摘要页也会写清楚「线上还没变，部署在本机跑」。
+产物有两个去处：**GitHub Release**（打 tag 时 `release` job 挂上去，本机用
+`python build_tools/fetch_release.py v1.0.1 --dir release` 取回来 —— 装了 `gh` 的话
+`gh release download v1.0.1 --dir release` 等价）和 Actions artifact（保留 30 天）。
+**CI 不部署到服务器** —— 见上面「发布新版本」里的分工表和原因；Actions 的摘要页也会
+写清楚「线上还没变，部署在本机跑」。
 
 macOS 两个包都**没有签名**：首次打开要右键 →「打开」，
 或者终端跑 `xattr -dr com.apple.quarantine /Applications/ClaudeCodeAssistant.app`。
@@ -453,8 +455,8 @@ macOS 两个包都**没有签名**：首次打开要右键 →「打开」，
 **发布新版本**
 
 1. 改 `config.py` 里的 `APP_VERSION`，跑一遍 `python -m unittest discover -s tests`，提交。
-2. 打**注释** tag（必须与 `APP_VERSION` 一致，CI 会校验），标题写一句人话 —— 它会一路变成
-   `latest.json` 里的 `notes`：
+2. 打**注释** tag（必须与 `APP_VERSION` 一致，CI 会校验），正文写这版改了什么 ——
+   **整个正文**会变成 GitHub Release 的说明和 `latest.json` 里的 `notes`，只维护这一份：
 
    ```bash
    git tag -a v1.0.1 -F - <<'EOF'
@@ -465,12 +467,14 @@ macOS 两个包都**没有签名**：首次打开要右键 →「打开」，
    ```
 
 3. CI 在四个 runner 上并行构建，然后由 `release` job 把四个产物挂到 **GitHub Release** 上。
-   **CI 不部署**——见下面那张分工表。
-4. 在本机部署。产物从 Release 下（`gh release download v1.0.1 --dir release`），然后：
+   **CI 不部署**——见下面那张分工表。Actions 摘要页会写「线上还没变」。
+4. 在本机部署。先把产物取回来（本机没装 `gh` CLI，用仓库里的脚本；装了的话
+   `gh release download v1.0.1 --dir release` 等价），然后：
 
    ```bash
+   python build_tools/fetch_release.py v1.0.1 --dir release
    DEPLOY_HOST=… DEPLOY_USER=root DEPLOY_SSH_KEY=… \
-     NOTES="$(git tag -l --format='%(contents:subject)' v1.0.1)" \
+     NOTES="$(git tag -l --format='%(contents)' v1.0.1)" \
      bash build_tools/deploy_downloads.sh 1.0.1 ./release
    ```
 
@@ -574,6 +578,7 @@ agent_demo/
 ├── build_tools/
 │   ├── make_version_info.py       80   生成 Windows 文件版本信息（build/version_info.txt）
 │   ├── make_manifest.py          113   四个产物 → latest.json（校验版本、算 sha256 / size）
+│   ├── fetch_release.py               从 GitHub Release 取回四个产物（本机没有 gh CLI）
 │   └── deploy_downloads.sh            发布：传 nginx + 传 COS → 两边验大小 → 换清单 → 改下载页版本号
 ├── tests/                            离线单元测试（stdlib unittest）
 │   ├── test_version.py                版本解析 / 比较 / 清单校验
