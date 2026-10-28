@@ -508,7 +508,7 @@ agent_demo/
 │   ├── __init__.py               122   按 sys.platform 延迟加载并转发
 │   ├── common.py                 230   safe_cwd（HOME 越界检查）、find_claude、clean_env、跑子进程抓输出、VSCode 值解析
 │   ├── windows.py                438   注册表协议 / .lnk / cmd / WinRT toast / VSCode 探测 + winget 安装
-│   ├── macos.py                  305   Info.plist 协议 + Apple Event / 符号链接 / Terminal.app / VSCode 探测 + brew 安装
+│   ├── macos.py                  425   Info.plist 协议 + Apple Event / .command 快捷方式 / Terminal.app / VSCode 探测 + brew 安装
 │   └── linux.py                  314   .desktop + xdg-mime / 终端探测 / notify-send / VSCode 探测（安装只开下载页）
 │
 ├── server/                            服务端与工具层（不 import 界面）
@@ -838,7 +838,9 @@ Windows 上用一次 PowerShell 的 `Get-CimInstance` 读，非 Windows 或取�
 - **服务器版一台机器一个账号。** 凭证在 `$HOME` 下，同一个 `$HOME` 的多个用户共用一份；
   不做多租户，也不支持同一台机器上切换多个账户码。
 - **三平台功能一致，但细节依赖系统**。Windows 的快捷方式是 `.lnk`、协议写注册表；
-  macOS 的协议写在 Info.plist 里、链接靠 pyobjc 收 Apple Event、快捷方式是桌面符号链接；
+  macOS 的协议写在 Info.plist 里、链接靠 pyobjc 收 Apple Event、快捷方式是桌面的
+  `Claude Code.command`（双击由 Terminal 执行；脚本会自己补 PATH、出错时停住等按键，
+  见 `platform_support/macos.py` 的 `_SHORTCUT_TEMPLATE`）；
   Linux 的协议靠 `.desktop` + `xdg-mime`、快捷方式也是 `.desktop`。桌面图标和终端启动
   各平台的实现见 `platform_support/`；Linux 没装终端模拟器时会明确报失败，不会假装成功。
 - **macOS 包没有签名**。首次打开要右键 →「打开」，或 `xattr -dr com.apple.quarantine`；

@@ -4,7 +4,7 @@
 几个和 Windows 不一样的地方：
 - aikaui:// 不是注册表，而是打包时写进 Info.plist；链接由 LaunchServices 以
   Apple Event（kAEGetURL）送进来，必须用 pyobjc 装一个处理器才收得到。
-- 桌面"快捷方式"用符号链接（或退化成 .command 脚本），没有 .lnk。
+- 桌面"快捷方式"是 .command 脚本（双击由 Terminal.app 打开），没有 .lnk。
 - 终端是 Terminal.app，用 osascript 让它执行命令。
 """
 
@@ -111,38 +111,144 @@ def _as_applescript_string(s: str) -> str:
 
 # ================= 快捷方式 / 启动终端 =================
 
+SHORTCUT_NAME = "Claude Code.command"
+
+# 双击 .command 时 macOS 起的是**非登录 shell**：不读 ~/.zshrc、~/.bash_profile，
+# PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin。npm 全局装的 claude
+# （~/.npm-global/bin/claude）在里面根本不存在，脚本秒退、终端窗口跟着关掉 ——
+# 用户看到的就是"一闪而过，什么都没说"。
+# 下面这个脚本把该补的都补上，并且**不管成败都停在原地**等一次按键。
+#
+# ★ 不用 `exec claude`：exec 会把 bash 换成 claude，trap 再也不会执行，
+#   而"等按键"正是靠 trap 兜住的。老版本就是 exec，所以窗口留不住。
+#
+# ★ 用 printf 不用 `echo -e`：echo 的行为由 shell 实现决定（macOS 的
+#   /bin/sh 里 -e 会被原样打出来），printf 到处一样。
+#
+# @@CLAUDE@@ 会被换成 shlex.quote 过的绝对路径。别写成 `{claude}` 再 .format()：
+# 脚本里全是 ${PATH} 这种花括号，会撞车。
+_SHORTCUT_TEMPLATE = r"""#!/bin/bash
+# 由 Claude Code 安装助手生成。删掉它不影响 claude 本身，随时可以重建。
+
+echo "正在启动 Claude Code，请稍候…"
+
+# 1) 把常见的安装目录顶到最前面。这一步不依赖任何 rc 文件，最可靠。
+export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+# 2) 用户的 rc 里可能有 nvm / fnm / 自定义 PATH。只在文件存在时读，
+#    读失败也不影响启动（`|| true` 让 set -e 不在这里生效）。
+#    注意 .zshrc 是 zsh 语法，用 bash 读会报错 —— 所以输出全部丢进 /dev/null。
+if [ -f "$HOME/.zshrc" ]; then
+    source "$HOME/.zshrc" >/dev/null 2>&1 || true
+elif [ -f "$HOME/.bash_profile" ]; then
+    source "$HOME/.bash_profile" >/dev/null 2>&1 || true
+fi
+
+# 3) rc 里如果写了 export PATH=…，会把上面补的直接覆盖掉，所以再补一次。
+export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+# 4) 优先用生成这一刻记下的绝对路径（它最准）；路径被挪走了再退回 PATH 查找。
+CLAUDE=@@CLAUDE@@
+if [ ! -x "$CLAUDE" ]; then
+    CLAUDE="$(command -v claude 2>/dev/null || true)"
+fi
+
+# 5) 不管成功还是失败都停在原地：说清楚怎么回事，等一次按键再关窗口。
+cleanup() {
+    code=$?
+    if [ "$code" -eq 127 ]; then
+        printf '\033[31;1m✖ 找不到 claude 命令\033[0m\n' >&2
+    elif [ "$code" -ne 0 ]; then
+        printf '\033[31;1m✖ Claude Code 异常退出（退出码 %s）\033[0m\n' "$code" >&2
+    fi
+    if [ "$code" -ne 0 ]; then
+        printf '  脚本找到的 claude：%s\n' "${CLAUDE:-（PATH 里也没有）}" >&2
+        printf '  PATH 前 6 项：%s\n' "$(printf '%s' "$PATH" | cut -d: -f1-6)" >&2
+        printf '  把上面两行发给客服，能看出是路径问题还是别的。\n' >&2
+    fi
+    printf '\n按任意键关闭此窗口…'
+    read -r -n 1 -s || true
+    printf '\n'
+    exit "$code"
+}
+
+set -e
+trap cleanup EXIT
+
+if [ -z "$CLAUDE" ] || [ ! -x "$CLAUDE" ]; then
+    exit 127
+fi
+
+# 6) 在用户主目录里启动。Finder 默认把 .command 的工作目录设在桌面上，
+#    对 claude 来说主目录更合适（不会一上来就把桌面当成项目）。
+cd "$HOME" || true
+
+"$CLAUDE"
+"""
+
+
+def _shortcut_script(claude_path: str) -> str:
+    """生成 .command 的内容。绝对路径用 shlex.quote 转义后嵌进去。"""
+    return _SHORTCUT_TEMPLATE.replace("@@CLAUDE@@", shlex.quote(str(claude_path)))
+
+
+def _refresh_finder() -> None:
+    """让 Finder 立刻重建桌面图标。
+
+    新建的文件 Finder 有时要等一会儿才显示，用户看到的是"没图标"。
+    `killall Finder` 会让它自动重启（macOS 的 launchd 会拉起来），
+    代价是**所有 Finder 窗口会关掉一次** —— 用户点名要的就是这个效果，
+    但失败绝对不能影响安装结果，所以整段吞异常。
+    """
+    try:
+        subprocess.Popen(["killall", "Finder"],
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
 def create_shortcut() -> str:
-    """在桌面放一个 Claude Code 的入口。"""
+    """在桌面放一个 Claude Code 的入口：双击打开 Terminal 并在里面跑 claude。
+
+    ★ 为什么不再建指向 claude 的符号链接：那东西双击同样是"起终端、秒退"，
+      而且没地方等按键、看不到错误码。.command 是唯一能停下来说清楚
+      哪里错了的形态，所以现在**只用它**。老版本留下的同名符号链接会顺手清掉，
+      免得桌面上出现两个 "Claude Code"。
+    """
     claude_path = find_claude_path()
     if not claude_path:
         return "找不到 claude 命令，可能没装好"
 
-    desktop = desktop_dir()
+    # desktop_dir() 本身不该失败，但它的结果直接决定写哪个目录 —— 一起兜住，
+    # 让调用方永远拿到一句话而不是异常（这是 Agent 的工具，抛异常只会变成
+    # 一句"工具出错"，用户看不出发生了什么）。
     try:
+        desktop = desktop_dir()
         desktop.mkdir(parents=True, exist_ok=True)
     except Exception as e:
         return f"创建桌面快捷方式失败：{e}"
 
-    target = desktop / "Claude Code"
-    try:
-        if target.is_symlink() or target.exists():
-            target.unlink()
-        os.symlink(claude_path, target)
-        return f"已创建桌面快捷方式：{target}"
-    except Exception:
-        pass
+    legacy = desktop / "Claude Code"
+    if legacy.is_symlink():
+        try:
+            legacy.unlink()
+        except Exception:
+            pass
 
-    # 符号链接失败（少见）→ 退化成双击可运行的 .command
+    cmd = desktop / SHORTCUT_NAME
     try:
-        cmd = desktop / "Claude Code.command"
-        cmd.write_text(
-            "#!/bin/bash\nexec " + shlex.quote(claude_path) + "\n",
-            encoding="utf-8",
-        )
+        # newline="\n" 是必须的：在 Windows 上生成（或跑测试）时不能写进 CRLF，
+        # bash 遇到 CR 会以为命令名结尾带 ^M，报 "bad interpreter"。
+        cmd.write_text(_shortcut_script(claude_path),
+                       encoding="utf-8", newline="\n")
         cmd.chmod(0o755)
-        return f"已创建桌面快捷方式：{cmd}"
     except Exception as e:
         return f"创建桌面快捷方式失败：{e}"
+
+    _refresh_finder()
+    return f"已创建桌面快捷方式：{cmd}"
+
 
 
 def launch_claude(directory: str = "") -> str:

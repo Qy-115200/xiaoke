@@ -128,7 +128,7 @@ def set_model_config() -> str:
 
 
 def create_shortcut() -> str:
-    """在桌面创建 Claude Code 快捷方式（Windows: .lnk / macOS: 符号链接 / Linux: .desktop）"""
+    """在桌面创建 Claude Code 快捷方式（Windows: .lnk / macOS: .command / Linux: .desktop）"""
     return platform_support.create_shortcut()
 
 
