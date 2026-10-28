@@ -217,6 +217,26 @@ def _norm_options(options):
     return out
 
 
+# 服务器版（server/term_render.py）也要用同一套清洗规则。这里给一个公开别名，
+# 别再抄一份 —— 两个界面把模型给的选项洗成两种样子是很难查的毛病。
+norm_options = _norm_options
+
+
+def resolve_option(text, labels):
+    """用户直接打了 "2" 这种序号 → 还原成对应的选项文字。
+
+    `labels` 是不含"自己打字"那一行的选项列表（编号和界面上的 1、2、3 对齐）。
+    不是纯序号、或者序号越界，就原样返回。"""
+    labels = list(labels or [])
+    m = re.fullmatch(r"\s*(\d{1,2})\s*[\.\、\．\)\）]?\s*", str(text or ""))
+    if not m:
+        return text
+    n = int(m.group(1))
+    if 1 <= n <= len(labels):
+        return labels[n - 1]
+    return text
+
+
 def _mask_secret(value, keep=4, mask_len=24) -> str:
     """把凭证打码给人看：保留前 keep 位，其余换成 *。
 

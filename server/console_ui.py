@@ -5,9 +5,10 @@
 注册 / 算力校验时会回调几个钩子（`ui_progress_start` / `ui_pow_progress` …），
 桌面版把这些钩子转成界面动作，服务器版只需要把字打到终端上。
 
-★ 这里只实现**不阻塞**的钩子。桌面版的 `ui_ask` 会卡在 `input_event.wait()` 上，
-  服务器版不用它：CLI 该问什么直接在 `server_main.py` 里 `input()`。
-  留着 `ask()` 只是为了防止以后有人误把工具层搬过来时 AttributeError。
+★ 这里只实现**不阻塞**的钩子。真终端里走的是 `server/term_chat.py`（`make_ui()`
+  会挑），这个类只在没有 tty 的地方兜底：管道、CI、Dockerfile 里的 `--yes`。
+  所以 `ui_ask` 在这里必须**不能等**：`--yes` 自动选第一项，没 tty 就直接回
+  「没有终端可以回答」，绝不挂在输入上。
 """
 
 import os
@@ -33,9 +34,10 @@ def _width(text: str) -> int:
 class ConsoleUI:
     """最小可用的 ui_bridge 替身。"""
 
-    def __init__(self, stream=None, verbose: bool = True):
+    def __init__(self, stream=None, verbose: bool = True, auto: bool = False):
         self.stream = stream or sys.stdout
         self.verbose = verbose
+        self.auto = bool(auto)      # --yes：提问时自动选第一项
         self._last_len = 0          # 上一次进度行占了几个字符，擦行要用
         self._last_pct = -1
         self._last_at = 0.0
@@ -71,7 +73,10 @@ class ConsoleUI:
         self._clear_line()
 
     def ui_pow_progress(self, text: str = "", pct=None):
-        """算力校验的进度。真终端里就地刷新一行，管道里每 10% 打一行。"""
+        """算力校验的进度。真终端里就地刷新一行，管道里每 10% 打一行。
+
+        ★ pct 是 **0~1**（`server/identity.py` 传的就是 `min(0.99, …)`），
+          不是 0~100。以前这里按百分数算，屏幕上从头到尾都是 0%。"""
         if not self.verbose:
             return
         tty = _is_tty(self.stream)
@@ -79,8 +84,8 @@ class ConsoleUI:
             self.ui_progress_start(text)
             return
         try:
-            pct = max(0, min(100, int(pct)))
-        except Exception:
+            pct = max(0, min(100, int(round(float(pct) * 100))))
+        except (TypeError, ValueError):
             pct = 0
 
         if tty:
@@ -110,19 +115,37 @@ class ConsoleUI:
         """桌面版这里会重置 LLM 客户端；服务器版不用模型，什么都不做。"""
         pass
 
-    # ---------- 兜底：有人真调 ui_ask 时不至于炸 ----------
-    def ask(self, question: str, options=None) -> str:
-        if options:
-            for i, opt in enumerate(options, 1):
-                self._write(f"  {i}. {opt}")
+    # ---------- 提问 ----------
+    def ui_ask(self, question: str, options=None) -> str:
+        """`tools_general.ask_user` 调的钩子（真终端里由 term_chat 实现）。
+
+        这里是兜底路径，**三条出路都不许卡住**：
+          · `--yes` 且给了选项 → 自动选第一项，并打一行 `[自动]` 留痕；
+          · 没有 tty（管道 / CI / Dockerfile）→ 直说没法回答；
+          · 有 tty → 读一行（这才是唯一会等人的情况）。
+        """
+        options = [str(o) for o in (options or [])]
+        self._clear_line()
+        self._write(str(question))
+        for i, opt in enumerate(options, 1):
+            self._write(f"  {i}. {opt}")
+
+        if options and self.auto:
+            self._write(f"[自动] 选了：{options[0]}")
+            return f"用户回答：{options[0]}"
+        if not _is_tty(sys.stdin):
+            self._write("[跳过] 没有终端可以回答，按默认继续")
+            return "用户回答：（没有终端可以回答，请按默认方式处理）"
         try:
-            answer = input(f"{question} > ") if _is_tty(sys.stdin) else ""
+            answer = input("你的选择 > " if options else "> ")
         except (EOFError, KeyboardInterrupt):
-            answer = ""
-        return f"用户回答：{answer}"
+            return "用户回答：（没有回答，请按默认方式处理）"
+        return f"用户回答：{answer.strip()}"
+
+    ask = ui_ask          # 老名字，别再直接调
 
 
-def make_console_ui(stream=None) -> ConsoleUI:
+def make_console_ui(stream=None, auto=False) -> ConsoleUI:
     """按环境变量决定要不要啰嗦：`AIKAUI_QUIET=1` 只打错误。"""
     quiet = os.environ.get("AIKAUI_QUIET", "").strip() not in ("", "0", "false")
-    return ConsoleUI(stream=stream, verbose=not quiet)
+    return ConsoleUI(stream=stream, verbose=not quiet, auto=auto)

@@ -11,7 +11,6 @@
 拦掉输入框自己的光标移动行为。
 """
 
-import re
 import tkinter as tk
 
 import customtkinter as ctk
@@ -28,7 +27,7 @@ from config import (
     PANEL,
     TEXT,
 )
-from helpers import _norm_options
+from helpers import _norm_options, resolve_option
 from ui.fonts import S_BODY, S_SMALL, font
 
 
@@ -181,14 +180,8 @@ class OptionsMixin:
         """用户直接打 "2" 这种序号 → 还原成对应的选项文字"""
         if not self.option_rows:
             return text
-        m = re.fullmatch(r"\s*(\d{1,2})\s*[\.\、\．\)\）]?\s*", text)
-        if m:
-            n = int(m.group(1))
-            if 1 <= n <= len(self.option_rows):
-                row = self.option_rows[n - 1]
-                if not row["free"]:
-                    return row["text"]
-        return text
+        labels = [row["text"] for row in self.option_rows if not row["free"]]
+        return resolve_option(text, labels)
 
     # ---------- 键盘事件 ----------
 

@@ -29,25 +29,33 @@ class ConsoleUITests(unittest.TestCase):
         # 但少得不明不白 —— 这里钉死接口。
         ui = ConsoleUI(stream=FakeStream())
         for name in ("ui_log", "ui_progress_start", "ui_progress_stop",
-                     "ui_pow_progress", "ui_recovered", "on_token_acquired", "ask"):
+                     "ui_pow_progress", "ui_recovered", "on_token_acquired",
+                     "ui_ask"):
             with self.subTest(name=name):
                 self.assertTrue(callable(getattr(ui, name, None)))
 
     def test_pow_progress_piped_writes_occasionally(self):
         s = FakeStream(tty=False)
         ui = ConsoleUI(stream=s)
-        for pct in range(0, 101):
-            ui.ui_pow_progress("算力校验", pct)
+        for i in range(0, 101):
+            ui.ui_pow_progress("算力校验", i / 100)
         lines = [ln for ln in s.getvalue().splitlines() if ln.strip()]
-        # 100 次里不能全打出来，但也要有进度
+        # 101 次里不能全打出来，但也要有进度
         self.assertLess(len(lines), 20)
         self.assertGreater(len(lines), 0)
         self.assertIn("100%", s.getvalue())
 
+    def test_pow_progress_takes_a_fraction(self):
+        """identity.py 传的是 0~1；以前这里按 0~100 算，屏幕上一直显示 0%。"""
+        s = FakeStream(tty=True)
+        ui = ConsoleUI(stream=s)
+        ui.ui_pow_progress("算力校验", 0.5)
+        self.assertIn("50%", s.getvalue())
+
     def test_pow_progress_tty_stays_on_one_line(self):
         s = FakeStream(tty=True)
         ui = ConsoleUI(stream=s)
-        for pct in (0, 50, 100):
+        for pct in (0, 0.5, 1.0):
             ui.ui_pow_progress("算力校验", pct)
         text = s.getvalue()
         self.assertNotIn("\n", text)          # 全在原地刷新
@@ -58,7 +66,7 @@ class ConsoleUITests(unittest.TestCase):
         ui = ConsoleUI(stream=s, verbose=False)
         ui.ui_log("不该出现")
         ui.ui_progress_start("也不该出现")
-        ui.ui_pow_progress("还是不该", 50)
+        ui.ui_pow_progress("还是不该", 0.5)
         self.assertEqual(s.getvalue(), "")
 
     def test_ui_recovered_and_token_acquired(self):
@@ -78,10 +86,31 @@ class ConsoleUITests(unittest.TestCase):
         ui.ui_log("x")                         # 不能抛
         ui.ui_progress_stop()
 
-    def test_ask_without_tty_does_not_block(self):
+    def test_ui_ask_without_tty_does_not_block(self):
+        """管道 / CI / Dockerfile 里没有 tty：必须直接给出"没法回答"。"""
+        import unittest.mock as mock
         ui = ConsoleUI(stream=FakeStream())
-        answer = ui.ask("选一个", ["a", "b"])
+        with mock.patch("server.console_ui._is_tty", return_value=False):
+            answer = ui.ui_ask("选一个", ["a", "b"])
         self.assertIn("用户回答", answer)
+        self.assertIn("没有终端", answer)
+
+    def test_ui_ask_auto_picks_the_first_option(self):
+        s = FakeStream()
+        ui = ConsoleUI(stream=s, auto=True)
+        answer = ui.ui_ask("选一个", ["保留原来的", "换成我们的"])
+        self.assertIn("保留原来的", answer)
+        self.assertIn("[自动]", s.getvalue())
+
+    def test_ui_ask_without_options_and_no_tty(self):
+        import unittest.mock as mock
+        ui = ConsoleUI(stream=FakeStream())
+        with mock.patch("server.console_ui._is_tty", return_value=False):
+            self.assertIn("用户回答", ui.ui_ask("随便说点什么"))
+
+    def test_old_ask_name_still_works(self):
+        ui = ConsoleUI(stream=FakeStream(), auto=True)
+        self.assertIn("a", ui.ask("选一个", ["a", "b"]))
 
 
 class FactoryTests(unittest.TestCase):
