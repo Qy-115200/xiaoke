@@ -17,6 +17,10 @@
    293MB 解压）。★ npm 对 optional 依赖的失败**不报错**，退出码还是 0 —— 下载
    断一次，结果就是「装好了但没有 claude」。所以拿不到可执行文件时单独装一次
    平台包（这次是普通依赖，失败会真的报错），再手动跑一遍壳的 postinstall。
+5. **npm ≥ 11 会拦安装脚本**：它默认不跑依赖的 lifecycle 脚本，只警告一句。
+   这个包的 postinstall 正是"把原生二进制拷到位"那一步，被拦就永远没有
+   `claude`。所以安装时显式带 `--allow-scripts`；补装原生包时也先看它是不是
+   已经在树里 —— 在的话只差跑一次 install.cjs，不用再下一次 132MB。
 """
 
 import os
@@ -33,6 +37,16 @@ INSTALL_TIMEOUT = 1800         # 原生包 132MB，慢网络下十几分钟；90
 VERSION_TIMEOUT = 60
 POSTINSTALL_TIMEOUT = 300      # postinstall 要把 293MB 硬链/拷成 claude.exe
 NATIVE_DOWNLOAD_MB = 130       # 给用户看的量级，别写精确值（会随版本变）
+
+# 原生包断一次就白下，自己重试比让人盯着重跑强（容器里的网络尤其爱半路断）。
+NATIVE_ATTEMPTS = 3
+NATIVE_RETRY_PAUSE = 5         # 秒
+
+# npm 报网络错长这样：ETIMEDOUT / ECONNRESET / getaddrinfo EAI_AGAIN ……
+# 只有这些值得重试；404、权限不足重试也是一样的结果。
+_NETWORK_MARKS = ("ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND",
+                  "EAI_AGAIN", "EPIPE", "socket hang up", "network connectivity",
+                  "network read")
 
 
 # ================= 纯函数（离线可测）=================
@@ -86,6 +100,14 @@ def install_argv(node_info, prefix, version: str = "",
         "--registry", registry,
         # ★ include=optional 不能省：原生二进制就在 optionalDependencies 里
         "--include=optional",
+        # ★ 也省不得：npm ≥ 11 默认**不跑**依赖的安装脚本，只留一句
+        #   `npm warn install-scripts … not yet covered by allowScripts`。
+        #   而这个包的真二进制正是 postinstall（install.cjs）从 optional 依赖
+        #   里拷过去的 —— 脚本一拦，装完就是「added 1 package」加一个 500 字节
+        #   的占位 claude。2026-10-28 容器里就是这么失败的。
+        #   写裸包名不写版本：npm 的匹配规则里裸名合法，钉版本反而会随发版失效。
+        #   npm 10 不认这个参数，但它只是被当成普通配置忽略，不会报错（验过）。
+        f"--allow-scripts={CLAUDE_PACKAGE}",
         "--no-audit", "--no-fund",
     ]
 
@@ -295,8 +317,9 @@ def ensure_claude(ctx, node_info, version: str = "") -> dict:
             "npm 说装好了，但找不到能跑的 claude\n" + (tail or "（npm 没有输出）"),
             EXIT_NPM,
             hint=f"看看 {Path(ctx.prefix) / 'lib' / 'node_modules' / CLAUDE_PACKAGE} 在不在；"
-                 f"多半是 npm 的 ignore-scripts/omit=optional 或原生包没下完。"
-                 f"重跑一次安装器通常就能补上")
+                 f"多半是 npm 的 ignore-scripts/omit=optional、npm 拦了安装脚本，"
+                 f"或者原生包没下完。"
+                 f"重跑一次安装器通常就能补上（它会给 npm 带上 --allow-scripts）")
     ver = claude_version(ctx, found)
     _ensure_bin_link(ctx, found)
     _prepend_bin(ctx)
@@ -304,13 +327,84 @@ def ensure_claude(ctx, node_info, version: str = "") -> dict:
     return {"claude": found, "version": ver, "installed": True}
 
 
-def _repair_native(ctx, node_info, npm_text: str) -> str:
-    """壳装上了、但壳里没有可执行文件时，单独把原生包补上。
+def native_binary(ctx, tag: str) -> Path:
+    """原生包已经在树里的话，返回那个可执行文件；没装返回 None。
 
-    三步，任一步失败就抛错并把 npm 的原话带出来：
-      1. 认出本机要哪个平台包（x64 / arm64 / -musl）；
-      2. `npm install -g` 那个平台包 —— 普通依赖，失败会真的报错；
-      3. 跑一遍壳里的 postinstall，它会把 `bin/claude.exe` 那个占位换成真二进制。
+    找两处，和 Node 的 `require.resolve` 从壳目录往上走的顺序一致：
+      <prefix>/lib/node_modules/@anthropic-ai/<平台包>/
+      <prefix>/lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/<平台包>/
+    """
+    package = native_package_name(tag)
+    if not package:
+        return None
+    short = package.split("/")[-1]
+    pkg_dir = wrapper_dir(ctx.prefix)
+    for root in (pkg_dir.parent, pkg_dir / "node_modules" / "@anthropic-ai"):
+        for name in ("claude", "claude.exe"):      # Linux 是 claude，Windows 是 .exe
+            cand = root / short / name
+            if cand.is_file():
+                return cand
+    return None
+
+
+def _network_shaped(res) -> bool:
+    """这次失败是不是"网络不给力"，换句话说值不值得再试一次。"""
+    if res.timed_out:
+        return True
+    text = (res.text(limit=2000) or "").upper()
+    return any(mark.upper() in text for mark in _NETWORK_MARKS)
+
+
+def _install_native(ctx, node_info, package: str, version: str, npm_text: str):
+    """装平台子包，网络断了就自己再试，不把失败直接甩给用户。"""
+    spec = f"{package}{('@' + version) if version else ''}"
+    last = None
+    for attempt in range(1, NATIVE_ATTEMPTS + 1):
+        if attempt > 1:
+            ctx.note(f"    第 {attempt}/{NATIVE_ATTEMPTS} 次：上一次是网络断的，"
+                     f"{NATIVE_RETRY_PAUSE} 秒后重试")
+            if NATIVE_RETRY_PAUSE:
+                time.sleep(NATIVE_RETRY_PAUSE)
+        res = ctx.runner.run(
+            native_install_argv(node_info, ctx.prefix, package, version=version),
+            timeout=INSTALL_TIMEOUT, stdin=subprocess.DEVNULL)
+        if not res.timed_out and res.ok:
+            return res
+        last = res
+        if not _network_shaped(res):
+            break                       # 404 / 权限这类，重试也是一样的结果
+
+    res = last
+    reason = "超时" if res.timed_out else f"退出码 {res.code}"
+    tried = f"（试了 {NATIVE_ATTEMPTS} 次）" if _network_shaped(res) else ""
+    raise CliError(
+        f"{spec} 装不上（{reason}）{tried}：\n" + res.text(limit=600),
+        EXIT_NPM,
+        hint="这多半是网络问题：原生包一百多兆，断一次就下一半。"
+             "换个网络或者稍后重跑安装器 —— 已经下完的包会留在 npm 缓存里，"
+             "重跑不会从头再来；断掉的那一个包会重新下。"
+             + (f"\n第一次 npm 的输出：\n{npm_text}" if npm_text else ""))
+
+
+def _run_postinstall(ctx, node_info, pkg_dir: Path):
+    """跑壳自己的 install.cjs：把 bin/ 里的占位换成真二进制。"""
+    node = str((node_info or {}).get("node") or "")
+    install_cjs = pkg_dir / "install.cjs"
+    if not (node and install_cjs.is_file()):
+        return None
+    ctx.note("    跑一遍 postinstall，把占位换成真二进制 …")
+    return ctx.runner.run([node, str(install_cjs)], timeout=POSTINSTALL_TIMEOUT,
+                          stdin=subprocess.DEVNULL)
+
+
+def _repair_native(ctx, node_info, npm_text: str) -> str:
+    """壳装上了、但壳里没有可执行文件时，把原生二进制补上。
+
+    两种情况，处理方式不一样：
+      - 原生包**已经在树里**（optional 依赖下下来了，只是 npm ≥ 11 拦住了
+        postinstall）→ 只要跑一次 install.cjs，不用再下 132MB；
+      - 原生包**不在**（下载断在半路）→ 单独 `npm install -g` 那个平台包，
+        这次是普通依赖，失败会真的报错；断网会自动重试几次。
     返回能找到的 claude 路径；还是找不到就返回空串（由调用方报错）。"""
     pkg_dir = wrapper_dir(ctx.prefix)
     if not pkg_dir.is_dir():
@@ -323,28 +417,17 @@ def _repair_native(ctx, node_info, npm_text: str) -> str:
         return ""
 
     version = wrapper_version(ctx.prefix)
-    spec = f"{package}{('@' + version) if version else ''}"
-    ctx.note(f"    补装 {spec} …")
-    res = ctx.runner.run(native_install_argv(node_info, ctx.prefix, package,
-                                             version=version),
-                         timeout=INSTALL_TIMEOUT, stdin=subprocess.DEVNULL)
-    if res.timed_out or not res.ok:
-        reason = "超时" if res.timed_out else f"退出码 {res.code}"
-        raise CliError(
-            f"{spec} 装不上（{reason}）：\n" + res.text(limit=600),
-            EXIT_NPM,
-            hint="这多半是网络问题：原生包一百多兆，断一次就装不完整。"
-                 "换个网络或者稍后重跑安装器（已下载的部分会留在缓存里）"
-                 + (f"\n第一次 npm 的输出：\n{npm_text}" if npm_text else ""))
+    if native_binary(ctx, tag):
+        ctx.note("    原生包已经下下来了，只差没拷到位 —— 直接跑 postinstall，"
+                 "不用再下一遍")
+    else:
+        spec = f"{package}{('@' + version) if version else ''}"
+        ctx.note(f"    补装 {spec} …")
+        _install_native(ctx, node_info, package, version, npm_text)
 
-    node = str((node_info or {}).get("node") or "")
-    install_cjs = pkg_dir / "install.cjs"
-    if node and install_cjs.is_file():
-        ctx.note("    跑一遍 postinstall，把占位换成真二进制 …")
-        ran = ctx.runner.run([node, str(install_cjs)], timeout=POSTINSTALL_TIMEOUT,
-                             stdin=subprocess.DEVNULL)
-        if not ran.ok:
-            ctx.note("    postinstall 没跑通：" + ran.text(limit=300))
+    ran = _run_postinstall(ctx, node_info, pkg_dir)
+    if ran is not None and not ran.ok:
+        ctx.note("    postinstall 没跑通：" + ran.text(limit=300))
     return find_installed_claude(ctx)
 
 

@@ -61,8 +61,17 @@ class ArgvTests(unittest.TestCase):
             "@anthropic-ai/claude-code",
             "--registry", "https://registry.npmmirror.com",
             "--include=optional",
+            "--allow-scripts=@anthropic-ai/claude-code",
             "--no-audit", "--no-fund",
         ])
+
+    def test_allow_scripts_is_passed_with_a_bare_name(self):
+        """npm ≥ 11 默认不跑依赖的安装脚本，而这个包的真二进制正是 postinstall
+        拷过去的。名字要写裸的 —— 钉版本会在发版后失效。"""
+        argv = claude_setup.install_argv({"npm": "npm"}, self.prefix,
+                                         version="2.1.312")
+        self.assertIn("--allow-scripts=@anthropic-ai/claude-code", argv)
+        self.assertNotIn("--allow-scripts=@anthropic-ai/claude-code@2.1.312", argv)
 
     def test_pinned_version(self):
         argv = claude_setup.install_argv({"npm": "npm"}, self.prefix, version="2.1.310")
@@ -141,6 +150,10 @@ class RepairNativeTests(unittest.TestCase):
         (self.pkg / "package.json").write_text('{"version": "2.1.311"}',
                                                encoding="utf-8")
         (self.pkg / "install.cjs").write_text("// stub", encoding="utf-8")
+        # 重试之间的等待对测试没意义
+        patcher = mock.patch.object(claude_setup, "NATIVE_RETRY_PAUSE", 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _ctx(self, runner):
         return CliContext(home=self.home, env={"PATH": "", "HOME": str(self.home)},
@@ -161,9 +174,50 @@ class RepairNativeTests(unittest.TestCase):
         self.assertEqual(runner.calls[1][0], "/n/node")
         self.assertTrue(runner.calls[1][1].endswith("install.cjs"))
 
+    def test_native_already_in_the_tree_is_not_downloaded_again(self):
+        """npm 拦了 postinstall 的情况：132MB 早就下下来了，只是没拷到位。
+        这时候再下一遍既慢又可能再断一次。"""
+        native = (self.pkg.parent / "claude-code-linux-x64")
+        native.mkdir(parents=True)
+        (native / "claude").write_bytes(b"\x7fELF")
+        runner = FakeRunner([])
+        ctx = self._ctx(runner)
+        target = str(self.pkg / "bin" / "claude.exe")
+        with mock.patch.object(claude_setup, "platform_arch_tag", return_value="x64"), \
+             mock.patch.object(claude_setup, "find_installed_claude", return_value=target):
+            got = claude_setup._repair_native(
+                ctx, {"node": "/n/node", "npm": "/n/npm"}, "")
+        self.assertEqual(got, target)
+        # 只有 postinstall 这一次，没有 npm install
+        self.assertEqual(len(runner.calls), 1)
+        self.assertTrue(runner.calls[0][1].endswith("install.cjs"))
+
+    def test_network_failure_is_retried_before_giving_up(self):
+        from server.cli import CommandResult
+        runner = FakeRunner([CommandResult(["npm"], 146, "", "npm error ETIMEDOUT")])
+        ctx = self._ctx(runner)
+        target = str(self.pkg / "bin" / "claude.exe")
+        with mock.patch.object(claude_setup, "platform_arch_tag", return_value="x64"), \
+             mock.patch.object(claude_setup, "find_installed_claude", return_value=target):
+            got = claude_setup._repair_native(
+                ctx, {"node": "/n/node", "npm": "/n/npm"}, "")
+        self.assertEqual(got, target)
+        # 第一次网络断 + 第二次装成功 + 一次 postinstall
+        self.assertEqual(len(runner.calls), 3)
+
+    def test_non_network_failure_is_not_retried(self):
+        from server.cli import CommandResult
+        runner = FakeRunner([CommandResult(["npm"], 1, "", "npm error code E404")])
+        ctx = self._ctx(runner)
+        with mock.patch.object(claude_setup, "platform_arch_tag", return_value="x64"):
+            with self.assertRaises(CliError):
+                claude_setup._repair_native(
+                    ctx, {"node": "/n/node", "npm": "/n/npm"}, "")
+        self.assertEqual(len(runner.calls), 1, "404 重试也是一样的结果，别浪费时间")
+
     def test_failure_is_loud_and_keeps_the_first_output(self):
         from server.cli import CommandResult
-        runner = FakeRunner([CommandResult(["npm"], 1, "", "ECONNRESET")])
+        runner = FakeRunner([CommandResult(["npm"], 146, "", "npm error ECONNRESET")] * 3)
         ctx = self._ctx(runner)
         with mock.patch.object(claude_setup, "platform_arch_tag", return_value="x64"):
             with self.assertRaises(CliError) as cm:
@@ -172,6 +226,8 @@ class RepairNativeTests(unittest.TestCase):
         self.assertEqual(cm.exception.exit_code, EXIT_NPM)
         self.assertIn("ECONNRESET", cm.exception.message)
         self.assertIn("第一次 npm 的输出", cm.exception.hint)
+        self.assertIn(str(claude_setup.NATIVE_ATTEMPTS), cm.exception.message)
+        self.assertEqual(len(runner.calls), claude_setup.NATIVE_ATTEMPTS)
 
     def test_nothing_to_repair_when_the_wrapper_is_missing(self):
         import shutil

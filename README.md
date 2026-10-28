@@ -215,10 +215,18 @@ claude-code-assistant --recharge 20   # 充 20 元：在终端里打印付款二
    `node-v<ver>-linux-<arch>.tar.xz`，对 `SHASUMS256.txt` 校验，装到 `~/.local/node-v<ver>`
    再软链成 `~/.local/node`。**全程不 sudo。**
 3. **claude CLI**：`npm install -g --prefix ~/.local @anthropic-ai/claude-code
-   --include=optional`。这行必须显式带 `--include=optional`：原生二进制是靠 postinstall
-   装进来的，用户的 `.npmrc` 里只要有 `ignore-scripts=true` 或 `omit=optional`，
-   npm 会"成功"退出但 `claude` 是个空壳。所以 `npm_env()` 把所有继承来的 `npm_config_*`
-   全部清掉再显式设一遍。
+   --include=optional --allow-scripts=@anthropic-ai/claude-code`。
+   `--include=optional` 不能省：真二进制在 optionalDependencies 的平台子包里。
+   `--allow-scripts` 也不能省：**npm ≥ 11 默认不跑依赖的安装脚本**，只警告一句
+   `npm warn install-scripts … not yet covered by allowScripts`，而这个包正是靠
+   postinstall 把二进制拷到 `bin/`。脚本一被拦，装完就是「added 1 package」加一个
+   500 字节的占位。参数写裸包名（npm 的匹配规则允许，钉版本会随发版失效）；
+   npm 10 不认这个参数，但它只当普通配置忽略，不会报错。
+   另外 `npm_env()` 把所有继承来的 `npm_config_*` 全部清掉再显式设一遍，
+   防用户 `.npmrc` 里的 `ignore-scripts=true` / `omit=optional`。
+   原生包还是没下来时（132MB 断在半路），单独 `npm install -g` 平台子包并
+   **自动重试 3 次**；如果它其实已经在树里、只是没拷到位，就只跑一次
+   `install.cjs`，不重复下载。
 4. **账号 + 配置**：本地已有 identity 就复用（不会偷偷重注册）；`--account-code` 走
    `bind_account()`；都没有才 `register_device()`（PoW 进度在终端里画一行）。
    最后 `bypass_region_check()` + `set_model_config()` 写 `~/.claude.json` 和
@@ -438,7 +446,7 @@ agent_demo/
 │   ├── cli.py                    335   服务器版共用的地基：退出码、子进程封装、sha256、安全解包、shell PATH 块、HttpClient
 │   ├── console_ui.py             128   终端里的进度实现（实现 ui_bridge 那几个钩子，不阻塞、没 tty 也不卡住）
 │   ├── node_setup.py             346   Node 检测 / 选 LTS / 从 npmmirror 下载校验 / 解到 ~/.local/node / 软链命令
-│   ├── claude_setup.py           379   npm install -g --prefix ~/.local（清掉继承的 npm_config_*，显式 --include=optional；原生包没下来时单独补装）
+│   ├── claude_setup.py           462   npm install -g --prefix ~/.local（清掉继承的 npm_config_*，显式 --include=optional + --allow-scripts；原生包没下来时单独补装，断网自己重试）
 │   ├── identity.py               515   设备指纹、PoW 注册、本地凭证、换设备登录、_ensure_account_code / _ensure_user_id、pending_recovery
 │   ├── fingerprint.py            147   硬件指纹：主板序列号 + CPU ID → SHA-256 前 32 位（不是凭据，只在注册时上报）
 │   ├── vault.py                  213   凭证的"第二份"：账户码存注册表（DPAPI 加密）/ 配置目录
@@ -487,7 +495,7 @@ agent_demo/
 │   ├── test_claude_config.py          配置自愈：没 diff 不写、坏文件不覆盖、外家中转不碰、顶层 model 不动、日志不含 token
 │   ├── test_relay_gate.py             别家中转一律拦：带不带 /v1 都认得出、坏文件不拦、切换留备份、文字不含 token
 │   ├── test_node_setup.py             Node 选版本 / 资产名 / SHASUMS / 校验失败 / PATH 块只写一次
-│   ├── test_claude_setup.py           npm argv 精确 / npm_config_* 被清掉 / 失败映射到 6 / 原生包没下来时补装
+│   ├── test_claude_setup.py           npm argv 精确 / --allow-scripts 带裸包名 / npm_config_* 被清掉 / 失败映射到 6 / 原生包没下来时补装、已下过的不再下一遍、断网重试
 │   ├── test_console_ui.py             终端进度条：管道里不打 \r、静默模式、流坏了不抛
 │   ├── test_install_sh.py             真跑 sh：假 curl + 真 tar，装到哪、校验失败退几、包里有 ../ 会不会接
 │   ├── test_updater_linux_payload.py  server.spec / CI 矩阵 / updater 还认得这个包
