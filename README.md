@@ -397,11 +397,15 @@ python -m PyInstaller server.spec --noconfirm --clean    # Linux（服务器版�
   排掉它们的前提就是这两句只在函数里 —— 所以 `tests/test_updater_linux_payload.py`
   连"是不是写在函数里"一起断言。
 - **模型栈现在进包了**（1.4.6 起服务器版是 Agent 装）。`openai` / `pydantic` /
-  `pydantic_core` / `httpx2` / `httpcore2` / `anyio` / `jiter` / `sniffio` 都走
-  `collect_all`，包从 26MB 涨到 **36.5MB**（tar.gz 35.9MB，2026-10-28 量的）。
+  `pydantic_core` / `httpx2` / `httpcore2` / `anyio` / `jiter` / `sniffio` 的数据文件和
+  子模块都要收，包从 26MB 涨到 **36.5MB**（tar.gz 35.9MB，2026-10-28 量的）。
   涨的空间基本就是模型栈：`openai` + `pydantic` + `httpx2`。注意 **openai 3.x 依赖的是
-  `httpx2` / `httpcore2`**，不是 `httpx` / `httpcore` —— 写错名字 `collect_all` 会静默跳过，
+  `httpx2` / `httpcore2`**，不是 `httpx` / `httpcore` —— 写错名字会静默跳过，
   到用户机器上才 `ModuleNotFoundError`。
+  ★ 收这些包用 `_collect()`，**不用 `collect_all()`**：后者默认
+  `include_py_files=True`，会把每个包的 `.py` 再作为数据文件放一份（PYZ 里已经有
+  字节码了）。桌面版靠这一条从 35.9MB 降到 23.6MB，服务器版同理。改这里时别贪方便
+  换回 `collect_all`。
 - **`helpers` 不能排除**：`server/term_render.py` 从它取 `norm_options` / `resolve_option`
   （桌面版和终端版的选项语义靠同一个来源对齐）。它只 import `math` / `re`。
 - **`hiddenimports` 点名 `agent_bus` / `agent_core` / `llm` / `server.agent_install` /
@@ -410,6 +414,22 @@ python -m PyInstaller server.spec --noconfirm --clean    # Linux（服务器版�
   import** 的（`--balance` 不该把模型栈拖起来），静态分析跟不到，漏一个就是运行时崩。
   `lzma` 是解 Node 的 `.tar.xz` 用的（PyInstaller 不会自动收 C 扩展），
   `platform_support.linux` 是 `platform_support/__init__.py` 按平台延迟 import 的。
+
+**体积**（2026-10-28 量的 Windows 单文件）：**23.6MB**，改之前 35.9MB，少了 12.3MB（−34%）。
+省下来的是打包方式，功能一个没减，细节和"哪些不能动"写在 [`agent.spec`](agent.spec) 文件头：
+不用 `collect_all`（源码会重复进包）、只声明真的用到的 `win32com.client`、排掉已经坏了的
+`win10toast → pkg_resources → setuptools` 那条链、去掉 Pillow 用不到的 `_avif` / `_imagingcms`
+解码器、`optimize=2`（等价 `python -OO`）。tcl/tk（5.9MB）、libcrypto/libssl（2.4MB）、
+openai 的资源模块（5.9MB）都没动 —— 那是拿功能换体积。
+
+想再量一遍，或者怀疑哪个包又变胖了：
+
+```bash
+python build_tools/analyze_archive.py dist/ClaudeCode安装助手.exe
+```
+
+它按顶层包归总，**`comp MB` 才是能省下来的量**（`uncomp MB` 是解压后的大小）；PYZ 里那
+几千个模块压缩是整体的，单列一行，拆不到单个包。
 
 **CI**：打 `v*` tag（或手动触发）时 [`.github/workflows/build.yml`](.github/workflows/build.yml)
 在四个 runner 上并行构建（windows-x64 / macos-arm64 / macos-x64 / linux-x64）。矩阵每一行带
@@ -579,6 +599,7 @@ agent_demo/
 │   ├── make_version_info.py       80   生成 Windows 文件版本信息（build/version_info.txt）
 │   ├── make_manifest.py          113   四个产物 → latest.json（校验版本、算 sha256 / size）
 │   ├── fetch_release.py               从 GitHub Release 取回四个产物（本机没有 gh CLI）
+│   ├── analyze_archive.py             按顶层包归总产物，量体积时看谁最占地方
 │   └── deploy_downloads.sh            发布：传 nginx + 传 COS → 两边验大小 → 换清单 → 改下载页版本号
 ├── tests/                            离线单元测试（stdlib unittest）
 │   ├── test_version.py                版本解析 / 比较 / 清单校验

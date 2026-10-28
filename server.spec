@@ -25,6 +25,15 @@
   但 `agent_core` / `llm` 仍然可以在 `server_main` 顶层之外延迟 import —— 见
   `server/agent_install._session()`，所以 `--balance` 这类命令不会拖起模型栈。
 
+★ 体积（2026-10-28）：和 agent.spec 踩的是同一批坑，处理方式也一样 ——
+  不用 `collect_all`，理由见下面 `_collect()`。桌面那边靠这个从 35.9MB 降到 23.6MB，
+  服务器版少了 `tkinter` 但这边的模型栈一样会被重复收两份源码。
+  `optimize=2` 也一起开了（和 `python -OO` 一样去掉 docstring）：全仓库没有一处
+  读 `__doc__`，openai / pydantic 的 docstring 纯占地方。
+  ★ 这两个改动是在 Windows 上改的，**Linux 包还没在这台机器上真打出来过** ——
+  CI 的 Linux smoke test（`--version` / `--help`）能盖住启动，
+  模型那条路要等装一次才真正验到。
+
 ★ `helpers` **不能**排除：`server/term_render.py` 从它那里取 `norm_options` /
   `resolve_option`（桌面版和终端版的选项语义靠这一个来源对齐）。它只 import
   math / re，带进来是零成本的。
@@ -33,18 +42,39 @@
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import (collect_data_files, collect_dynamic_libs,
+                                     collect_submodules, copy_metadata)
 
 sys.path.insert(0, SPECPATH)                          # noqa: F821
 
 NAME = "ClaudeCodeAssistant"
 
+
+def _not_tests(name: str) -> bool:
+    """包里自带的测试代码一个都不要（`certifi.tests` 之类会把 unittest 拖进来）。"""
+    return not any(part in ("test", "tests") for part in name.split(".")[1:])
+
+
+def _collect(pkg: str):
+    """就是 `collect_all` 去掉 include_py_files —— 少了"源码再放一份"这件事。
+
+    collect_all 默认 include_py_files=True，于是每个包的 .py 既进 PYZ（字节码），
+    又原样作为数据文件再进 CArchive 一份，光 openai 就重复 7.4MB 原始 / 1.6MB 压缩。
+    运行时 import 走的是 PYZ，数据里那份一次都用不到。"""
+    datas = collect_data_files(pkg)                   # 默认 include_py_files=False
+    try:
+        datas += copy_metadata(pkg)                   # 版本号之类，几十 KB
+    except Exception:
+        pass                                          # 没有 dist-info 就算了
+    return datas, collect_dynamic_libs(pkg), collect_submodules(pkg, filter=_not_tests)
+
 # ================= 第三方包的隐式资源 =================
 # ① 身份层要 requests + 它那串依赖（证书、idna、编码表都是数据文件，PyInstaller
 #    不会自动收）。这些都是纯 Python，几十 KB。
 # ② 模型栈：openai 3.x 真正依赖的是 **httpx2 / httpcore2**（不是 httpx/httpcore），
-#    pydantic 2.x 的 core 是编译扩展。collect_all 会把它们的数据文件和子模块一起收，
+#    pydantic 2.x 的 core 是编译扩展。这里要的是它们的数据文件和全部子模块，
 #    漏一个就是在客户机上 ModuleNotFoundError（那时已经在装东西了，最难看）。
+#    ★ 用 _collect() 而不是 collect_all()：后者会把源码重复收一份（见上面的体积说明）。
 datas = []
 binaries = []
 hiddenimports = []
@@ -54,7 +84,7 @@ for pkg in ("requests", "certifi", "urllib3", "charset_normalizer", "idna",
             "typing_inspection", "httpx2", "httpcore2", "h11", "truststore",
             "anyio", "jiter", "sniffio"):
     try:
-        d, b, h = collect_all(pkg)
+        d, b, h = _collect(pkg)
     except Exception:
         continue                                      # 没装就跳过，别让打包失败
     datas += d
@@ -113,7 +143,8 @@ a = Analysis(
     runtime_hooks=[],
     excludes=EXCLUDES,
     noarchive=False,
-    optimize=0,
+    # 2 = 和 python -OO 一样：去掉 docstring（理由见文件头的体积说明）
+    optimize=2,
 )
 
 pyz = PYZ(a.pure)

@@ -122,6 +122,46 @@ class ServerSpecTests(unittest.TestCase):
         self.assertIn('["main.py"]', agent)
 
 
+class SpecSizeTests(unittest.TestCase):
+    """体积这一课别再交一遍。
+
+    2026-10-28 桌面版 35.9MB → 23.6MB，靠的全是打包配置。下面每一条都是当时
+    实测省下来的，改回去不会报错，只会让包悄悄变胖 —— 所以钉在这里。"""
+
+    def setUp(self):
+        self.agent = (ROOT / "agent.spec").read_text(encoding="utf-8")
+        self.server = SPEC.read_text(encoding="utf-8")
+
+    def _both(self):
+        return (("agent.spec", self.agent), ("server.spec", self.server))
+
+    def test_no_collect_all(self):
+        # collect_all 默认 include_py_files=True：每个包的源码作为数据文件再放一份，
+        # 而运行时 import 走的是 PYZ 里那份字节码。光 openai 就重复 7.4MB 原始。
+        for name, text in self._both():
+            with self.subTest(spec=name):
+                self.assertNotIn("collect_all(pkg)", text)
+                self.assertNotIn("import collect_all", text)
+
+    def test_docstrings_are_stripped(self):
+        # optimize=2 == python -OO；全仓库没有一处读 __doc__
+        for name, text in self._both():
+            with self.subTest(spec=name):
+                self.assertIn("optimize=2", text)
+
+    def test_agent_drops_unused_pillow_codecs(self):
+        # _avif 一个就 7.9MB 原始 / 4.3MB 压缩；只用到 PNG/JPEG
+        self.assertIn("PIL/_avif", self.agent)
+        self.assertIn("PIL/_imagingcms", self.agent)
+
+    def test_agent_drops_the_broken_notification_chain(self):
+        # win10toast 那条分支 import 的 pkg_resources 已经不在新版 setuptools 里，
+        # 一直是坏的，却把 setuptools 整个拽进包
+        for mod in ("win10toast", "setuptools"):
+            with self.subTest(mod=mod):
+                self.assertIn(f'"{mod}"', self.agent)
+
+
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
         self.text = WORKFLOW.read_text(encoding="utf-8")
