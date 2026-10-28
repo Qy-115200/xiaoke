@@ -176,10 +176,22 @@ jobs:
           set -euo pipefail
           # 发版说明直接取注释 tag 的正文 —— 和本机部署时传给 latest.json 的
           # notes 同源（都来自那个 tag），一处维护。
+          # ★ checkout 是拿 `github.sha` 去 fetch 这个 ref 的（refspec 形如
+          #   `+<sha>:refs/tags/<name>`），落下来的本地 tag 是**轻量**的 —— 对轻量
+          #   tag，`%(contents)` 读到的是**提交说明**。v1.4.8 第一次发就踩了：
+          #   Release 说明只剩「1.4.8 / Co-Authored-By」。所以先把 tag 对象抢回来，
+          #   再确认它真的是 annotated，不是就红掉，别悄悄发一份错说明。
+          git fetch --force --no-tags origin \
+            "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          if [ "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" != tag ]; then
+            echo "::error::$GITHUB_REF_NAME 不是 annotated tag（没有正文），发版说明会是空的"
+            exit 1
+          fi
           git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            # 重跑构建时不要因为"已经存在"就红掉
-            echo "Release $GITHUB_REF_NAME 已存在，直接覆盖资产"
+            # 重跑构建时不要因为"已经存在"就红掉；顺手把说明也刷成 tag 上的最新版本
+            echo "Release $GITHUB_REF_NAME 已存在，覆盖资产和说明"
+            gh release edit "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
           else
             gh release create "$GITHUB_REF_NAME" \
               --title "$GITHUB_REF_NAME" \

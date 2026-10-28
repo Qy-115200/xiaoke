@@ -205,8 +205,19 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("contents: write", self.text)
 
     def test_release_notes_come_from_the_annotated_tag(self):
-        """说明只维护一份：tag 的正文。latest.json 的 notes 也从那儿来。"""
+        """说明只维护一份：tag 的正文。latest.json 的 notes 也从那儿来。
+
+        ★ 光有 `%(contents)` 不够：checkout 落地的是**轻量** tag（它按 SHA
+          去 fetch），对轻量 tag `%(contents)` 读到的是提交说明。v1.4.8 第一次
+          发就是这么错的 —— Release 说明变成了「1.4.8 / Co-Authored-By」。
+          必须先 `git fetch --force` 把 tag 对象抢回来，再确认它是 annotated。"""
         self.assertIn("git tag -l --format='%(contents)'", self.text)
+        self.assertIn("refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}",
+                      self.text)
+        self.assertIn("git cat-file -t", self.text)
+        # 抢 tag 对象这件事必须排在读正文之前
+        self.assertLess(self.text.index("git fetch --force --no-tags origin"),
+                        self.text.index("--format='%(contents)'"))
 
     def test_rerunning_a_build_does_not_fail_on_an_existing_release(self):
         # 构建重跑很常见（改 CI、重试失败的 runner）
