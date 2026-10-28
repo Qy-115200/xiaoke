@@ -100,5 +100,36 @@ class VscodePromptTests(unittest.TestCase):
         self.assertIn("在面板没打开时说", self.text)
 
 
+class PromptBudgetTests(unittest.TestCase):
+    """提示词每轮请求都要发一遍，长度直接等于钱。
+
+    2026-10-28 从 15.7k 压到 10.1k（Windows），主要是删掉重复：同一条规矩
+    原来在"流程"里写一遍、"硬性约束"里再抄一遍、"常见情况"里又抄一遍。
+    这条测试不是要卡死字数，是拦住"顺手再加一段"慢慢涨回去 ——
+    真要加，就把旧的等量删掉。
+    """
+
+    BUDGET = 11000
+
+    def test_prompt_stays_within_budget(self):
+        for system in ("Windows", "Darwin", "Linux"):
+            with self.subTest(system=system):
+                text = _prompt_for(system)
+                self.assertLess(
+                    len(text), self.BUDGET,
+                    f"{system} 的提示词 {len(text)} 字符，超过预算 {self.BUDGET}。"
+                    "加内容前先删等量的旧内容。")
+
+    def test_no_rule_is_written_three_times(self):
+        """抽查几条最容易复读的规矩，出现次数要有限。
+
+        原文里"两个只能开一个"出现过五次、"不要主动推销充值"出现过三次，
+        模型读到的信号没变强，token 倒是翻倍了。"""
+        text = _prompt_for("Windows")
+        self.assertLessEqual(text.count("两个只能开一个"), 2)
+        self.assertLessEqual(text.count("不要主动推销充值"), 1)
+        self.assertLessEqual(text.count("别自己弹充值窗"), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
