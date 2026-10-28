@@ -412,10 +412,15 @@ python -m PyInstaller server.spec --noconfirm --clean    # Linux（服务器版�
   `platform_support.linux` 是 `platform_support/__init__.py` 按平台延迟 import 的。
 
 **CI**：打 `v*` tag（或手动触发）时 [`.github/workflows/build.yml`](.github/workflows/build.yml)
-在四个 runner 上并行构建（windows-x64 / macos-arm64 / macos-x64 / linux-x64），产物传到
-Actions artifact。矩阵每一行带 `spec:`，Linux 那行指向 `server.spec`；构建完还有一个
-**Linux smoke test** 步骤跑 `./dist/ClaudeCodeAssistant --version` 和 `--help` ——
-这两条能过就说明没有把 tkinter 拖进来、`lzma` 也在，省得下载下来才发现跑不起来。
+在四个 runner 上并行构建（windows-x64 / macos-arm64 / macos-x64 / linux-x64）。矩阵每一行带
+`spec:`，Linux 那行指向 `server.spec`；构建完还有一个 **Linux smoke test** 步骤跑
+`./dist/ClaudeCodeAssistant --version` 和 `--help` —— 这两条能过就说明没有把 tkinter 拖进来、
+`lzma` 也在，省得下载下来才发现跑不起来。
+
+产物有两个去处：**GitHub Release**（打 tag 时 `release` job 挂上去，`gh release download`
+一条命令就能拿回本机）和 Actions artifact（保留 30 天）。**CI 不部署到服务器** —— 见上面
+「发布新版本」里的分工表和原因；Actions 的摘要页也会写清楚「线上还没变，部署在本机跑」。
+
 macOS 两个包都**没有签名**：首次打开要右键 →「打开」，
 或者终端跑 `xattr -dr com.apple.quarantine /Applications/ClaudeCodeAssistant.app`。
 
@@ -447,18 +452,43 @@ macOS 两个包都**没有签名**：首次打开要右键 →「打开」，
 
 **发布新版本**
 
-1. 改 `config.py` 里的 `APP_VERSION`，提交。
-2. 打 tag（必须与 `APP_VERSION` 一致，CI 会校验）：`git tag v1.0.1 && git push origin v1.0.1`。
-3. CI 构建四个平台产物，`publish` job 调 [`build_tools/deploy_downloads.sh`](build_tools/deploy_downloads.sh)
-   发布。**这一步要配 `DEPLOY_HOST` / `DEPLOY_USER` / `DEPLOY_SSH_KEY` 三个 secrets**；
-   没配时 `publish` 会打一行 `::warning::` 然后整步跳过（不会让 tag 构建变红），
-   四个产物只在 Actions artifact 里，得手工发。
-4. 手工发布：下载四个产物到一个目录（`ClaudeCodeAssistant-*` + 版本号目录），然后
+1. 改 `config.py` 里的 `APP_VERSION`，跑一遍 `python -m unittest discover -s tests`，提交。
+2. 打**注释** tag（必须与 `APP_VERSION` 一致，CI 会校验），标题写一句人话 —— 它会一路变成
+   `latest.json` 里的 `notes`：
 
    ```bash
-   NOTES="这一版改了什么" DRY_RUN=1 DEPLOY_HOST=… ./build_tools/deploy_downloads.sh 1.1.0 ./release/1.1.0   # 先空跑
-   NOTES="这一版改了什么" DEPLOY_HOST=… ./build_tools/deploy_downloads.sh 1.1.0 ./release/1.1.0            # 真发
+   git tag -a v1.0.1 -F - <<'EOF'
+   一句话说这版改了什么
+   下面几行可以写细节
+   EOF
+   git push origin v1.0.1
    ```
+
+3. CI 在四个 runner 上并行构建，然后由 `release` job 把四个产物挂到 **GitHub Release** 上。
+   **CI 不部署**——见下面那张分工表。
+4. 在本机部署。产物从 Release 下（`gh release download v1.0.1 --dir release`），然后：
+
+   ```bash
+   DEPLOY_HOST=… DEPLOY_USER=root DEPLOY_SSH_KEY=… \
+     NOTES="$(git tag -l --format='%(contents:subject)' v1.0.1)" \
+     bash build_tools/deploy_downloads.sh 1.0.1 ./release
+   ```
+
+   加 `DRY_RUN=1` 只生成清单、用客户端自己的 updater 验一遍，不碰服务器。
+
+**为什么 CI 不部署：** GitHub runner 到我们那台服务器（49.233.72.225）的上行只有
+**~17KB/s** —— 2026-10-28 实测，136MB 传了十几分钟才走 11MB，按那个速度要两小时。
+本机到同一台机器约 5MB/s，几十秒就完。所以分工是：
+
+| 谁 | 干什么 | 为什么是它 |
+|---|---|---|
+| CI | 四个平台的**构建** + 挂 GitHub Release | macOS 的包只能在 macOS runner 上打 |
+| 本机 | `deploy_downloads.sh` 推到 nginx + COS | 上行快；而且部署变成显式动作，不会"打个 tag 就改了生产" |
+
+`deploy_downloads.sh` 的**执行顺序**是刻意的：传包到 nginx → 传包到 COS → 两边 HEAD 验大小 →
+**才**原子换 `latest.json` → 更新 `install.sh` → 改两个页面的版本号 → 最后以客户端视角再确认一遍。
+任何一步没验过就退出，所以清单永远不会指向一个取不到的文件。
+中间被打断也安全：线上清单还是旧的，只是多了一个半截的版本目录，删掉重跑即可。
 
 **发布时有三个容易踩的坑，脚本已经处理好了，但你要知道它在干什么：**
 

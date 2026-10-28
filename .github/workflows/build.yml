@@ -1,7 +1,9 @@
 name: build
 
-# 打 tag v1.0.0 时构建四份产物；也可以在网页上手动触发。
-# 产物先只上传到 Actions artifact，发布到 aikaui.com 是后续的 publish job。
+# 打 tag vX.Y.Z 时构建四份产物并挂到 GitHub Release；也可以在网页上手动触发。
+#
+# ★ 这里**只构建，不部署**。生产部署由本机跑 build_tools/deploy_downloads.sh。
+#   原因见下面 release job 的注释（runner 到我们那台服务器的上行太慢）。
 on:
   push:
     tags:
@@ -127,20 +129,34 @@ jobs:
           retention-days: 30
 
   # ------------------------------------------------------------------
-  # 发布：只在打 tag 时跑，把四个产物 + latest.json 传到 aikaui.com。
-  # 需要在仓库 Settings 里配置：
-  #   secrets: DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY
-  #   environments: production（建议配 required reviewer，部署前人工点一下）
+  # release：只在打 tag 时跑，把四个产物挂到 GitHub Release 上。
+  #
+  # ★ CI **不往 aikaui.com 部署**。GitHub runner 到 49.233.72.225 的上行只有
+  #   ~17KB/s（2026-10-28 实测：136MB 传了十几分钟才走 11MB，按那速度要两小时），
+  #   而本机到同一台机器约 5MB/s。所以分工是：
+  #
+  #     CI    只构建（macOS 的包只能在 macOS runner 上打）+ 挂 Release
+  #     本机  部署：从 Release 下四个包，跑 build_tools/deploy_downloads.sh
+  #
+  #   顺带一个好处：发版不再"打了个 tag 就自动改生产"，部署是一台机器上的显式动作。
+  #   （以前那版 publish job 在这里 ssh 上去 scp 136MB，卡死过两次 —— 1.4.6 和 1.4.7
+  #   都是取消它、改本机发的。）
   # ------------------------------------------------------------------
-  publish:
-    name: publish
+  release:
+    name: release
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
-    environment: production
+    # ★ job 级的 `permissions:` 就是这个 job 拿到的 GITHUB_TOKEN 权限本身，
+    #   不是"在仓库默认值之上加减"。仓库默认是 read（本仓库实测：
+    #   GET /repos/…/actions/permissions/workflow → default_workflow_permissions=read），
+    #   只要写了这一段，`gh release create` 就有写权限。
+    #   万一它仍然 403（比如被组织策略卡住），去 Settings → Actions → General →
+    #   Workflow permissions 改成 "Read and write permissions"，不用改这里。
+    permissions:
+      contents: write                # 建 Release、上传资产要写权限
     steps:
-      # fetch-depth: 0 —— 注释 tag 的对象要拿得到，下面「读发版说明」那步
-      # 才用 git tag --format 读得出 tag 的标题。默认浅克隆只拿 commit。
+      # fetch-depth: 0 —— 注释 tag 的对象要拿得到，下面读发版说明才读得出正文。
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -153,58 +169,43 @@ jobs:
       - name: Show artifacts
         run: ls -lR release
 
-      # 清单里的 notes 原来是空字符串（脚本默认值）—— 1.3.0 / 1.4.0 的说明
-      # 都是本机手工发时补的。CI 发的版本也该带上，否则排查时对着清单看不出
-      # 这一版改了什么。说明就直接取注释 tag 的标题，一处维护（tag 本身）。
-      - name: Read release notes
-        id: notes
-        run: |
-          set -euo pipefail
-          NOTE="$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME" || true)"
-          # 换行会破坏 GITHUB_OUTPUT 的多行格式，压成一行
-          NOTE="$(printf '%s' "$NOTE" | tr '\n\r' '  ' | sed 's/  */ /g; s/^ //; s/ $//')"
-          echo "notes=$NOTE" >> "$GITHUB_OUTPUT"
-          echo "notes: ${NOTE:-(空)}"
-
-      # 没配 secrets 时明确跳过，而不是让整个 release 变红；
-      # 这种情况可以手动跑 build_tools/deploy_downloads.sh。
-      - name: Check deploy secrets
-        id: cfg
+      - name: Publish GitHub Release
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [ -n "$DEPLOY_HOST" ]; then
-            echo "ok=true" >> "$GITHUB_OUTPUT"
+          # 发版说明直接取注释 tag 的正文 —— 和本机部署时传给 latest.json 的
+          # notes 同源（都来自那个 tag），一处维护。
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # 重跑构建时不要因为"已经存在"就红掉
+            echo "Release $GITHUB_REF_NAME 已存在，直接覆盖资产"
           else
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::未配置 DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY，跳过自动发布（可手动跑 deploy_downloads.sh）"
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file "$RUNNER_TEMP/notes.md" \
+              --verify-tag
           fi
+          gh release upload "$GITHUB_REF_NAME" release/* --clobber
+          gh release view "$GITHUB_REF_NAME" --json assets \
+            --jq '.assets[] | "\(.name)  \(.size) 字节"'
 
-      - name: Configure SSH
-        if: steps.cfg.outputs.ok == 'true'
-        id: ssh
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      # 把"下一步在本机干什么"直接写进 Actions 的摘要页：
+      # 不然下次看到绿色的 tag 构建，很容易以为线上已经更新了。
+      - name: 下一步（本机部署）
         run: |
-          set -euo pipefail
-          mkdir -p ~/.ssh
-          KEY="$RUNNER_TEMP/deploy_key"
-          printf '%s\n' "$DEPLOY_SSH_KEY" > "$KEY"
-          chmod 600 "$KEY"
-          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
-          # ★ 路径必须通过 output 传给下一步。原来写成 `DEPLOY_SSH_KEY: $HOME/.ssh/deploy_key`
-          #   是不行的：env: 的值不经过 shell，$HOME 原样传下去，ssh 拿到一个字面量
-          #   路径 "…$HOME/.ssh/deploy_key"，报 "Identity file not accessible" 再
-          #   Permission denied —— 1.4.1 第一次自动发布就是这么挂的。
-          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          {
+            echo "## ${GITHUB_REF_NAME} 构建完成，**线上还没变**"
+            echo
+            echo "四个产物已挂到 Release：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
+            echo
+            echo "部署在本机跑（runner 上行只有 ~17KB/s，传不动）："
+            echo
+            echo '```bash'
+            echo "gh release download ${GITHUB_REF_NAME} --dir release"
+            echo "DEPLOY_HOST=… DEPLOY_USER=root DEPLOY_SSH_KEY=… \\"
+            echo "  NOTES=\"\$(git tag -l --format='%(contents:subject)' ${GITHUB_REF_NAME})\" \\"
+            echo "  bash build_tools/deploy_downloads.sh ${GITHUB_REF_NAME#v} ./release"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Publish
-        if: steps.cfg.outputs.ok == 'true'
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_SSH_KEY: ${{ steps.ssh.outputs.key }}
-          NOTES: ${{ steps.notes.outputs.notes }}
-        run: bash build_tools/deploy_downloads.sh "${GITHUB_REF_NAME#v}" release

@@ -12,6 +12,11 @@
 # 用法：
 #   DEPLOY_HOST=… DEPLOY_USER=root ./build_tools/deploy_downloads.sh 1.0.1 ./release
 #
+# ★ **只在本机跑，CI 不再调它**（2026-10-28 起）。GitHub runner 到那台服务器的
+#   上行只有 ~17KB/s，136MB 要两小时；本机约 5MB/s。.github/workflows/build.yml
+#   现在只负责构建 + 挂 GitHub Release，产物用 `gh release download <tag> --dir release`
+#   拿下来再跑这个脚本。
+#
 #   DRY_RUN=1   只做本地校验（生成清单 + 用客户端自己的 updater 验一遍），不碰服务器
 #   SKIP_COS=1  明确知道这次不用推 COS 时才用（默认不跳）
 #   NOTES="…"   写进清单的发布说明（客户端不会显示，但排查时有用）

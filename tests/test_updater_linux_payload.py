@@ -141,6 +141,38 @@ class WorkflowTests(unittest.TestCase):
         # 改了名字，latest.json 和 install.sh 都得跟着改 —— 别顺手改
         self.assertIn("ClaudeCodeAssistant-linux-x64.tar.gz", self.text)
 
+    def test_ci_does_not_deploy_anymore(self):
+        """★ 2026-10-28 起分工变了：CI 只构建 + 挂 Release，部署在本机跑。
+
+        GitHub runner 到 49.233.72.225 的上行只有 ~17KB/s（136MB 要两小时），
+        1.4.6 和 1.4.7 两次都是把 publish 取消掉、改本机发的。所以这里不只是
+        "配了也不跑"，而是**根本不该再有这条路**：没有 secrets、没有 SSH、
+        没有 environment。"""
+        self.assertNotIn("secrets.DEPLOY", self.text)
+        self.assertNotIn("environment: production", self.text)
+        self.assertNotIn("Configure SSH", self.text)
+        for line in self.text.splitlines():
+            # 摘要里 echo 出来"给你抄"的那一行不算执行
+            self.assertFalse(
+                line.strip().startswith("run: bash build_tools/deploy_downloads.sh"),
+                "CI 又在跑部署脚本了 —— 它会卡在 17KB/s 的上行上")
+
+    def test_tag_attaches_a_github_release(self):
+        """产物得有地方拿。挂在 Release 上，本机 gh release download 一条命令。"""
+        self.assertIn("gh release create", self.text)
+        self.assertIn("gh release upload", self.text)
+        self.assertIn("release/*", self.text)
+        self.assertIn("contents: write", self.text)
+
+    def test_release_notes_come_from_the_annotated_tag(self):
+        """说明只维护一份：tag 的正文。latest.json 的 notes 也从那儿来。"""
+        self.assertIn("git tag -l --format='%(contents)'", self.text)
+
+    def test_rerunning_a_build_does_not_fail_on_an_existing_release(self):
+        # 构建重跑很常见（改 CI、重试失败的 runner）
+        self.assertIn("gh release view", self.text)
+        self.assertIn("--clobber", self.text)
+
 
 class ExtractTests(unittest.TestCase):
     """用真的 tar 跑一遍 updater 的解包逻辑（它和客户端同一份代码）。"""
