@@ -15,10 +15,13 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import server_main  # noqa: E402
+from server import agent_install, term_chat  # noqa: E402
 from server import claude_config as cc  # noqa: E402
 from server.cli import (  # noqa: E402
-    EXIT_ACCOUNT, EXIT_ARGS, EXIT_CONFIG, EXIT_ENV, EXIT_OK, CliContext, CliError,
+    EXIT_ACCOUNT, EXIT_ARGS, EXIT_CONFIG, EXIT_ENV, EXIT_FAILED, EXIT_OK,
+    CliContext, CliError,
 )
+from server.term_chat import Outcome  # noqa: E402
 
 
 def _args(*extra):
@@ -599,6 +602,199 @@ class DryRunFlowTests(unittest.TestCase):
         self.assertIn("AB-1", text)
         self.assertIn("claude", text)
         self.assertNotIn("api_key", text)
+
+
+class AgentRoutingTests(unittest.TestCase):
+    """`_run()` 的分流：`--dry-run` 走五步计划，其余一律走 Agent。"""
+
+    def test_dry_run_plans_and_does_not_start_the_agent(self):
+        with mock.patch.object(server_main, "_run_plan", return_value=EXIT_OK) as plan, \
+             mock.patch.object(server_main, "_run_agent") as agent:
+            self.assertEqual(server_main.main(["--dry-run", "--yes"]), EXIT_OK)
+        plan.assert_called_once()
+        agent.assert_not_called()
+
+    def test_a_real_run_goes_to_the_agent(self):
+        with mock.patch.object(server_main, "_run_plan") as plan, \
+             mock.patch.object(server_main, "_run_agent", return_value=EXIT_OK) as agent:
+            self.assertEqual(server_main.main(["--yes"]), EXIT_OK)
+        agent.assert_called_once()
+        plan.assert_not_called()
+
+    def test_yes_without_a_tty_still_starts_the_agent(self):
+        """Dockerfile / cloud-init 就是这么跑的：不能退回去重开终端窗口。"""
+        with mock.patch.object(server_main, "_is_tty", return_value=False), \
+             mock.patch.object(server_main, "_no_tty_guard") as guard, \
+             mock.patch.object(server_main, "_run_agent", return_value=EXIT_OK) as agent:
+            self.assertEqual(server_main.main(["--yes"]), EXIT_OK)
+        guard.assert_not_called()
+        agent.assert_called_once()
+
+    def test_no_tty_without_yes_never_starts_the_agent(self):
+        with mock.patch.object(server_main, "_is_tty", return_value=False), \
+             mock.patch.object(server_main, "_no_tty_guard", return_value=EXIT_ENV) as guard, \
+             mock.patch.object(server_main, "_run_agent") as agent:
+            self.assertEqual(server_main.main([]), EXIT_ENV)
+        guard.assert_called_once()
+        agent.assert_not_called()
+
+
+class AgentLoopTests(unittest.TestCase):
+    """`_run_agent`：起界面 → 起工作线程 → 等结论 → 恢复终端。"""
+
+    def setUp(self):
+        from server import ui_bridge
+        self._saved_ui = ui_bridge.get_ui()
+        self.addCleanup(ui_bridge.set_ui, self._saved_ui)
+
+    def test_terminal_is_started_closed_and_the_model_is_waited_for(self):
+        fake_ui = mock.MagicMock()
+        fake_ui.run.return_value = Outcome()        # 有主循环的界面：自己给出结论
+        thread = mock.MagicMock()
+        with mock.patch.object(term_chat, "make_ui", return_value=fake_ui), \
+             mock.patch.object(agent_install, "run_agent_install",
+                               return_value=thread) as run, \
+             mock.patch.object(server_main, "_finish_agent",
+                               return_value=EXIT_OK) as fin:
+            self.assertEqual(server_main._run_agent(_args()), EXIT_OK)
+        fake_ui.start.assert_called_once()
+        fake_ui.close.assert_called_once()
+        run.assert_called_once()
+        fin.assert_called_once()
+        thread.join.assert_not_called()             # 主循环已经拿到了结论，不用再等
+
+    def test_without_a_main_loop_it_joins_the_worker(self):
+        """管道里的 ConsoleUI 没有主循环：必须 join 工作线程，否则会提前收场。"""
+        fake_ui = mock.MagicMock()
+        fake_ui.run.return_value = None
+        fake_ui.outcome = Outcome(error="连不上模型服务器", exit_code=EXIT_FAILED)
+        thread = mock.MagicMock()
+        with mock.patch.object(term_chat, "make_ui", return_value=fake_ui), \
+             mock.patch.object(agent_install, "run_agent_install", return_value=thread), \
+             mock.patch.object(server_main, "_finish_agent",
+                               return_value=EXIT_FAILED) as fin:
+            self.assertEqual(server_main._run_agent(_args()), EXIT_FAILED)
+        thread.join.assert_called_once()
+        self.assertEqual(fin.call_args[0][3].error, "连不上模型服务器")
+
+    def test_the_terminal_is_closed_even_when_the_session_explodes(self):
+        fake_ui = mock.MagicMock()
+        fake_ui.start.side_effect = None
+        fake_ui.run.side_effect = RuntimeError("炸了")
+        with mock.patch.object(term_chat, "make_ui", return_value=fake_ui), \
+             mock.patch.object(agent_install, "run_agent_install",
+                               return_value=mock.MagicMock()), \
+             mock.patch.object(server_main, "_finish_agent", return_value=EXIT_OK):
+            with self.assertRaises(RuntimeError):
+                server_main._run_agent(_args())
+        fake_ui.close.assert_called_once()
+
+    def test_yes_hands_auto_mode_to_the_ui(self):
+        fake_ui = mock.MagicMock()
+        fake_ui.run.return_value = Outcome()
+        with mock.patch.object(term_chat, "make_ui",
+                               return_value=fake_ui) as make, \
+             mock.patch.object(agent_install, "run_agent_install",
+                               return_value=mock.MagicMock()), \
+             mock.patch.object(server_main, "_finish_agent", return_value=EXIT_OK):
+            server_main._run_agent(_args("--yes"))
+        self.assertTrue(make.call_args.kwargs["auto"])
+
+    def test_cli_notes_go_into_the_conversation(self):
+        """`ctx.log`/`ctx.note` 必须走界面 —— 工作线程直接 print 会把终端写花。"""
+        fake_ui = mock.MagicMock()
+        fake_ui.ui_log = mock.MagicMock()
+        seen = {}
+
+        def fake_run(ctx, args, ui, state, preflight=None):
+            seen["log"] = ctx.log
+            return mock.MagicMock()
+
+        with mock.patch.object(term_chat, "make_ui", return_value=fake_ui), \
+             mock.patch.object(agent_install, "run_agent_install", side_effect=fake_run), \
+             mock.patch.object(server_main, "_finish_agent", return_value=EXIT_OK):
+            server_main._run_agent(_args())
+        seen["log"]("测试一行")
+        fake_ui.ui_log.assert_called_once_with("测试一行")
+
+
+class AgentFinishTests(unittest.TestCase):
+    """`_finish_agent`：中断 / 失败 / 验收 / 报告 / 打开 claude。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.workdir = Path(tmp.name) / "work"
+        self.ctx = CliContext(home=Path(tmp.name), env={}, quiet=True)
+        self.args = _args("--dir", str(self.workdir))
+        self.state = {"node": {"version": "v22.11.0"},
+                      "claude": {"claude": "/usr/local/bin/claude", "version": "2.1"},
+                      "account": {"account_code": "CC-1", "note": "领到一个新账号"},
+                      "finished": True}
+
+    def run_finish(self, outcome, *, installed=True, interactive=False,
+                   opened=(True, "")):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(agent_install, "verify_installed",
+                               return_value=installed) as verify, \
+             mock.patch.object(agent_install, "open_claude",
+                               return_value=opened) as open_, \
+             mock.patch.object(term_chat, "is_interactive",
+                               return_value=interactive), \
+             mock.patch.object(server_main, "_report") as report, \
+             mock.patch.object(server_main, "_log_line"), \
+             mock.patch.object(sys, "stdout", out), \
+             mock.patch.object(sys, "stderr", err):
+            code = server_main._finish_agent(self.ctx, self.args, self.state, outcome)
+        return code, out.getvalue(), err.getvalue(), report, open_, verify
+
+    def test_abort_exits_130(self):
+        code, _, _, report, open_, _ = self.run_finish(Outcome(aborted=True))
+        self.assertEqual(code, 130)
+        report.assert_not_called()
+        open_.assert_not_called()
+
+    def test_a_model_error_carries_its_exit_code(self):
+        code, _, err, report, open_, _ = self.run_finish(
+            Outcome(error="连不上模型服务器", exit_code=EXIT_FAILED))
+        self.assertEqual(code, EXIT_FAILED)
+        self.assertIn("连不上模型服务器", err)
+        report.assert_not_called()
+        open_.assert_not_called()
+
+    def test_a_failed_verification_is_not_reported_as_success(self):
+        code, _, err, report, open_, _ = self.run_finish(Outcome(), installed=False)
+        self.assertEqual(code, EXIT_FAILED)
+        self.assertIn("核对", err)
+        report.assert_not_called()
+        open_.assert_not_called()
+
+    def test_success_reports_but_does_not_launch_without_a_tty(self):
+        code, _, _, report, open_, _ = self.run_finish(Outcome(), interactive=False)
+        self.assertEqual(code, EXIT_OK)
+        report.assert_called_once()
+        open_.assert_not_called()
+
+    def test_success_launches_claude_in_the_workdir(self):
+        code, out, _, _, open_, _ = self.run_finish(Outcome(), interactive=True)
+        self.assertEqual(code, EXIT_OK)
+        open_.assert_called_once_with("/usr/local/bin/claude",
+                                      workdir=str(self.workdir))
+        self.assertIn("启动 claude", out)
+
+    def test_a_failed_launch_still_exits_zero(self):
+        """安装本身成功了 —— 打不开 claude 不能变成失败。"""
+        code, _, err, report, _, _ = self.run_finish(
+            Outcome(), interactive=True, opened=(False, "找不到 claude 命令"))
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("找不到 claude 命令", err)
+        self.assertIn("手动打开", err)
+        report.assert_called_once()
+
+    def test_the_report_never_prints_secrets(self):
+        _, out, _, _, _, _ = self.run_finish(Outcome(), interactive=False)
+        self.assertNotIn("sk-", out)
+        self.assertNotIn("api_key", out)
 
 
 if __name__ == "__main__":

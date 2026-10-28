@@ -41,6 +41,7 @@ class ConsoleUI:
         self._last_len = 0          # 上一次进度行占了几个字符，擦行要用
         self._last_pct = -1
         self._last_at = 0.0
+        self.outcome = None         # 会话结束的结论（TerminalChat 里是 run() 的返回值）
 
     # ---------- 基础输出 ----------
     def _write(self, text: str = "", end: str = "\n"):
@@ -143,6 +144,36 @@ class ConsoleUI:
         return f"用户回答：{answer.strip()}"
 
     ask = ui_ask          # 老名字，别再直接调
+
+    # ---------- 会话驱动：和 term_chat.TerminalChat 同一套五个方法 ----------
+    # `server_main._run_agent` 两边一样地调 start/emit/ui_busy/finish，
+    # 差别只在"谁来跑主循环"：真终端是 TerminalChat.run()（泵按键），
+    # 这里是 `_run_agent` 直接 join 工作线程。
+
+    def emit(self, event):
+        """`run_one_task(emit=…)` 的出口。这里只认 "log"，别的没人看。"""
+        try:
+            kind, data = event
+        except (TypeError, ValueError):
+            return
+        if kind == "log":
+            self.ui_log(str(data))
+
+    def ui_busy(self, flag):
+        """管道里没有"底下一行"，BUSY 只是个语义标记，不用画。"""
+
+    def finish(self, outcome=None):
+        self.outcome = outcome
+
+    def start(self):
+        """没有终端可切（不切 raw mode，也不装信号处理器）。"""
+
+    def run(self):
+        """没有 tty 就没有键可读：直接返回工作线程给的结论。"""
+        return self.outcome
+
+    def close(self):
+        """没有需要恢复的终端状态。"""
 
 
 def make_console_ui(stream=None, auto=False) -> ConsoleUI:

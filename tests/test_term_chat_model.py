@@ -266,10 +266,16 @@ class TerminalChatHooksTests(unittest.TestCase):
         ui.ui_pow_progress("算力校验", 0.5)
         self.assertEqual(ui._events.get_nowait(), ("pow", ("算力校验", 0.5)))
 
-    def test_emit_is_the_same_as_push(self):
+    def test_emit_takes_the_queue_tuple(self):
+        """`run_one_task` 调的是 `emit(("log", 文字))` —— 一个元组，和 msg_queue.put 同签名。"""
         ui = TerminalChat()
-        ui.emit("log", "x")
+        ui.emit(("log", "x"))
         self.assertEqual(ui._events.get_nowait(), ("log", "x"))
+
+    def test_emit_ignores_malformed_events(self):
+        ui = TerminalChat()
+        ui.emit("随便一个字符串")
+        self.assertTrue(ui._events.empty())
 
     def test_finish_enqueues_a_done_event(self):
         ui = TerminalChat()

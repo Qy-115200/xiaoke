@@ -281,7 +281,14 @@ class TerminalChat:
     def push(self, kind, data=None):
         self._events.put((kind, data))
 
-    emit = push                                  # run_one_task(emit=...) 直接用它
+    def emit(self, event):
+        """`run_one_task(emit=…)` 的出口：收**一个** (kind, data) 元组，
+        和 `msg_queue.put` 同签名。别写成 `emit = push` —— 那是两个参数。"""
+        try:
+            kind, data = event
+        except (TypeError, ValueError):
+            return
+        self.push(kind, data)
 
     def ui_log(self, text):
         self.push("log", str(text))

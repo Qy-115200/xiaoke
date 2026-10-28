@@ -121,6 +121,29 @@ class ServerEntryImportTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("ClaudeCodeAssistant", r.stdout)
 
+    def test_the_agent_layers_stay_light(self):
+        """对话界面 / 工具 / 会话是服务器版的骨架：import 它们不能把界面库拖进来。
+
+        ★ 模型栈（openai / pydantic）**进包**了，但 `agent_core` 只在 `_session()`
+          里 import —— 这条测的就是那个延迟 import 没漏。"""
+        modules = ("server.term_keys", "server.term_render", "server.term_chat",
+                   "server.console_ui", "server.prompts_server",
+                   "server.agent_tools", "server.agent_install")
+        forbidden = tuple(self.FORBIDDEN) + ("bus", "prompts")
+        code = (
+            "import sys, importlib;"
+            "[importlib.import_module(m) for m in %r];"
+            "print([m for m in %r if m in sys.modules])"
+            % (list(modules), list(forbidden))
+        )
+        r = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "[]",
+                         "服务器版的 Agent 那几层把界面库或模型栈提前拖进来了")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

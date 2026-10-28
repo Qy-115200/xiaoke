@@ -7,13 +7,19 @@
 它和桌面版 `main.py` 是**两个独立入口**：
 
   main.py       有界面（customtkinter），给 Windows / macOS 和装了桌面的 Linux 用
-  server_main.py 只有终端，给没有图形界面的服务器用 —— 不跑 Agent、不问模型
+  server_main.py 只有终端，给没有图形界面的服务器用 —— **Agent 装，终端对话界面**
 
-★ 这个文件**不许 import tkinter / customtkinter / ui / agent_core / bus / llm**。
-  打包用 `server.spec`，那边把这些整包 exclude 掉；这里只要有一条 import 链把
-  tkinter 拖回来，在没有 X11 的机器上就会直接死掉。
+装的过程交给模型（和桌面版同一套 `agent_core.run_one_task`），主线程只管终端：
+干活时不许打字、输出完了打字回车发送、有选项时上下键选。唯一的确定性环节是
+账号引导（`server/agent_install.py`）：`get_client()` 没有 identity.json 就直接抛
+NoIdentity，模型连话都说不上，不可能先把自己装上。
 
-做的事就四件：装 Node → 装 claude → 领/绑账号 → 写配置。
+★ 这个文件**不许在模块级 import tkinter / customtkinter / ui / agent_core / bus / llm**。
+  打包用 `server.spec`，那边把 GUI 那几包全部 exclude 掉；这里只要有一条 import 链
+  把 tkinter 拖回来，在没有 X11 的机器上就会直接死掉。模型那几包（agent_core /
+  openai / pydantic）**进包**，但同样只在 `_run_agent` 里延迟 import。
+
+`--dry-run` 仍走那套确定性的五步计划（不联网、不写盘、退出码照旧），
 每一步都"能重跑"：已经有 Node 就不下载，已经有 claude 就不安装，
 已经有身份就不重新注册（重新注册 = 开新号 = 用户余额丢了）。
 """
@@ -474,17 +480,36 @@ def _no_tty_guard(argv, args) -> int:
 # ================= 主流程 =================
 
 def _run(args) -> int:
+    """`--dry-run` 走那套确定性的五步计划；真装东西走 Agent。
+
+    ★ 保留 `_run_plan` 有两个用处：一是 `--dry-run` 要在**不联网、不扣费**的前提下
+      告诉用户"会做什么"；二是它是 Agent 那套出事时的参照物（同样的五步）。
+    """
+    if args.dry_run:
+        return _run_plan(args)
+    return _run_agent(args)
+
+
+def _make_ctx(ui, quiet, dry_run=False, route_log=False) -> CliContext:
+    """`route_log=True`：让 `ctx.log/note` 走界面（对话流），而不是直接 print。
+
+    只有 Agent 模式需要 —— 那时主线程独占终端，工作线程里的 print 会把屏幕写花。
+    """
+    return CliContext(home=Path.home(), env=os.environ.copy(), ui=ui,
+                      dry_run=dry_run, quiet=quiet,
+                      log=ui.ui_log if route_log else None)
+
+
+def _run_plan(args) -> int:
     quiet = bool(args.quiet)
 
     ui = console_ui.make_console_ui()
     ui.verbose = not quiet
     ui_bridge.set_ui(ui)
 
-    ctx = CliContext(home=Path.home(), env=os.environ.copy(),
-                     ui=ui, dry_run=args.dry_run, quiet=quiet)
+    ctx = _make_ctx(ui, quiet, dry_run=True)
 
-    if args.dry_run:
-        ctx.log("（--dry-run）只打印计划，不下载、不写盘。\n")
+    ctx.log("（--dry-run）只打印计划，不下载、不写盘。\n")
 
     _step(1, "检查环境")
     env_info = _preflight(ctx, args)
@@ -503,6 +528,92 @@ def _run(args) -> int:
     _config_step(ctx, args)
 
     _report(ctx, args, node_info, claude_info, account)
+    return EXIT_OK
+
+
+def _run_agent(args) -> int:
+    """真装东西：主线程跑终端界面，工作线程跑模型（见 server/agent_install.py）。
+
+    ★ 主线程是**唯一**碰 tty 的线程。工作线程的一切输出都走 `ui` 的队列，
+      由主线程画出来 —— 两边同时写终端会把屏幕写花。
+    """
+    from server import agent_install, term_chat
+
+    quiet = bool(args.quiet)
+    ui = term_chat.make_ui(auto=bool(args.yes), quiet=quiet)
+    if hasattr(ui, "verbose"):
+        ui.verbose = not quiet
+    ui_bridge.set_ui(ui)
+
+    ctx = _make_ctx(ui, quiet, route_log=True)
+    state = {}
+    outcome = None
+    try:
+        ui.start()
+        thread = agent_install.run_agent_install(
+            ctx, args, ui, state, preflight=_preflight)
+        outcome = ui.run()
+        if outcome is None:
+            # 没有主循环的那种界面（管道里的 ConsoleUI）：等线程给出结论
+            thread.join()
+            outcome = getattr(ui, "outcome", None)
+    finally:
+        try:
+            ui.close()
+        except Exception:
+            pass
+
+    return _finish_agent(ctx, args, state, outcome)
+
+
+def _finish_agent(ctx, args, state, outcome) -> int:
+    """会话结束之后：报账 → 验一遍 → 打开 claude。"""
+    from server import agent_install, term_chat
+
+    if outcome is None:
+        from server.term_chat import Outcome
+        outcome = Outcome()
+
+    if outcome.aborted:
+        _say("\n已中断。")
+        _log_line("agent: aborted by user")
+        return 130
+    if outcome.error:
+        _say_err(f"\n✖ {outcome.error}")
+        _log_line(f"agent failed: {outcome.error}")
+        return int(outcome.exit_code or EXIT_FAILED)
+
+    # ★ 模型那边过了一道 finish_install，这里再拿磁盘上的真东西核一遍：
+    #   模型说"装好了"不算数，Node / claude / 账号 / 配置四样都在才算。
+    if not agent_install.verify_installed(state):
+        _say_err("\n✖ 模型说装完了，但核对文件时对不上"
+                 "（Node / claude / 账号 / 配置文件有一样不在）")
+        _say_err("  重跑一次安装器通常会接着上次的进度往下走：")
+        _say_err("    curl -fsSL https://aikaui.com/install.sh | sh")
+        _log_line("verify_installed failed after the agent said finished")
+        return EXIT_FAILED
+
+    # ★ 收尾报告用一份**新的** ctx：终端已经恢复原状，这里要直接 print 到 stdout。
+    #   还用原来那份的话，`ctx.log` 会继续往对话队列里塞，而那些事件已经没人泵了
+    #   —— 用户会一个字都看不到。
+    report_ctx = CliContext(home=ctx.home, env=ctx.env, quiet=ctx.quiet)
+    _report(report_ctx, args, state.get("node") or {}, state.get("claude") or {},
+            state.get("account") or {})
+
+    # 只有真终端才自动打开 claude：管道里、`--yes` 的容器里没人能接管它的交互界面，
+    # 硬起一个 TUI 只会把输出搅乱。
+    if not term_chat.is_interactive():
+        return EXIT_OK
+
+    workdir = Path(args.dir).expanduser() if args.dir else Path.home()
+    claude_path = (state.get("claude") or {}).get("claude") or ""
+    _say(f"\n正在 {workdir} 里启动 claude …")
+    ok, why = agent_install.open_claude(claude_path, workdir=str(workdir))
+    if not ok:
+        # 安装本身是成功的 —— 自动打开失败不能变成退出码 ≠ 0
+        _say_err(f"✖ 自动打开没成功：{why}")
+        _say_err(f"  手动打开：cd {workdir} && claude")
+        _log_line(f"open_claude failed: {why}")
     return EXIT_OK
 
 
