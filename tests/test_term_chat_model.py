@@ -6,9 +6,12 @@
 坏掉，所以状态机单独拎出来测。
 """
 
+import io
 import sys
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -283,6 +286,50 @@ class TerminalChatHooksTests(unittest.TestCase):
         kind, data = ui._events.get_nowait()
         self.assertEqual(kind, "done")
         self.assertTrue(data.aborted)
+
+
+class RawModeTests(unittest.TestCase):
+    """`start()` 切终端模式那一小段。用假 termios 跑，不需要真 tty。"""
+
+    ISIG = 0o1
+    ICANON = 0o2
+    ECHO = 0o10
+    TCSADRAIN = 2
+
+    def _start(self):
+        written = []
+        attrs = [0, 0, 0, self.ISIG | self.ICANON | self.ECHO, 0, 0, []]  # [3] 是 lflag
+
+        def setcbreak(_fd):
+            # 和 CPython 的 tty.setcbreak 一样：只关 ICANON，不动 ISIG
+            attrs[3] &= ~self.ICANON
+
+        def tcsetattr(_fd, _when, value):
+            written.append(value)
+            attrs[:] = value
+
+        fake = types.SimpleNamespace(
+            ISIG=self.ISIG, TCSADRAIN=self.TCSADRAIN,
+            tcgetattr=lambda _fd: list(attrs), tcsetattr=tcsetattr)
+        ui = TerminalChat(stream=io.StringIO(), fd_in=-1, fd_out=-1)
+        with mock.patch.dict(sys.modules, {"termios": fake,
+                                           "tty": types.SimpleNamespace(
+                                               setcbreak=setcbreak)}):
+            ui.start()
+        self.addCleanup(ui.close)
+        return written
+
+    def test_ctrl_c_is_a_byte_not_a_signal(self):
+        """★ setcbreak 不动 ISIG。留着它，Ctrl-C 会变成真 SIGINT 直接打断，
+        用户就永远看不到「再按一次 Ctrl-C 中断」那一步。"""
+        written = self._start()
+        self.assertTrue(written, "start() 没有把终端属性写回去")
+        self.assertFalse(written[-1][3] & self.ISIG, "ISIG 还开着，Ctrl-C 会变成信号")
+
+    def test_the_rest_of_the_mode_is_left_alone(self):
+        """只拨 ISIG 这一位；把整组 lflag 写死会让用户原来的终端设置悄悄变掉。"""
+        written = self._start()
+        self.assertTrue(written[-1][3] & self.ECHO, "不该动 ECHO 以外的位")
 
 
 class MakeUITests(unittest.TestCase):

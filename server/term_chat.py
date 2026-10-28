@@ -340,7 +340,13 @@ class TerminalChat:
             pass
         try:
             self._saved = termios.tcgetattr(self._fd_in)
-            tty.setcbreak(self._fd_in)            # 关掉行缓冲和回显，但保留 Ctrl-C 的语义
+            tty.setcbreak(self._fd_in)            # 关掉行缓冲和回显
+            # ★ setcbreak **不动 ISIG**：开着的话 Ctrl-C 会变成真 SIGINT 直接打断
+            #   run()，用户永远看不到「再按一次中断」。关掉它，让 \x03 变成一个普通
+            #   按键，交给 ChatModel 去做两次确认；SIGTERM / SIGHUP 仍然照常收场。
+            now = termios.tcgetattr(self._fd_in)
+            now[3] &= ~termios.ISIG               # [3] 是 lflag
+            termios.tcsetattr(self._fd_in, termios.TCSADRAIN, now)
         except Exception:
             self._saved = None
         self._started = True

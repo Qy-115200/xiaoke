@@ -24,10 +24,7 @@ from pathlib import Path
 from agent_bus import user_input_queue
 from server import agent_tools, identity
 from server import prompts_server as P
-from server.cli import (
-    EXIT_ACCOUNT, EXIT_CONFIG, EXIT_ENV, EXIT_FAILED, EXIT_NODE, EXIT_NPM,
-    EXIT_OK, CliError,
-)
+from server.cli import EXIT_ACCOUNT, EXIT_FAILED, EXIT_OK, CliError
 from server.term_chat import Outcome
 
 SITE_URL = "https://aikaui.com"
