@@ -12,11 +12,19 @@
 ★ 产物名必须是 `ClaudeCodeAssistant`：updater._extract_linux 是按这个文件名
   在下载的压缩包里找可执行文件的。
 
-★ excludes 是本文件存在的意义。界面库一条都不能漏：
+★ excludes 保证的是**界面库一条都不进**：
   - customtkinter → 拖进 tkinter/_tkinter/Tcl/Tk，包大十几兆，而且没有 $DISPLAY
     的机器上初始化就失败；
-  - openai/pydantic/httpx → Agent 那条链，服务器版一个字都用不到。
-  漏一个，服务器上就会拿到一个又大又可能起不来的包。
+  - 桌面版专属的 updater / notify / platform_support.windows|macos。
+
+★ 模型栈（openai / pydantic / httpx2 …）**现在进包了**：服务器版改成 Agent 装了，
+  和桌面版跑的是同一套 `agent_core.run_one_task`。代价大约是 +12~18MB。
+  但 `agent_core` / `llm` 仍然可以在 `server_main` 顶层之外延迟 import —— 见
+  `server/agent_install._session()`，所以 `--balance` 这类命令不会拖起模型栈。
+
+★ `helpers` **不能**排除：`server/term_render.py` 从它那里取 `norm_options` /
+  `resolve_option`（桌面版和终端版的选项语义靠这一个来源对齐）。它只 import
+  math / re，带进来是零成本的。
 """
 
 import sys
@@ -29,13 +37,19 @@ sys.path.insert(0, SPECPATH)                          # noqa: F821
 NAME = "ClaudeCodeAssistant"
 
 # ================= 第三方包的隐式资源 =================
-# 身份层要 requests + 它那串依赖（证书、idna、编码表都是数据文件，PyInstaller
-# 不会自动收）。这些都是纯 Python，几十 KB。
+# ① 身份层要 requests + 它那串依赖（证书、idna、编码表都是数据文件，PyInstaller
+#    不会自动收）。这些都是纯 Python，几十 KB。
+# ② 模型栈：openai 3.x 真正依赖的是 **httpx2 / httpcore2**（不是 httpx/httpcore），
+#    pydantic 2.x 的 core 是编译扩展。collect_all 会把它们的数据文件和子模块一起收，
+#    漏一个就是在客户机上 ModuleNotFoundError（那时已经在装东西了，最难看）。
 datas = []
 binaries = []
 hiddenimports = []
 for pkg in ("requests", "certifi", "urllib3", "charset_normalizer", "idna",
-            "typing_extensions"):
+            "typing_extensions",
+            "openai", "pydantic", "pydantic_core", "annotated_types",
+            "typing_inspection", "httpx2", "httpcore2", "h11", "truststore",
+            "anyio", "jiter", "sniffio"):
     try:
         d, b, h = collect_all(pkg)
     except Exception:
@@ -46,6 +60,13 @@ for pkg in ("requests", "certifi", "urllib3", "charset_normalizer", "idna",
 
 # platform_support 是按 sys.platform 延迟 import 的，PyInstaller 跟不到
 hiddenimports += ["platform_support.linux"]
+
+# 服务器版自己的模块：入口只 import 到 server.* 的一部分，其余（尤其 Agent 那层）
+# 是函数里 import 的，静态分析跟不到。点名列全 —— 少一个就是运行时 ModuleNotFoundError。
+hiddenimports += ["agent_bus", "agent_core", "llm",
+                  "server.agent_install", "server.agent_tools",
+                  "server.prompts_server", "server.term_chat",
+                  "server.term_keys", "server.term_render"]
 
 # 终端里画二维码（--recharge）。它在函数里被 try/except 包着延迟 import，
 # 静态分析有时候会把这种当成"可选的"漏掉，点名带上。没装就跳过 ——
@@ -62,16 +83,15 @@ hiddenimports += ["lzma", "_lzma"]
 
 # ================= 明确排除 =================
 EXCLUDES = [
-    # 界面
+    # 界面（这一条是硬要求：没有 $DISPLAY 的机器上导入 Tk 会直接炸）
     "tkinter", "_tkinter", "customtkinter", "PIL", "Pillow",
-    "ui", "images", "deps", "helpers",
-    # Agent / 模型
-    "openai", "pydantic", "pydantic_core", "httpx2", "httpcore2", "anyio",
-    "jiter", "sniffio", "oauthlib", "distro", "tqdm",
-    "agent_core", "bus", "llm", "prompts",
+    "ui", "images", "deps",
+    # ★ `helpers` 不在排除之列：term_render 要用它的选项语义（见文件头说明）。
     # 桌面版专属
     "updater", "notify",
     "platform_support.windows", "platform_support.macos", "win32com", "winreg",
+    # 模型栈里用不到的可选依赖（openai 3.15 的源码里一次都没 import）
+    "oauthlib", "distro", "tqdm",
 ]
 
 # ================= 打包 =================

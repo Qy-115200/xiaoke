@@ -77,10 +77,14 @@ python collab/collab.py status    # 谁在做什么、有没有人在等我回�
 
 `Claude Code 安装助手`：桌面应用（Python 3.12 + customtkinter，深色主题），
 Windows / macOS 功能一致（**都没有托盘，关窗即退出**）。
-**Linux 发的是服务器版**（`server_main.py`，纯终端、不 import tkinter）：四步
-Node → claude → 账号 → 配置，官网用 `curl -fsSL https://aikaui.com/install.sh | sh` 装。
+**Linux 发的是服务器版**（`server_main.py`，纯终端、不 import tkinter）。1.4.6 起它和桌面版
+**跑同一套 Agent 循环**（`agent_core.run_one_task`），只是界面换成了终端对话：
+干活时不能打字，说完了打字回车发送，有选项时 ↑↓ 选、回车确认；装完自动进 `claude`。
+唯一的确定性环节是**账号引导**（`server/agent_install.py`）——模型客户端本身就要
+`identity.json` 才能说话。`--dry-run` 仍然只打印那条参考路线，不联网、不调模型。
+官网用 `curl -fsSL https://aikaui.com/install.sh | sh` 装。
 桌面版和服务器版是两个入口、两份 spec，别把界面代码漏进 `server_main.py` ——
-`tests/test_imports.py` 会拦。
+`tests/test_imports.py` 会拦（模型栈是**允许**进包的，界面库不行）。
 PyInstaller 打包：Windows 单文件 exe、macOS `.app`、Linux 单文件（`server.spec`，有控制台）。
 平台差异全在 `platform_support/`，其它模块不直接 import 平台 API。
 自动更新在 `updater.py`：查 `https://aikaui.com/latest.json` → 后台静默下载 →

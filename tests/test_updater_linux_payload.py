@@ -8,6 +8,7 @@
 """
 
 import io
+import re
 import subprocess
 import sys
 import tarfile
@@ -24,9 +25,30 @@ SPEC = ROOT / "server.spec"
 WORKFLOW = ROOT / ".github" / "workflows" / "build.yml"
 
 
+def _listed(text, name):
+    """取出所有 `NAME = [...]` / `NAME += [...]` 里的字符串（可以有多次追加）。
+
+    ★ 不能再用全文 `assertIn('"openai"', text)`：模型栈现在**该进包**，
+      所以 `openai` 会出现在 collect_all 那个元组里。全文匹配会把
+      「被排除」和「被打包」看成一回事。"""
+    out = []
+    for m in re.finditer(rf"^{re.escape(name)}\s*(?:\+?=)\s*\[([^\]]*)\]",
+                         text, re.M):
+        out += re.findall(r'"([^"]+)"', m.group(1))
+    return out
+
+
+def _collect_all_packages(text):
+    m = re.search(r"for pkg in \((.*?)\):", text, re.S)
+    return re.findall(r'"([^"]+)"', m.group(1)) if m else []
+
+
 class ServerSpecTests(unittest.TestCase):
     def setUp(self):
         self.text = SPEC.read_text(encoding="utf-8")
+        self.excludes = _listed(self.text, "EXCLUDES")
+        self.hidden = _listed(self.text, "hiddenimports")
+        self.collected = _collect_all_packages(self.text)
 
     def test_entry_point(self):
         self.assertIn('["server_main.py"]', self.text)
@@ -39,17 +61,45 @@ class ServerSpecTests(unittest.TestCase):
         # False 的话 print 和报错会被吞掉，服务器上等于瞎跑
         self.assertIn("console=True", self.text)
 
-    def test_ui_and_agent_are_excluded(self):
-        for mod in ("tkinter", "customtkinter", "openai", "pydantic",
-                    "agent_core", "ui", "bus", "llm", "updater"):
+    def test_gui_is_excluded(self):
+        self.assertTrue(self.excludes, "EXCLUDES 解析不出来")
+        for mod in ("tkinter", "_tkinter", "customtkinter", "PIL",
+                    "Pillow", "ui", "updater"):
             with self.subTest(mod=mod):
-                self.assertIn(f'"{mod}"', self.text)
+                self.assertIn(mod, self.excludes)
+
+    def test_helpers_is_kept(self):
+        """`server/term_render.py` 要从 helpers 取 norm_options / resolve_option。
+        把它排除掉，服务器版一进对话界面就 ModuleNotFoundError。"""
+        self.assertNotIn("helpers", self.excludes)
+        self.assertTrue((ROOT / "server" / "term_render.py")
+                        .read_text(encoding="utf-8").find("from helpers import") >= 0)
+
+    def test_the_model_stack_is_bundled_not_excluded(self):
+        """这次改成 Agent 装了：openai / pydantic 必须**进包**。"""
+        for mod in ("openai", "pydantic", "pydantic_core", "httpx2",
+                    "httpcore2", "agent_core", "llm"):
+            with self.subTest(mod=mod):
+                self.assertNotIn(mod, self.excludes)
+        for pkg in ("openai", "pydantic", "pydantic_core", "httpx2",
+                    "httpcore2", "anyio", "jiter", "sniffio"):
+            with self.subTest(pkg=pkg):
+                self.assertIn(pkg, self.collected)
+
+    def test_new_server_modules_are_hidden_imports(self):
+        """这些模块是函数里 import 的，PyInstaller 的静态分析跟不到。"""
+        for mod in ("agent_bus", "agent_core", "llm",
+                    "server.agent_install", "server.agent_tools",
+                    "server.prompts_server", "server.term_chat",
+                    "server.term_keys", "server.term_render"):
+            with self.subTest(mod=mod):
+                self.assertIn(mod, self.hidden)
 
     def test_lzma_and_linux_hidden(self):
         # 解 Node 的 .tar.xz 要 lzma；platform_support.linux 是延迟 import
-        self.assertIn('"platform_support.linux"', self.text)
-        self.assertIn('"lzma"', self.text)
-        self.assertIn('"_lzma"', self.text)
+        self.assertIn("platform_support.linux", self.hidden)
+        self.assertIn("lzma", self.hidden)
+        self.assertIn("_lzma", self.hidden)
 
     def test_does_not_touch_agent_spec(self):
         agent = (ROOT / "agent.spec").read_text(encoding="utf-8")

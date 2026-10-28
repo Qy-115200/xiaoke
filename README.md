@@ -150,8 +150,20 @@ python -m unittest discover -s tests
 ## 服务器版（Linux，无图形界面）
 
 服务器上没有 X11 / Wayland，`python main.py` 一进来就 `import customtkinter`，
-`ctk.CTk()` 会直接抛 `TclError`。所以 Linux 发的是**另一份产物**：一个纯终端程序，
-把"装 Node → 装 claude → 领账号 → 写配置"这四件事按固定顺序做完，不跑 Agent、不调模型。
+`ctk.CTk()` 会直接抛 `TclError`。所以 Linux 发的是**另一份产物**：一个纯终端程序。
+
+**它和桌面版跑的是同一套 Agent 循环**（`agent_core.run_one_task`），只是把界面换成了
+终端对话：装 Node → 装 claude → 领账号 → 写配置这几件事由模型来决定顺序、怎么补救、
+什么时候该问你，不再是一条写死的流水线。唯一的确定性环节是**账号引导**——模型客户端
+本身就要 `identity.json` 才能说话，所以那几步由代码问、代码办。
+
+终端里的约定：
+
+- **在干活时不能打字**（底部一行转圈 + 已用时），干完了才能打字、回车发送；
+- 有选项时高亮整行，`↑`/`↓` 选、回车确认，Esc 跳到「自己打字」；
+- `Ctrl-C` 要按两次：第一次只是「上膛」，2 秒内再按一次才中断。
+  **已经开始的下载/安装不会被杀掉**（子进程是独立会话），它会自己在后台跑完；
+- 真终端里装完会自动进入 `claude`；管道/容器里（`--yes`）不会，只打印怎么启动。
 
 一条命令装好（脚本会自动下 [latest.json](https://aikaui.com/latest.json) 里 `linux-x64`
 那一条，校验 sha256，不需要 root）：
@@ -164,12 +176,12 @@ curl -fsSL https://aikaui.com/install.sh | sh
 并往 `~/.bashrc` / `~/.profile` 写一段带标记的 PATH（`# >>> aikaui >>>`，重跑不会重复写）。
 装完会跑一次 `--version`：**跑不起来就退 4，不会留下一个"装上了但用不了"的状态**。
 
-装完直接启动（四个步骤会一步步问，缺什么补什么）：
+装完直接启动（模型会一步步做，需要你拿主意的时候它才问）：
 
 ```bash
 claude-code-assistant                 # 首次运行：注册账号 → 写 ~/.claude.json → 提示怎么用
 claude-code-assistant --account-code <账户码> --account-key <账户密钥>   # 用已有账号绑这台机器
-claude-code-assistant --yes           # 全默认，适合写进 Dockerfile / cloud-init
+claude-code-assistant --yes           # 全默认，适合写进 Dockerfile / cloud-init（需要模型可达）
 claude-code-assistant --dry-run       # 只打印要做什么，不下载、不写任何文件
 claude-code-assistant --repair        # 只对账配置：跟 identity.json 不一致就补齐（见下）
 claude-code-assistant --balance       # 查余额和用量
@@ -182,7 +194,7 @@ claude-code-assistant --recharge 20   # 充 20 元：在终端里打印付款二
 | `--account-code` / `--account-key` | 绑已有账号（比在新机器上再注册一个更常见） |
 | `--new-account` | 上次注册没走完、留下了旧账户码时，明确放弃它重新注册 |
 | `--node-version` / `--claude-version` | 钉版本；默认 Node 取 LTS、claude 取 latest |
-| `--yes` / `--force` / `--quiet` | 不提问 / 已装也重装 / 只输出错误 |
+| `--yes` / `--force` / `--quiet` | 不提问（提问时自动选第一项）/ 已装也重装 / 只输出错误；`--yes` 现在**需要模型可达**，见下 |
 | `--repair` | 只检查并修复 `~/.claude.json` 和 `~/.claude/settings.json`，不装 Node、不装 claude、不注册账号 |
 | `--balance` | 只查余额和用量（今日 / 本月 token），不装东西 |
 | `--recharge 金额` | 创建充值订单并打印二维码；`--channel wechat` 可指定微信（默认支付宝） |
@@ -207,7 +219,23 @@ claude-code-assistant --recharge 20   # 充 20 元：在终端里打印付款二
 提示里只出现 `<密钥>` 这样的占位符。
 
 
-**四步和三处"自动"**
+**它是分两层跑的：** 上面这几件"装什么、怎么装"交给模型（工具在
+[`server/agent_tools.py`](server/agent_tools.py)，提示词在
+[`server/prompts_server.py`](server/prompts_server.py)），模型的顺序**大概率**是这四步；
+`--dry-run` 打印的就是这条确定性参考路线（不联网、不调模型，退出码照旧）。
+
+模型能用的 12 个工具：`ensure_node` / `install_claude` / `configure_claude` /
+`finish_install`（验收闸门：Node、claude、账号、两份配置都在才算装好）、
+`bash` / `read_file` / `write_file` / `ask_user`、`query_balance` / `query_usage` /
+`query_pay_methods` / `create_recharge`。**没有** VSCode、快捷方式、`aikaui://` 协议、
+`login_with_account_code` —— 账户密钥不进模型的上下文。
+
+`bash` 有护栏：不许 `sudo`、不许 `apt/dnf/yum/apk/snap install`、不许自己 `npm install`
+（那几条坑在 `install_claude` 里已经处理好了，让模型现编就是事故重演）、
+不许读写 `~/.claude-agent/`（里面有 `api_key`）；子进程一律 `stdin=/dev/null`，
+否则它会抢走终端的按键，用户看到的是"打字没反应"。
+
+**四步的细节**（也就是那四个工具的实现在做**什么**）：
 
 1. **环境自检**：不是 Linux、架构不是 x86_64/aarch64、`~/.local` 不可写，都会在下载任何
    东西之前就失败（退出码 3）。root 不拦，只警告一句：东西全落在 `/root` 下，换个人用不了。
@@ -231,6 +259,18 @@ claude-code-assistant --recharge 20   # 充 20 元：在终端里打印付款二
    `bind_account()`；都没有才 `register_device()`（PoW 进度在终端里画一行）。
    最后 `bypass_region_check()` + `set_model_config()` 写 `~/.claude.json` 和
    `~/.claude/settings.json`。
+
+**模型连不上就直说连不上。** 这是用户明确要的：不假装装好了、也不含糊成"安装失败"。
+[`server/agent_install.py`](server/agent_install.py) 按原因分开说：
+
+| 原因 | 打出来的话 | 退出码 |
+|---|---|---|
+| 本机没有账号凭证 | 本机没有账号凭证，模型用不了 | 4 |
+| 余额不足 | 账户余额不足（+ 充值命令） | 4 |
+| 连不上模型服务器 | 连不上模型服务器（+ 先确认能打开 aikaui.com） | 1 |
+| 模型服务器返回看不懂的内容 | 等一会儿重跑；一直这样请联系我们 | 1 |
+| 跑满 25 步还没装完 | Agent 跑满了步数上限还没装完 | 1 |
+| 用户按了两次 Ctrl-C | 已中断 | 130 |
 
 **配置自愈**。两份配置里的 `ANTHROPIC_*` 是我们写的，但用户重装 / 升级 Claude Code、
 上次写盘中断、服务端轮换 token，都会让它们跟 `~/.claude-agent/identity.json` 对不上。
@@ -281,24 +321,37 @@ claude-code-assistant --recharge 20   # 充 20 元：在终端里打印付款二
 | 3 | 包不对：非 https、大小不符、sha256 不符、tar 读不了、包里有 `../`、包内没有可执行文件 |
 | 4 | 装上了但 `--version` 跑不起来（glibc / 架构不兼容） |
 
-`claude-code-assistant`（四步向导）：
+`claude-code-assistant`（Agent 装 + 终端对话）：
 
 | 码 | 含义 |
 |---|---|
-| 0 | 四步全部完成 |
+| 0 | 装好了（`--dry-run` / `--balance` / `--recharge` / `--repair` 成功也走这个码） |
+| 1 | 没归类的失败：模型连不上、模型服务器返回看不懂的内容、跑满步数还没装完、装完但核验没过 |
 | 2 | 参数不对（argparse） |
 | 3 | 环境不支持 / `~/.local` 不可写，或没有 TTY 又没给 `--yes` |
 | 4 | 账号：注册失败、绑账号失败、本地留着未完成注册的旧账户码却没给 `--new-account`（`--repair` 时是"本机没有账号"） |
 | 5 | Node 装不上（镜像挂了、校验失败） |
 | 6 | npm 装不上（网络、权限、包缺原生二进制） |
 | 7 | 配置写不进 `~/.claude.json` / `~/.claude/settings.json`；`--repair` 遇到坏文件、写入校验失败，或者配置还指向别家中转（加 `--force` 才换成我们的） |
+| 130 | 用户在终端里按了两次 Ctrl-C |
+
+★ 5/6/7 现在是 **Agent 调工具时拿到的失败**：它自己会重试、换镜像、问你要不要继续，
+这几条只在"它也解决不了、最后收场"时才成为退出码。所以脚本化部署仍然可以按码判断。
 
 装完 `install.sh` 会**直接进向导**，并把向导的退出码原样透传出来 ——
 所以 `curl … | sh` 返回 5/6/7 时，问题在向导那一步，照第二张表查。
 
 **没有 TTY 的时候**（CI、`ssh host cmd`、被别的脚本调用）：不阻塞、不假装成功。
 `DISPLAY` 在就试着用 `x-terminal-emulator`/`gnome-terminal` 之类把向导开在真终端里，
-否则打一行提示 + 写 `~/.claude-agent/cli.log`，退 3。`--yes` 可以完全绕过这个分支。
+否则打一行提示 + 写 `~/.claude-agent/cli.log`，退 3。
+
+`--yes` 可以完全绕过这个分支，但**语义变了**：它现在进的是 Agent 模式，
+所以要求 ① 这台机器已经有账号（没有的话 `--account-code`/`--account-key` 一起给，
+或者先在真终端里跑一次），② 模型服务连得上。两条缺一条就会照实报错退出
+（4 / 1），不会退回去走那条老流水线。管道里没有主循环，所以：
+
+- 模型提问时自动选第一项，并打一行 `[自动] 选了：…` 留痕；
+- 不会自动进 `claude`（那是给人用的交互界面），只打印 `cd <工作目录> && claude`。
 
 **`install.sh` 认这几个环境变量**（都是给测试和特殊部署用的，正常安装不用管）：
 `AIKAUI_SITE`（换站点，默认 `https://aikaui.com`）、`AIKAUI_LIB`（换安装目录）、
@@ -330,16 +383,27 @@ python -m PyInstaller server.spec --noconfirm --clean    # Linux（服务器版�
 `ui/`、`server/`、`platform_support/` 收进去，不用手工维护模块清单。要手工列的数据文件只有图标
 （Windows 的 `agent.ico`、macOS/Linux 的 `agent.png`）和 macOS 的 `agent.icns`。
 
-`server.spec` 另外做了三件和 `agent.spec` 不同的事，改的时候别照抄漏掉：
+`server.spec` 另外做了几件和 `agent.spec` 不同的事，改的时候别照抄漏掉：
 
 - **`console=True`**。GUI 版没有控制台是有意的；服务器版没有控制台等于把所有报错吞掉。
-- **`excludes` 里点名 `tkinter` / `customtkinter` / `PIL` / `openai` / `pydantic` /
-  `agent_core` / `bus` / `llm` / `ui` / `updater`**。这不是省体积，是**保证界面和 Agent 链
-  进不来** —— `tests/test_imports.py` 会断言 `import server_main` 之后这些模块不在
+- **`excludes` 里点名 `tkinter` / `_tkinter` / `customtkinter` / `PIL` / `Pillow` /
+  `ui` / `images` / `deps` / `updater` / `notify` / `platform_support.windows|macos`**。
+  这不是省体积，是**保证界面库进不来** —— `tests/test_imports.py` 会断言
+  `import server_main` 之后这些模块（连同 `openai` / `pydantic` / `agent_core`）不在
   `sys.modules` 里，所以"不小心 import 了 `ui.something`"会在测试阶段就红。
-- **hiddenimports 带 `lzma` / `_lzma` 和 `platform_support.linux`**。前者是解 Node 的
-  `.tar.xz` 用的（PyInstaller 不会自动收 C 扩展），后者是 `platform_support/__init__.py`
-  按平台延迟 import 的，静态分析看不到。
+- **模型栈现在进包了**（1.4.6 起服务器版是 Agent 装）。`openai` / `pydantic` /
+  `pydantic_core` / `httpx2` / `httpcore2` / `anyio` / `jiter` / `sniffio` 都走
+  `collect_all`，包大概从 26MB 涨到 38~44MB。注意 **openai 3.x 依赖的是
+  `httpx2` / `httpcore2`**，不是 `httpx` / `httpcore` —— 写错名字 `collect_all` 会静默跳过，
+  到用户机器上才 `ModuleNotFoundError`。
+- **`helpers` 不能排除**：`server/term_render.py` 从它取 `norm_options` / `resolve_option`
+  （桌面版和终端版的选项语义靠同一个来源对齐）。它只 import `math` / `re`。
+- **`hiddenimports` 点名 `agent_bus` / `agent_core` / `llm` / `server.agent_install` /
+  `server.agent_tools` / `server.prompts_server` / `server.term_chat` / `server.term_keys` /
+  `server.term_render` / `lzma` / `_lzma` / `platform_support.linux`**。这些全是**函数里
+  import** 的（`--balance` 不该把模型栈拖起来），静态分析跟不到，漏一个就是运行时崩。
+  `lzma` 是解 Node 的 `.tar.xz` 用的（PyInstaller 不会自动收 C 扩展），
+  `platform_support.linux` 是 `platform_support/__init__.py` 按平台延迟 import 的。
 
 **CI**：打 `v*` tag（或手动触发）时 [`.github/workflows/build.yml`](.github/workflows/build.yml)
 在四个 runner 上并行构建（windows-x64 / macos-arm64 / macos-x64 / linux-x64），产物传到
