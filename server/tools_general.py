@@ -30,12 +30,16 @@ from server.ui_bridge import get_ui
 
 # ================= 通用工具 =================
 
-def bash(cmd: str, timeout: int = 600, show_progress: bool = False) -> str:
+def bash(cmd: str, timeout: int = 600, show_progress: bool = False,
+         stdin=None) -> str:
     """执行 shell 命令，返回输出。
     参数：
       cmd           要执行的命令
       timeout       超时秒数，默认 600（10 分钟）
       show_progress 是否显示进度条
+      stdin         子进程的标准输入。默认 None = 沿用父进程（桌面版的 bash 工具靠它）；
+                    服务器版传 DEVNULL —— 真终端里 stdin 是 tty，子进程一个 read
+                    就会把用户的按键吃掉，界面上看起来像"打字没反应"。
     """
     # ---------- 安全过滤：拒绝危险命令 ----------
     forbidden = ["rm -rf /", "sudo rm", "format c:", "del /f /s /q c:"]
@@ -64,7 +68,7 @@ def bash(cmd: str, timeout: int = 600, show_progress: bool = False) -> str:
 
     try:
         stdout, stderr, timed_out, code = _run_capture(
-            argv, shell=use_shell, timeout=timeout, env=env)
+            argv, shell=use_shell, timeout=timeout, env=env, stdin=stdin)
         if timed_out:
             return (f"[超时] 命令超过 {timeout} 秒，已终止。"
                     "如果是网络下载：加上 --connect-timeout / --max-time，或者换国内镜像再试。")
