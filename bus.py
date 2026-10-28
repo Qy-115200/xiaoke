@@ -13,16 +13,21 @@ poll_queue() 在 GUI 主线程里每 100ms 跑一次，把 msg_queue 里的消�
 """
 
 import queue
-import threading
+
 import tkinter as tk
 
 # ================= 通信队列 =================
 # 多线程环境下的"信箱"：一个线程往里面放东西，另一个线程取
-
-msg_queue = queue.Queue()           # Agent / 余额刷新线程 → GUI 主线程
-user_input_queue = queue.Queue()    # GUI 主线程 → Agent 线程：传用户输入
-input_event = threading.Event()     # 用于 ask_user：GUI 唤醒 Agent 的"闹钟"
-input_holder = {"value": None}      # 存 ask_user 的回答
+#
+# ★ 对象本身在 agent_bus 里（那个模块不 import tkinter，服务器版才敢用
+#   agent_core）。这里只是**转出同一批对象**，不是重新造 —— 桌面版所有
+#   `from bus import msg_queue` 的写法照旧，拿到的还是同一只队列。
+from agent_bus import (  # noqa: F401  （转出，调用方按名字取）
+    input_event,
+    input_holder,
+    msg_queue,
+    user_input_queue,
+)
 
 
 def poll_queue(gui):

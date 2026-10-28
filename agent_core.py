@@ -14,10 +14,9 @@
 import json
 import time
 
-from bus import msg_queue, user_input_queue
+from agent_bus import msg_queue, user_input_queue
 from config import MAX_STEPS
 from llm import get_client, insufficient_balance, NoIdentity
-from prompts import SYSTEM_PROMPT
 from server.api import query_balance, query_usage
 from server.identity import (
     ensure_identity,
@@ -72,13 +71,51 @@ def _marks_install_complete(name, result) -> bool:
     return False
 
 
-def run_one_task(messages, task_text):
+# 参数名里带这些的，值一律不往日志里写（账户密钥就是这么漏出去的形状）
+_SECRET_KEY_HINTS = ("key", "token", "secret", "password")
+
+
+def _brief_args(name, args) -> str:
+    """把工具参数压成一行给人看的摘要。**密钥类的值不出现。**
+
+    ★ `write_file` 的 content 尤其危险：我们自己的配置就是"把 token 写进
+      settings.json"，那行日志里原本会带出整串密钥。只打路径就够定位了。"""
+    if name == "write_file":
+        return f"path={args.get('path', '')}"
+    parts = []
+    for k, v in args.items():
+        text = "***" if any(h in k.lower() for h in _SECRET_KEY_HINTS) else str(v)[:60]
+        parts.append(f"{k}={text}")
+    return ", ".join(parts)
+
+
+def run_one_task(messages, task_text, *, tools=None, tool_map=None,
+                 emit=None, marks_complete=None, status=None):
     """跑一轮任务：从用户输入开始，直到模型不再调工具为止
 
     ★ 这一轮如果**完整走完了安装流程**（register_device → … → 打开 VSCode 或终端），
       最后会给界面发一条 ("install_done", …)：让助手在用户看完收尾说明后自动退出。
       单独再调一次 launch_claude / open_vscode（用户只是说"再帮我打开一次"）不算安装流程，
-      因为这一轮没有 register_device，installing 是 False，不会退出。"""
+      因为这一轮没有 register_device，installing 是 False，不会退出。
+
+    五个关键字参数都是"给别的界面用"的注入缝，默认值在**调用时**才解析。
+    桌面版一个都不传，行为和以前完全一样（测试也是靠 patch 这里的全局变量工作的）：
+      tools / tool_map       模型能用的工具（默认用 server/tool_specs 那套）
+      emit                   事件出口，签名同 msg_queue.put，收 (kind, data)
+      marks_complete         这个工具调用算不算"把用户领进门了"（默认 _marks_install_complete）
+      status                 可变的 dict，出问题时写进 status["error"]
+                             （no_identity / balance / model / bad_response / max_steps）
+                             —— 服务器版要靠它区分"连不上模型"和"跑满了 25 步"
+    """
+    if tools is None:
+        tools = globals()["tools"]
+    if tool_map is None:
+        tool_map = globals()["tool_map"]
+    if emit is None:
+        emit = msg_queue.put
+    if marks_complete is None:
+        marks_complete = _marks_install_complete
+
     messages.append({"role": "user", "content": task_text})   # 把用户输入加入历史
 
     installing = False      # 这一轮调过 register_device（安装流程的起点）
@@ -91,7 +128,8 @@ def run_one_task(messages, task_text):
             client, model = get_client()    # 取当前 client 和模型
         except NoIdentity as e:
             # 没有本地账号凭证就压根没法聊天（服务器只认 Bearer 里的用户 api_key）
-            msg_queue.put(("log", f"\n[系统] {e}"))
+            _mark(status, "no_identity", str(e))
+            emit(("log", f"\n[系统] {e}"))
             return False
         try:
             resp = client.chat.completions.create(   # ★ 调大模型
@@ -104,21 +142,24 @@ def run_one_task(messages, task_text):
             # 得把话说明白，并让主线程把底部那条"是否立即充值"冒出来。
             reason = insufficient_balance(e)
             if reason:
-                msg_queue.put(("log", (
+                _mark(status, "balance", reason)
+                emit(("log", (
                     f"\n[系统] {reason}，模型暂时用不了了。\n"
                     f"       点下面「立即充值」（或左边「用量信息」页右上角），扫码付完款，"
                     f"把刚才那句话再发一次就行。"
                 )))
-                msg_queue.put(("recharge", {"reason": reason}))
+                emit(("recharge", {"reason": reason}))
             else:
-                msg_queue.put(("log", f"\n[系统] 调用模型失败: {e}"))
+                _mark(status, "model", str(e))
+                emit(("log", f"\n[系统] 调用模型失败: {e}"))
             return False
 
         # ★ 服务器返回的不是标准对象（base_url 写错、被网关拦了等）时，
         # SDK 有时不报错，而是把响应原文当结果返回，后面访问 .choices 就会
         # 报 "'str' object has no attribute 'choices'"，很难懂。这里提前拦一下。
         if not hasattr(resp, "choices"):
-            msg_queue.put(("log", (
+            _mark(status, "bad_response", str(resp)[:200])
+            emit(("log", (
                 f"\n[系统] 服务器返回了非预期内容，请检查 base_url：\n"
                 f"  {str(resp)[:200]}"
             )))
@@ -146,11 +187,11 @@ def run_one_task(messages, task_text):
         messages.append(assistant_msg)
 
         if not msg.tool_calls:           # 模型没调工具 = 任务完成
-            msg_queue.put(("log", f"\nAgent: {msg.content}"))
+            emit(("log", f"\nAgent: {msg.content}"))
             # ★ 安装流程真的走完了 → 让界面过几秒自动退出（别一直占着托盘）。
             #   放在最后一条 Agent 消息之后发，用户才有时间看完收尾说明。
             if installing and launched:
-                msg_queue.put(("install_done", {}))
+                emit(("install_done", {}))
             return True
 
         for tc in msg.tool_calls:        # 遍历每个工具调用
@@ -161,8 +202,7 @@ def run_one_task(messages, task_text):
                 args = {}                # 解析失败就用空字典（容错）
 
             if name != "ask_user":       # ask_user 不打印"执行"，它自己会显示问题
-                brief = ", ".join(f"{k}={str(v)[:60]}" for k, v in args.items())
-                msg_queue.put(("log", f"\n[执行] {name}({brief})"))
+                emit(("log", f"\n[执行] {name}({_brief_args(name, args)})"))
 
             try:
                 result = tool_map[name](**args)   # ★ 调工具
@@ -175,7 +215,7 @@ def run_one_task(messages, task_text):
             # register_device 成功时回的是 JSON（带 note/api_base），失败回"领取失败…"。
             if name == "register_device" and str(result).startswith("{"):
                 installing = True
-            elif _marks_install_complete(name, result):
+            elif marks_complete(name, result):
                 launched = True
 
             if name != "ask_user":
@@ -187,7 +227,7 @@ def run_one_task(messages, task_text):
                         shown = json.loads(shown).get("note") or "领取成功"
                     except Exception:
                         shown = "领取成功"
-                msg_queue.put(("log", f"[结果] {shown[:400]}"))
+                emit(("log", f"[结果] {shown[:400]}"))
 
             messages.append({
                 "role": "tool",
@@ -195,10 +235,23 @@ def run_one_task(messages, task_text):
                 "content": str(result),
             })
 
-    msg_queue.put(("log", "\n[系统] 达到最大步数，本轮结束"))
+    _mark(status, "max_steps", f"跑了 {MAX_STEPS} 步还没结束")
+    emit(("log", "\n[系统] 达到最大步数，本轮结束"))
     return False
+
+
+def _mark(status, reason: str, detail: str = "") -> None:
+    """往调用方给的 status 里写一次失败原因。没给（桌面版）就什么都不做。"""
+    if isinstance(status, dict):
+        status["error"] = reason
+        status["detail"] = str(detail or "")
+
 def agent_worker():
     """Agent 常驻线程：从启动就等着接收用户消息"""
+    # ★ 提示词在这里 import，不在模块顶层：服务器版打包时 `prompts` 被排在外面
+    #   （它整篇讲的是桌面/VSCode），冻结包里模块级 import 会直接 ModuleNotFoundError。
+    from prompts import SYSTEM_PROMPT
+
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     # ★ 先确认"要不要恢复"，再决定"要不要注册"。
