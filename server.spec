@@ -15,10 +15,13 @@
 ★ excludes 保证的是**界面库一条都不进**：
   - customtkinter → 拖进 tkinter/_tkinter/Tcl/Tk，包大十几兆，而且没有 $DISPLAY
     的机器上初始化就失败；
+  - `bus`（tk 版的消息队列）和 `prompts`（桌面提示词）—— 排它们的前提是
+    `agent_core` 里那两句只在函数里 import，别挪回顶层；
   - 桌面版专属的 updater / notify / platform_support.windows|macos。
 
 ★ 模型栈（openai / pydantic / httpx2 …）**现在进包了**：服务器版改成 Agent 装了，
-  和桌面版跑的是同一套 `agent_core.run_one_task`。代价大约是 +12~18MB。
+  和桌面版跑的是同一套 `agent_core.run_one_task`。代价约 +10MB（26 → 36.5MB，
+  2026-10-28 量的 Linux 单文件）。
   但 `agent_core` / `llm` 仍然可以在 `server_main` 顶层之外延迟 import —— 见
   `server/agent_install._session()`，所以 `--balance` 这类命令不会拖起模型栈。
 

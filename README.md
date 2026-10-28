@@ -387,13 +387,19 @@ python -m PyInstaller server.spec --noconfirm --clean    # Linux（服务器版�
 
 - **`console=True`**。GUI 版没有控制台是有意的；服务器版没有控制台等于把所有报错吞掉。
 - **`excludes` 里点名 `tkinter` / `_tkinter` / `customtkinter` / `PIL` / `Pillow` /
-  `ui` / `images` / `deps` / `updater` / `notify` / `platform_support.windows|macos`**。
+  `ui` / `images` / `deps` / `bus` / `prompts` / `updater` / `notify` /
+  `platform_support.windows|macos`**。
   这不是省体积，是**保证界面库进不来** —— `tests/test_imports.py` 会断言
   `import server_main` 之后这些模块（连同 `openai` / `pydantic` / `agent_core`）不在
   `sys.modules` 里，所以"不小心 import 了 `ui.something`"会在测试阶段就红。
+  `bus` 和 `prompts` 容易漏：`agent_core` 里**确实写着** `from prompts import …`，
+  只是挪进了 `agent_worker()`（服务器版不调它）；`bus` 则是把 `tkinter` 拖进包的那根线。
+  排掉它们的前提就是这两句只在函数里 —— 所以 `tests/test_updater_linux_payload.py`
+  连"是不是写在函数里"一起断言。
 - **模型栈现在进包了**（1.4.6 起服务器版是 Agent 装）。`openai` / `pydantic` /
   `pydantic_core` / `httpx2` / `httpcore2` / `anyio` / `jiter` / `sniffio` 都走
-  `collect_all`，包大概从 26MB 涨到 38~44MB。注意 **openai 3.x 依赖的是
+  `collect_all`，包从 26MB 涨到 **36.5MB**（tar.gz 35.9MB，2026-10-28 量的）。
+  涨的空间基本就是模型栈：`openai` + `pydantic` + `httpx2`。注意 **openai 3.x 依赖的是
   `httpx2` / `httpcore2`**，不是 `httpx` / `httpcore` —— 写错名字 `collect_all` 会静默跳过，
   到用户机器上才 `ModuleNotFoundError`。
 - **`helpers` 不能排除**：`server/term_render.py` 从它取 `norm_options` / `resolve_option`
