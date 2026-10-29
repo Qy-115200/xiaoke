@@ -166,6 +166,16 @@ class ModelFailureTests(unittest.TestCase):
         self.assertIn("--recharge 20", ui.text)
         self.assertEqual(ui.outcome.exit_code, EXIT_ACCOUNT)
 
+    def test_too_big_request_is_not_reported_as_empty_balance(self):
+        """余额还在，只是这次请求太大 —— 提示里得先教人把请求改小。
+
+        和 balance 分开：`run_one_task` 已经打了具体那句，这里只补怎么办。"""
+        ui, _ = self._fail_with("request_too_big")
+        self.assertIn("--recharge 20", ui.text)       # 想充也行
+        self.assertIn("拆小", ui.text)                 # 但先教他怎么绕过去
+        self.assertNotIn("账户余额已用完", ui.outcome.error)
+        self.assertEqual(ui.outcome.exit_code, EXIT_FAILED)
+
     def test_max_steps_is_not_reported_as_success(self):
         ui, _ = self._fail_with("max_steps")
         self.assertIn("步数", ui.outcome.error)

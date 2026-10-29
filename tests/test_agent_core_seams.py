@@ -179,6 +179,37 @@ class StatusSeamTests(unittest.TestCase):
         # 界面才知道该露出"立即充值"
         self.assertIn("recharge", _kinds(events))
 
+    def test_balance_for_a_too_big_request_does_not_ask_to_top_up(self):
+        """余额还在（¥0.75），只是这次请求的预估花费超了 —— 不许弹"是否立即充值"。
+
+        2026-10-28 就是在这里出的事：用户被这句话劝去充了不必要充的钱。"""
+        class _Paywall(Exception):
+            status_code = 402
+            body = {"error": {"code": "quota_exceeded_for_request",
+                              "message": "预估超了", "remaining": 0.749}}
+
+        class _Boom:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(**_kw):
+                        raise _Paywall("402")
+
+        status = {}
+        events = []
+        with mock.patch.object(agent_core, "get_client",
+                               return_value=(_Boom(), "fake-model")):
+            ok = agent_core.run_one_task([{"role": "system", "content": "s"}], "hi",
+                                         emit=events.append, status=status)
+        self.assertFalse(ok)
+        self.assertEqual(status["error"], "request_too_big")
+        self.assertIn("¥0.75", status["detail"])
+        self.assertNotIn("recharge", _kinds(events))
+        # 得告诉用户该怎么办：先把请求改小
+        log = " ".join(str(d) for k, d in events if k == "log")
+        self.assertIn("图片", log)
+        self.assertNotIn("余额已用完", log)
+
     def test_max_steps(self):
         tool_map = {"ping": lambda **kw: "pong"}
         with mock.patch.object(agent_core, "MAX_STEPS", 2):

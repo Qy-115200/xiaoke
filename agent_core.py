@@ -138,18 +138,31 @@ def run_one_task(messages, task_text, *, tools=None, tool_map=None,
         except Exception as e:
             # 账户没钱了：上游 New API 回 403 insufficient_user_quota，代理层会先把它
             # 归一成 **402 + 一句中文**（非额度类 403 原样透传）。两种形状都认。
-            # 这时候不能只打一句"调用模型失败"——用户根本看不出是余额的事，
-            # 得把话说明白，并让主线程把底部那条"是否立即充值"冒出来。
-            reason = insufficient_balance(e)
-            if reason:
-                _mark(status, "balance", reason)
-                # ★ 这句话两边共用（桌面版 / 服务器版），所以只写"怎么解决"的公共部分：
-                #   桌面版自己会冒「立即充值」的按钮，服务器版自己会打印 --recharge。
-                emit(("log", (
-                    f"\n[系统] {reason}，模型暂时用不了。"
-                    f"充值之后再试（桌面版点「立即充值」，服务器版用 --recharge）。"
-                )))
-                emit(("recharge", {"reason": reason}))
+            # ★ 但"额度不够"有两种（详见 llm.py 顶部）：余额真的用完了，和这次请求的
+            #   预估花费超过了余额。后者余额还在，**不能**劝人充值 —— 2026-10-28
+            #   就有人因为一句"余额已用完"去充了不该充的钱。
+            problem = insufficient_balance(e)
+            if problem:
+                too_big = problem["kind"] == "request_too_big"
+                _mark(status, "request_too_big" if too_big else "balance",
+                      problem["text"])
+                if too_big:
+                    emit(("log", (
+                        f"\n[系统] {problem['text']}，模型这次没法回答。"
+                        "\n        先别重试同样的问题 —— 把对话里的图片、长文件删掉，"
+                        "或者把问题拆小一点再问；"
+                        "\n        要继续跑大任务就先充点值"
+                        "（桌面版在「用量信息」页右上角，服务器版用 --recharge）。"
+                    )))
+                else:
+                    # ★ 这句话两边共用（桌面版 / 服务器版），所以只写"怎么解决"的公共部分：
+                    #   桌面版自己会冒「立即充值」的按钮，服务器版自己会打印 --recharge。
+                    emit(("log", (
+                        f"\n[系统] {problem['text']}，模型暂时用不了。"
+                        f"充值之后再试（桌面版点「立即充值」，服务器版用 --recharge）。"
+                    )))
+                    # 只有"真的没钱"才问要不要充值。②那种情况问就是误导。
+                    emit(("recharge", {"reason": problem["text"]}))
             else:
                 _mark(status, "model", str(e))
                 emit(("log", f"\n[系统] 调用模型失败: {e}"))

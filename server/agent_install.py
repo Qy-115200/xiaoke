@@ -35,9 +35,15 @@ _STATUS_MESSAGES = {
     "no_identity": ("本机没有账号凭证，模型用不了",
                     "重跑一次安装器；一直这样就用 --account-code 绑一个已有账号",
                     EXIT_ACCOUNT),
-    "balance": ("账户余额不足，模型暂时用不了",
+    "balance": ("账户余额已用完，模型暂时用不了",
                 "充值：ClaudeCodeAssistant --recharge 20（会打印二维码）",
                 EXIT_ACCOUNT),
+    # 余额还在，是**这次请求的预估花费**超过了它（new-api 按 上下文 + max_tokens
+    # 预扣费估算）。跟上面的"真没钱"分开说 —— 混成一句会让人白充钱。
+    "request_too_big": ("这次请求的预估花费超过了剩余余额",
+                        "把问题拆小、去掉图片/长文件后重试；要继续跑大任务就先 "
+                        "ClaudeCodeAssistant --recharge 20",
+                        EXIT_FAILED),
     "model": ("连不上模型服务器",
               f"先确认这台机器能打开 {SITE_URL}，然后重跑一次",
               EXIT_FAILED),
@@ -346,8 +352,9 @@ def _session(ctx, args, ui, state, preflight):
         if reason:
             message, hint, code = _STATUS_MESSAGES.get(
                 reason, (f"这一轮没走完（{reason}）", "重跑一次试试", EXIT_FAILED))
-            if reason == "balance":
-                # run_one_task 已经把那句"余额不足"打出来了，这里只补怎么充
+            if reason in ("balance", "request_too_big"):
+                # run_one_task 已经把具体那句（"余额已用完" / "预估花费超过了剩余余额"）
+                # 打出来了，这里只补怎么解决
                 ui.ui_log(f"  {hint}")
             else:
                 ui.ui_log(f"\n[系统] {message}")

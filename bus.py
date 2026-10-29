@@ -52,7 +52,8 @@ def poll_queue(gui):
                 # 服务器说余额不足（代理层把上游的额度 403 归一成 402）
                 # → **不**直接弹充值窗，只在底部问一句
                 # "是否立即充值"，用户点了才弹（见 ui/window.py 的 offer_recharge）
-                gui.offer_recharge(reason=data.get("reason") or "余额不足", force=True)
+                gui.offer_recharge(reason=data.get("reason") or "余额不足",
+                                   force=data.get("force", True))
             elif kind == "recharge_result":
                 gui.show_recharge_result(data)
             elif kind == "recharge_methods":
