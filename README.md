@@ -41,6 +41,21 @@ Claude Code 只看得到你给它的**一个**文件夹。所以启动之前 Age
 Linux 只打开官网下载页（apt/snap 要 sudo，助手不替你提权）。**装不上就打开下载页**并如实说明；
 插件市场连不上也一样，照样用 VSCode 打开，让用户在扩展面板里手动装。
 
+**机器上没有 winget 时先把它装上**（`ensure_winget()`，2026-10-30 加）。原因很实在：
+Windows 10/11 的家庭版精简镜像、老 LTSC、服务器版都可能不带 App Installer，
+走到 `install_vscode()` 就直接死在「这台机器上没有 winget」，用户被卡在装到一半。
+
+- 包是我们自己 CDN 上的微软官方 App Installer（x64 那个 msix，58MB，sha256 钉在
+  `platform_support/windows.py` 里）。**不走 GitHub**：2026-10-30 实测国内直连
+  `objects.githubusercontent.com` 是 0 字节，而 winget 的 msixbundle 有 200MB+。
+  这里只取 bundle 里 x64 的那一份，内容与微软发布的完全一致，没有做任何改动。
+- 先 `Add-AppxPackage`（用户级、不弹 UAC、不改系统策略）；装不上（老系统 / 没有商店 /
+  组策略禁了 AppX）就**解压即用**：把 msix 里的 `winget.exe` 解到
+  `%LOCALAPPDATA%\aikaui\winget\<版本>\`，下次直接用它，不再下载。
+- 下载边写边算 sha256，对不上就删掉、换下一个源；两个源（CDN / 回源）都失败才回到下载页。
+- 58MB 的安装包用完即删；只有第一次需要，之后 `find_winget()` 直接命中。
+
+
 `open_vscode()` 不只是开窗：它**把 Claude 面板也一起打开**。VSCode 命令行没有 `--command`
 这种东西，所以走的是插件自己注册的 URI 入口 `vscode://anthropic.claude-code/open`
 （插件 `extension.js` 里的 `registerUriHandler` 接到它就执行 `claude-vscode.primaryEditor.open`）。
@@ -531,6 +546,13 @@ macOS 两个包都**没有签名**：首次打开要右键 →「打开」，
 任何一步没验过就退出，所以清单永远不会指向一个取不到的文件。
 中间被打断也安全：线上清单还是旧的，只是多了一个半截的版本目录，删掉重跑即可。
 
+**`releases/winget/<版本>/AppInstaller_x64.msix` 不归发版管**（2026-10-30 加）。
+它是客户端「没有 winget 时自动装一个」用的包，版本固定、内容永久不变，已经在
+`releases/winget/1.11.430/` 下，发新版本**不用**动它。要换 winget 版本才跑一次
+`build_tools/deploy_winget.sh <msix> <版本>`，然后把 `platform_support/windows.py`
+里的三个常量（`WINGET_VERSION` / `WINGET_MSIX_SIZE` / `WINGET_MSIX_SHA256`）一起改掉 ——
+脚本结尾会把该填的值打出来。忘了改常量的后果是客户端 sha256 校验不过，走下载页兜底。
+
 **发布时有三个容易踩的坑，脚本已经处理好了，但你要知道它在干什么：**
 
 - **同一份包有两个源，两个都要传。** 下载页的 HTML 用相对路径走 `aikaui.com`（nginx 的
@@ -576,9 +598,9 @@ agent_demo/
 ├── prompts.py                    614   系统提示词（按平台给安装指令 + 工作目录 + VSCode 询问分支 + 余额分寸）
 │
 ├── platform_support/                  三平台差异（调用方只 import 这个包）
-│   ├── __init__.py               122   按 sys.platform 延迟加载并转发
+│   ├── __init__.py               160   按 sys.platform 延迟加载并转发
 │   ├── common.py                 230   safe_cwd（HOME 越界检查）、find_claude、clean_env、跑子进程抓输出、VSCode 值解析
-│   ├── windows.py                438   注册表协议 / .lnk / cmd / WinRT toast / VSCode 探测 + winget 安装
+│   ├── windows.py                671   注册表协议 / .lnk / cmd / WinRT toast / VSCode 探测 + winget 安装（含"没 winget 就装一个"）
 │   ├── macos.py                  425   Info.plist 协议 + Apple Event / .command 快捷方式 / Terminal.app / VSCode 探测 + brew 安装
 │   └── linux.py                  314   .desktop + xdg-mime / 终端探测 / notify-send / VSCode 探测（安装只开下载页）
 │
@@ -617,7 +639,8 @@ agent_demo/
 │   ├── make_manifest.py          113   四个产物 → latest.json（校验版本、算 sha256 / size）
 │   ├── fetch_release.py               从 GitHub Release 取回四个产物（本机没有 gh CLI）
 │   ├── analyze_archive.py             按顶层包归总产物，量体积时看谁最占地方
-│   └── deploy_downloads.sh            发布：传 nginx + 传 COS → 两边验大小 → 换清单 → 改下载页版本号
+│   ├── deploy_downloads.sh            发布：传 nginx + 传 COS → 两边验大小 → 换清单 → 改下载页版本号
+│   └── deploy_winget.sh               单独发那份 App Installer（换 winget 版本时才跑）
 ├── tests/                            离线单元测试（stdlib unittest）
 │   ├── test_version.py                版本解析 / 比较 / 清单校验
 │   ├── test_download.py               本地假服务器：下载、哈希、404、缓存回退
@@ -630,6 +653,7 @@ agent_demo/
 │   ├── test_platform_support.py       三平台抽象层
 │   ├── test_prompts.py                提示词按平台切换 + VSCode 询问分支的关键句
 │   ├── test_vscode.py                 VSCode 探测 / 安装 / 打开（三平台，全程打桩）
+│   ├── test_winget.py                 没 winget 时自动装：sha256 校验、AppX 失败退便携版、临时包删干净
 │   ├── test_tools_vscode.py           四个 VSCode 工具的返回值、失败归类、Claude 面板什么时候发链接
 │   ├── test_agent_core.py             install_done 什么时候触发（自动退出的判定）
 │   ├── test_tool_specs.py             tools[] 和 tool_map 一一对上
@@ -902,6 +926,12 @@ Windows 上用一次 PowerShell 的 `Get-CimInstance` 读，非 Windows 或取�
 "暂无数据"，不会白屏**。
 
 ## 已知限制
+
+- **「没 winget 就自动装」没在真·没有 winget 的机器上跑过完整一遍。**
+  能确定的是：包从 CDN 下得下来（实测 58MB / 11 秒 / sha256 对得上）、解压出来的
+  `winget.exe` 能跑（`--version`、`search` 都正常）、分支逻辑全有离线测试。
+  没验到的是 `Add-AppxPackage` 那一步真的落到一台没有 App Installer 的机器上 ——
+  手上没有这样的机器。装不上也不会卡住：会退到便携版，再不行才打开下载页。
 
 - **Linux 发的是服务器版，不是桌面版。** 从发这一版起，`linux-x64` 那个包没有图形界面：
   老的 Linux 桌面用户被自动更新换上之后，双击图标（如果他们手动装过 `.desktop`）

@@ -35,9 +35,11 @@ if _IS_WIN:
     _DESKTOP_MKDIR = 'bash(\'mkdir "%USERPROFILE%\\\\Desktop\\\\claude-projects"\')'
     _HOME_VAR = "%USERPROFILE%"
     # 装 VSCode 只走 install_vscode()：它内部是 winget 的用户级安装（不弹 UAC），
+    # 机器上没有 winget 时它会自己把 winget 装上（下 58MB，只有第一次），
     # 失败了自己会打开下载页。让模型自己拼 winget 命令只会拼出管理员级安装。
     _VSCODE_INSTALL = (
         "装 VSCode 用 `install_vscode()`：内部走 winget 的用户级安装，不需要管理员权限；"
+        "机器上没有 winget 时它会自动装（要下 58MB，只有第一次），然后接着装 VSCode；"
         "装不上它会自己打开官网下载页。**不要**自己用 bash 跑 winget。"
     )
     # 「别自己用 bash 装 VSCode / 插件」那条硬规矩里要点名的命令，按平台给，

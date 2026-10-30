@@ -225,16 +225,233 @@ def find_vscode() -> dict | None:
     return None
 
 
-def install_vscode() -> str:
-    """用 winget 装 VSCode（用户级安装，不提权）。装不上就打开下载页。"""
+# ---------------------------------------------------------------- winget
+#
+# 为什么要有这一段：装 VSCode 靠 winget，可 Windows 10/11 的**家庭版精简镜像、
+# 老版本 LTSC、服务器版**都可能根本没有 winget（App Installer 不在系统里）。
+# 用户遇到的就是这一条：「自动安装没成功：这台机器上没有 winget」—— 装到一半
+# 停在这里，还得自己去点下载页。
+#
+# 所以没 winget 时我们先把它装上，再拿它装 VSCode。
+#
+# ★ 包放在我们自己的 CDN 上，不是 GitHub：2026-10-30 实测国内直连
+#   objects.githubusercontent.com 是 0 字节（走代理才 870KB/s），而 winget 的
+#   msixbundle 有 200MB+。这里只取 bundle 里 x64 的那一个 msix（58MB），
+#   内容和微软发布的完全一致（sha256 对得上），没有做任何改动。
+
+WINGET_VERSION = "1.11.430"
+WINGET_MSIX_NAME = "AppInstaller_x64.msix"
+WINGET_MSIX_SIZE = 61258457
+WINGET_MSIX_SHA256 = "c535a3e0fadf4f19f76b6cde8d3f760b134eb1938067252f9312c1407234f6d8"
+# 先 CDN（快），再回源 aikaui.com（CDN 挂了还能装）。两个 URL 指向同一个文件。
+WINGET_BASES = (
+    f"https://dl.aikaui.com/releases/winget/{WINGET_VERSION}/",
+    f"https://aikaui.com/releases/winget/{WINGET_VERSION}/",
+)
+WINGET_DOWNLOAD_TIMEOUT = 900          # 58MB，慢网络给足 15 分钟
+WINGET_INSTALL_TIMEOUT = 300           # Add-AppxPackage 本地部署，通常十几秒
+
+
+def _winget_portable_dir() -> Path:
+    """便携版放哪：解压出来的 winget.exe 在这里，下次直接用，不重复下载。"""
+    return HOME / "AppData" / "Local" / "aikaui" / "winget" / WINGET_VERSION
+
+
+def find_winget() -> str | None:
+    """找 winget：PATH → App Installer 的执行别名 → 我们解压出来的便携版。
+
+    ★ 别名那条不能省：刚装完 App Installer 时，PATH 还是本进程启动时的那份，
+      `shutil.which("winget")` 找不到它，但文件已经在那儿了。"""
+    for cand in (shutil.which("winget"), shutil.which("winget.exe"),
+                 str(HOME / "AppData" / "Local" / "Microsoft" / "WindowsApps" / "winget.exe"),
+                 str(_winget_portable_dir() / "winget.exe")):
+        if cand and Path(cand).is_file():
+            return str(cand)
+    return None
+
+
+def _sha256_of(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _download(url: str, dest: Path, on_progress=None) -> str:
+    """下一份到 dest，边下边算 sha256。成功返回空串，失败返回一句原因。
+
+    ★ 一定要校验：这个包要拿去装进系统，CDN 被劫持、文件被截断都得当场发现。"""
+    try:
+        import requests
+    except Exception as e:                     # 打包里一定有，纯属保险
+        return f"没有请求库：{e}"
+
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    try:
+        with requests.get(url, stream=True, timeout=(15, 60)) as r:
+            if r.status_code != 200:
+                return f"HTTP {r.status_code}"
+            total = int(r.headers.get("content-length") or 0)
+            done = 0
+            with open(tmp, "wb") as f:
+                for chunk in r.iter_content(1 << 20):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    done += len(chunk)
+                    if on_progress:
+                        try:
+                            on_progress(done, total or WINGET_MSIX_SIZE)
+                        except Exception:
+                            pass
+            if total and total != WINGET_MSIX_SIZE:
+                return f"文件大小不对（{total} ≠ {WINGET_MSIX_SIZE}）"
+    except Exception as e:
+        tmp.unlink(missing_ok=True)
+        return f"{type(e).__name__}：{str(e)[:80]}"
+
+    got = _sha256_of(tmp)
+    if got != WINGET_MSIX_SHA256:
+        tmp.unlink(missing_ok=True)
+        return f"校验不过（sha256 {got[:12]}…，期望 {WINGET_MSIX_SHA256[:12]}…）"
+    tmp.replace(dest)
+    return ""
+
+
+def _fetch_winget_msix(on_progress=None) -> tuple[Path | None, str]:
+    """按 WINGET_BASES 的顺序试，第一个成功的留下。返回 (文件, 空) 或 (None, 原因)。"""
+    dest = Path(tempfile.gettempdir()) / f"aikaui-{WINGET_MSIX_NAME}"
+    last = ""
+    for base in WINGET_BASES:
+        why = _download(base + WINGET_MSIX_NAME, dest, on_progress)
+        if not why:
+            return dest, ""
+        last = f"{base.split('/')[2]}：{why}"
+    return None, last or "下载失败"
+
+
+def _install_appx(msix: Path) -> str:
+    """用 Add-AppxPackage 正式安装（用户级，不提权）。成功返回空串。
+
+    ★ 这是微软签名的包，不需要开发者模式；装完 winget.exe 会出现在
+      %LOCALAPPDATA%\\Microsoft\\WindowsApps\\ 下，用户以后自己也能用。"""
+    ps = ("Add-AppxPackage -LiteralPath '"
+          + str(msix).replace("'", "''")
+          + "' -ErrorAction Stop")
+    argv = ["powershell", "-NoProfile", "-NonInteractive",
+            "-ExecutionPolicy", "Bypass", "-Command", ps]
+    try:
+        out, err, timed_out, rc = run_capture(
+            argv, timeout=WINGET_INSTALL_TIMEOUT, env=clean_env(),
+            stdin=subprocess.DEVNULL)
+    except Exception as e:
+        return f"powershell 跑不起来：{e}"
+    if timed_out:
+        return f"Add-AppxPackage 超过 {WINGET_INSTALL_TIMEOUT} 秒"
+
+    text = (err or out or b"").decode("utf-8", "replace").strip()
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    detail = lines[-1][:160] if lines else ""
+    # 已经装了更高版本：不算失败，走到外面再找一次 winget 就行
+    if "0x80073D06" in text or "newer version" in text.lower():
+        return ""
+    if rc != 0:
+        return f"Add-AppxPackage 返回 {rc}" + (f"：{detail}" if detail else "")
+    return ""
+
+
+def _extract_portable(msix: Path) -> tuple[str | None, str]:
+    """解压即用（不装 AppX）。
+
+    老系统 / 没有商店 / 组策略禁了 AppX 时走这条。winget.exe 是自包含的，
+    实测 `winget --version`、`winget search` 都能正常跑。
+    只取 exe/dll/winmd，跳过 Assets（图标，几 MB 全是 png）。"""
+    import zipfile
+
+    target = _winget_portable_dir()
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(msix) as z:
+            for info in z.infolist():
+                name = info.filename
+                if ".." in name or name.startswith("/"):
+                    continue                       # 防目录穿越（包是我们自己的，仍然要挡）
+                if name.lower().startswith("assets/"):
+                    continue
+                if not name.lower().endswith((".exe", ".dll", ".winmd")):
+                    continue
+                z.extract(info, target)
+    except Exception as e:
+        return None, f"解压失败：{e}"
+
+    exe = target / "winget.exe"
+    if not exe.is_file():
+        return None, "解压后没有 winget.exe"
+    # 真跑一次：缺 VC 运行库之类的会在这一步暴露，而不是等到装 VSCode 时才报怪错
+    try:
+        out, err, timed_out, rc = run_capture(
+            [str(exe), "--version"], timeout=30, env=clean_env(),
+            stdin=subprocess.DEVNULL)
+    except Exception as e:
+        return None, f"便携版跑不起来：{e}"
+    if timed_out or rc != 0:
+        return None, "便携版跑不起来（可能缺 VC 运行库）"
+    return str(exe), ""
+
+
+def ensure_winget(on_progress=None) -> dict:
+    """确保这台机器上有 winget。返回 {"ok", "exe", "mode", "note"}。
+
+    mode 取值：existing（本来就有）/ appx（这次装上的）/ portable（解压即用）。
+    装不上时 ok=False，note 里是一句能直接讲给用户听的原因 —— 别让它变成异常。"""
+    exe = find_winget()
+    if exe:
+        return {"ok": True, "exe": exe, "mode": "existing", "note": ""}
+
+    msix, why = _fetch_winget_msix(on_progress)
+    if msix is None:
+        return {"ok": False, "exe": "", "mode": "download", "note": f"下载 winget 失败（{why}）"}
+
+    try:
+        appx_why = _install_appx(msix)
+        if not appx_why:
+            for _ in range(3):                  # 别名文件有几十毫秒的延迟
+                exe = find_winget()
+                if exe:
+                    return {"ok": True, "exe": exe, "mode": "appx", "note": ""}
+                time.sleep(1)
+            appx_why = "装完了却找不到 winget.exe"
+
+        exe, port_why = _extract_portable(msix)
+        if exe:
+            return {"ok": True, "exe": exe, "mode": "portable", "note": ""}
+        return {"ok": False, "exe": "", "mode": "install",
+                "note": f"{appx_why}；便携版也不行（{port_why}）"}
+    finally:
+        # 58MB 的安装包留着没用（便携版已经把要的东西解出来了）
+        try:
+            msix.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def install_vscode(on_progress=None) -> str:
+    """用 winget 装 VSCode（用户级安装，不提权）。装不上就打开下载页。
+
+    没 winget 时先调 ensure_winget() 把它装上——见上面那段注释。
+    on_progress(已下载字节, 总字节) 只在下 winget 时回调，用来给界面报进度。"""
     found = find_vscode()
     if found:
         return f"已经装过 VSCode，不用重复安装（{found['exe']}）"
 
-    winget = (shutil.which("winget") or shutil.which("winget.exe")
-              or str(HOME / "AppData" / "Local" / "Microsoft" / "WindowsApps" / "winget.exe"))
-    if not Path(winget).is_file():
-        return download_page_fallback("这台机器上没有 winget")
+    winget = find_winget()
+    if not winget:
+        got = ensure_winget(on_progress)
+        if not got["ok"]:
+            return download_page_fallback(got["note"])
+        winget = got["exe"]
 
     argv = [
         winget, "install", "-e", "--id", "Microsoft.VisualStudioCode",

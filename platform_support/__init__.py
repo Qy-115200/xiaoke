@@ -106,13 +106,35 @@ def find_vscode() -> dict | None:
     return fn() if fn is not None else None
 
 
-def install_vscode() -> str:
+# ================= winget（Windows 的包管理器） =================
+
+def find_winget() -> str | None:
+    """找 winget，找不到返回 None。其它平台没有这个东西，一律 None。"""
+    m = _impl()
+    fn = getattr(m, "find_winget", None)
+    return fn() if fn is not None else None
+
+
+def ensure_winget(on_progress=None) -> dict:
+    """确保有 winget：没有就下载微软官方的 App Installer 装上（Windows 专用）。
+
+    返回 {"ok", "exe", "mode", "note"}；mode = existing / appx / portable。
+    其它平台直接返回 ok=False —— 调用方要判平台，别把它当成通用能力。"""
+    m = _impl()
+    fn = getattr(m, "ensure_winget", None)
+    if fn is None:
+        return {"ok": False, "exe": "", "mode": "",
+                "note": "这个平台没有 winget"}
+    return fn(on_progress)
+
+
+def install_vscode(on_progress=None) -> str:
     m = _impl()
     fn = getattr(m, "install_vscode", None)
     if fn is None:
         from platform_support.common import download_page_fallback
         return download_page_fallback("这个平台没有自动安装 VSCode 的实现")
-    return fn()
+    return fn(on_progress)
 
 
 def open_vscode(directory: str = "", new_window: bool = False) -> str:

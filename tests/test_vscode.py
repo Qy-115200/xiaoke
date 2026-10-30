@@ -281,13 +281,19 @@ class WindowsInstallTests(unittest.TestCase):
         self.assertIn("900 秒", text)
 
     def test_no_winget_falls_back(self):
+        """连 WindowsApps 的兜底路径也没有、自动装 winget 也失败 → 打开下载页。
+
+        （自动装 winget 本身在 tests/test_winget.py 里测；这里只关心它失败之后。）"""
         for p in self._patches():
             p.start()
             self.addCleanup(p.stop)
         # 连 WindowsApps 里的兜底路径也不存在
-        with mock.patch.object(win_backend.shutil, "which", return_value=None):
+        with mock.patch.object(win_backend.shutil, "which", return_value=None), \
+             mock.patch.object(win_backend, "ensure_winget",
+                               return_value={"ok": False, "exe": "", "mode": "download",
+                                             "note": "下载 winget 失败（离线）"}):
             text = win_backend.install_vscode()
-        self.assertIn("没有 winget", text)
+        self.assertIn("下载 winget 失败", text)
         self.assertIn(common.VSCODE_DOWNLOAD_URL, text)
 
     def test_installed_but_not_found(self):

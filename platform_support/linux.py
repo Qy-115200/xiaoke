@@ -270,8 +270,11 @@ def find_vscode() -> dict | None:
     return None
 
 
-def install_vscode() -> str:
-    """Linux 上不代劳安装（要 sudo），只把下载页打开。"""
+def install_vscode(on_progress=None) -> str:
+    """Linux 上不代劳安装（要 sudo），只把下载页打开。
+
+    on_progress 是 Windows 那边下 winget 用的，这里没有可报的进度，忽略。"""
+    del on_progress
     found = find_vscode()
     if found:
         return f"已经装过 VSCode，不用重复安装（{found['exe']}）"

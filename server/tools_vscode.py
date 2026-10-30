@@ -135,12 +135,27 @@ def check_vscode() -> str:
 def install_vscode() -> str:
     """装 VSCode。Windows 走 winget 用户级安装，macOS 走 brew；装不上自动打开下载页。
 
+    机器上没有 winget 会先自动装（见 platform_support/windows.py 里那段注释），
+    那一步要下 58MB，所以这里顺手把百分比打进对话，免得用户以为卡住了。
+
     ★ 必须先 ask_user 得到用户同意再调用（prompts 里写死了）。"""
     u = get_ui()
     if u:
         u.ui_progress_start("正在安装 VSCode（可能要几分钟）…")
+
+    reported = {"pct": -25}          # 第一次一定报（0%）
+
+    def on_progress(done, total):
+        pct = int(done * 100 / total) if total else 0
+        if pct < reported["pct"] + 25:
+            return
+        reported["pct"] = pct
+        cur = get_ui()
+        if cur:
+            cur.ui_log(f"正在准备 winget 包管理器（{pct}%，约 58MB，只有第一次需要）")
+
     try:
-        return platform_support.install_vscode()
+        return platform_support.install_vscode(on_progress=on_progress)
     finally:                              # ★ finally：出异常也要把进度条收掉
         if get_ui():
             get_ui().ui_progress_stop()

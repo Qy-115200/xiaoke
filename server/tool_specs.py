@@ -333,8 +333,9 @@ tools = [
         "function": {
             "name": "install_vscode",
             "description": (
-                "自动安装 VSCode：Windows 走 winget 用户级安装（不需要管理员），"
-                "macOS 走 Homebrew；装不上会自动打开官网下载页。"
+                "自动安装 VSCode：Windows 走 winget 用户级安装（不需要管理员）；"
+                "机器上没有 winget 时会先自动装好 winget（要下 58MB，只有第一次），"
+                "再装 VSCode；macOS 走 Homebrew；还装不上会自动打开官网下载页。"
                 "★ 必须先 ask_user 得到用户同意再调用；用户本来就装了 VSCode 时不要调用。"
                 "不要用 bash 跑 winget / brew。"
                 "返回以「已安装」或「已经装过」开头 = 装好了；"
