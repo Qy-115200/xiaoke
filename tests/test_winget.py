@@ -143,8 +143,8 @@ class DownloadTests(unittest.TestCase):
              mock.patch.object(win_backend, "WINGET_MSIX_SHA256",
                                __import__("hashlib").sha256(payload).hexdigest()):
             win_backend._download("https://example.invalid/x", self.dest,
-                                  lambda done, total: seen.append((done, total)))
-        self.assertEqual(seen[-1], (100, 100))
+                                  lambda done, total, what: seen.append((done, total, what)))
+        self.assertEqual(seen[-1], (100, 100, "winget"))
 
 
 class EnsureWingetTests(unittest.TestCase):
@@ -295,12 +295,26 @@ class InstallVscodeUsesWingetTests(unittest.TestCase):
         ensure.assert_called_once()
         self.assertEqual(argv[0], r"C:\p\winget.exe")
 
+    def test_bootstrap_failure_still_tries_the_official_installer(self):
+        """连 winget 都没装成，不能就此放弃 —— 直接下微软的安装包。"""
+        with mock.patch.object(win_backend, "find_vscode", return_value=None), \
+             mock.patch.object(win_backend, "find_winget", return_value=None), \
+             mock.patch.object(win_backend, "ensure_winget",
+                               return_value={"ok": False, "exe": "", "mode": "download",
+                                             "note": "下载 winget 失败（HTTP 500）"}), \
+             mock.patch.object(win_backend, "_install_from_setup",
+                               return_value=(r"已安装 VSCode（D:\Code.exe）", "")):
+            text = win_backend.install_vscode()
+        self.assertEqual(text, r"已安装 VSCode（D:\Code.exe）")
+
     def test_bootstrap_failure_opens_the_download_page(self):
         with mock.patch.object(win_backend, "find_vscode", return_value=None), \
              mock.patch.object(win_backend, "find_winget", return_value=None), \
              mock.patch.object(win_backend, "ensure_winget",
                                return_value={"ok": False, "exe": "", "mode": "download",
                                              "note": "下载 winget 失败（HTTP 500）"}), \
+             mock.patch.object(win_backend, "_install_from_setup",
+                               return_value=("", "下载 VSCode 安装包失败（离线）")), \
              mock.patch.object(common, "open_url", return_value=True):
             text = win_backend.install_vscode()
         self.assertTrue(text.startswith("没能自动装 VSCode"), text)
@@ -310,17 +324,155 @@ class InstallVscodeUsesWingetTests(unittest.TestCase):
     def test_progress_callback_is_forwarded(self):
         seen = []
 
-        def fake_ensure(on_progress=None):
-            on_progress(10, 100)
+        def fake_ensure(on_progress=None, on_note=None):
+            on_progress(10, 100, "winget")
             return {"ok": True, "exe": r"C:\p\winget.exe", "mode": "portable", "note": ""}
 
-        with mock.patch.object(win_backend, "find_vscode", return_value=None), \
+        with mock.patch.object(win_backend, "find_vscode",
+                               side_effect=[None, {"exe": r"D:\Code.exe"}]), \
              mock.patch.object(win_backend, "find_winget", return_value=None), \
              mock.patch.object(win_backend, "ensure_winget", side_effect=fake_ensure), \
              mock.patch.object(win_backend, "run_capture",
                                return_value=(b"", b"", False, 0)):
-            win_backend.install_vscode(on_progress=lambda d, t: seen.append((d, t)))
-        self.assertEqual(seen, [(10, 100)])
+            win_backend.install_vscode(on_progress=lambda d, t, what: seen.append((d, t, what)))
+        self.assertEqual(seen, [(10, 100, "winget")])
+
+
+class SourceIndexTests(unittest.TestCase):
+    """winget 的源索引没准备好 → 0x8A15004B，用户 2026-10-30 就是撞在这上面。"""
+
+    def test_source_problem_is_recognised(self):
+        self.assertTrue(win_backend._looks_like_source_problem(
+            "返回 2316632139：... SourceOpenFailedSuggestion ..."))
+        self.assertTrue(win_backend._looks_like_source_problem("返回 1：source update failed"))
+
+    def test_timeout_is_not_a_source_problem(self):
+        self.assertFalse(win_backend._looks_like_source_problem("超过 900 秒没装完"))
+
+    def test_refresh_resets_and_retries(self):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv[1:])
+            return (b"", b"", False, 0)
+
+        with mock.patch.object(win_backend, "run_capture", side_effect=fake_run):
+            self.assertEqual(win_backend._prepare_winget_sources(r"C:\w\winget.exe"), "")
+        self.assertEqual(calls, [["source", "update"]])
+
+    def test_failed_update_resets_then_updates_again(self):
+        seen = []
+
+        def fake_run(argv, **kw):
+            seen.append(argv[1:])
+            if argv[1:] == ["source", "update"] and len(seen) == 1:
+                return (b"", b"boom", False, 1)
+            return (b"", b"", False, 0)
+
+        notes = []
+        with mock.patch.object(win_backend, "run_capture", side_effect=fake_run):
+            why = win_backend._prepare_winget_sources(r"C:\w\winget.exe", notes.append)
+        self.assertEqual(why, "")
+        self.assertEqual(seen, [["source", "update"],
+                                ["source", "reset", "--force"],
+                                ["source", "update"]])
+        self.assertTrue(any("源索引" in n for n in notes))
+
+    def test_install_retries_once_after_refreshing_sources(self):
+        results = [(b"", b"SourceOpenFailedSuggestion", False, 1),
+                   (b"", b"", False, 0)]
+        with mock.patch.object(win_backend, "find_vscode",
+                               side_effect=[None, {"exe": r"D:\Code.exe"}]), \
+             mock.patch.object(win_backend, "_prepare_winget_sources",
+                               return_value="") as prepare, \
+             mock.patch.object(win_backend, "run_capture",
+                               side_effect=lambda *a, **k: results.pop(0)):
+            text, why = win_backend._install_via_winget(r"C:\w\winget.exe")
+        self.assertEqual(text, r"已安装 VSCode（D:\Code.exe）")
+        self.assertEqual(why, "")
+        prepare.assert_called_once()
+
+    def test_non_source_failure_does_not_retry(self):
+        with mock.patch.object(win_backend, "_prepare_winget_sources") as prepare, \
+             mock.patch.object(win_backend, "run_capture",
+                               return_value=(b"", b"boom", False, 1)):
+            text, why = win_backend._install_via_winget(r"C:\w\winget.exe")
+        prepare.assert_not_called()
+        self.assertEqual(text, "")
+        self.assertIn("winget 返回 1", why)
+
+
+class SetupInstallerTests(unittest.TestCase):
+    """最后一条路：不经过 winget，下微软官方的用户级安装包静默装。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        self.setup = self.tmp / "VSCodeUserSetup-x64.exe"
+        self.setup.write_bytes(b"MZ" + b"0" * 64)
+
+    def test_runs_silent_flags_and_deletes_the_file(self):
+        seen = {}
+
+        def fake_run(argv, **kw):
+            seen["argv"] = argv
+            return (b"", b"", False, 0)
+
+        with mock.patch.object(win_backend, "_fetch_vscode_setup",
+                               return_value=(self.setup, "")), \
+             mock.patch.object(win_backend, "find_vscode",
+                               return_value={"exe": r"D:\Code.exe"}), \
+             mock.patch.object(win_backend, "run_capture", side_effect=fake_run):
+            text, why = win_backend._install_from_setup()
+        self.assertEqual(why, "")
+        self.assertEqual(text, r"已安装 VSCode（D:\Code.exe）")
+        self.assertEqual(seen["argv"][1:], ["/VERYSILENT", "/NORESTART", "/SP-",
+                                            "/SUPPRESSMSGBOXES", "/MERGETASKS=!runcode"])
+        self.assertFalse(self.setup.exists(), "240MB 的安装包用完要删掉")
+
+    def test_reboot_required_is_success(self):
+        with mock.patch.object(win_backend, "_fetch_vscode_setup",
+                               return_value=(self.setup, "")), \
+             mock.patch.object(win_backend, "find_vscode",
+                               return_value={"exe": r"D:\Code.exe"}), \
+             mock.patch.object(win_backend, "run_capture",
+                               return_value=(b"", b"", False, 3010)):
+            text, why = win_backend._install_from_setup()
+        self.assertEqual(why, "")
+        self.assertTrue(text.startswith("已安装 VSCode"))
+
+    def test_download_failure_is_reported(self):
+        with mock.patch.object(win_backend, "_fetch_vscode_setup",
+                               return_value=(None, "HTTP 403")):
+            text, why = win_backend._install_from_setup()
+        self.assertEqual(text, "")
+        self.assertIn("HTTP 403", why)
+
+    def test_rejects_a_non_executable_payload(self):
+        fake = _fake_requests(_FakeResp(b"<html>not found</html>" * 400000))
+        with mock.patch.dict(sys.modules, {"requests": fake}):
+            got, why = win_backend._fetch_vscode_setup()
+        self.assertIsNone(got)
+        self.assertIn("不是 Windows 可执行文件", why)
+
+
+class BrokenAliasTests(unittest.TestCase):
+    """WindowsApps 下的执行别名可能是空壳：文件在，进程创建直接失败。"""
+
+    def test_verify_skips_an_unlaunchable_alias(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        alias = tmp / "AppData" / "Local" / "Microsoft" / "WindowsApps" / "winget.exe"
+        alias.parent.mkdir(parents=True)
+        alias.write_bytes(b"")
+
+        with mock.patch.object(win_backend, "HOME", tmp), \
+             mock.patch.object(win_backend.shutil, "which", return_value=None), \
+             mock.patch.object(win_backend, "run_capture",
+                               side_effect=FileNotFoundError("WinError 3")):
+            self.assertIsNone(win_backend.find_winget(verify=True))
+            # 不验的时候还是照旧返回（老调用方靠它只做"有没有"的判断）
+            self.assertEqual(win_backend.find_winget(), str(alias))
 
 
 class ShippedPackageTests(unittest.TestCase):

@@ -55,6 +55,24 @@ Windows 10/11 的家庭版精简镜像、老 LTSC、服务器版都可能不带 
 - 下载边写边算 sha256，对不上就删掉、换下一个源；两个源（CDN / 回源）都失败才回到下载页。
 - 58MB 的安装包用完即删；只有第一次需要，之后 `find_winget()` 直接命中。
 
+**winget 装上了不等于能用**（2026-10-30 第二个坑）。刚装好的 winget 没有源索引，
+`winget install` 会**当场**返回 `0x8A15004B`（`SourceOpenFailedSuggestion`）——
+用户在真机上撞到的就是这个：包下完了、winget 也装上了，然后报
+`winget 返回 2316632139`。所以 `install_vscode()` 现在是三条路依次试：
+
+1. `winget install`。失败时**只有**看着像源的问题（`SourceOpenFailed` / `source`）才
+   `winget source update`，不行再 `source reset --force` + `update`，然后重试一次。
+   超时之类的失败不重试 —— 那等于把上限翻倍。
+2. 没有 winget 就先 `ensure_winget()` 装上（上面那 58MB），再走第 1 条。
+3. **都不通就绕开 winget**：直接下微软官方的用户级安装包
+   （`update.code.visualstudio.com/latest/win32-x64-user/stable`，约 240MB），
+   `/VERYSILENT /MERGETASKS=!runcode` 静默装，退出码 3010（要求重启）也算成功。
+   这条和下载页给用户的是同一个文件，签名也是微软的。
+
+三条都不行才打开下载页，并把每一步卡在哪如实说出来（`on_note` 会往对话里打行）。
+`find_winget(verify=True)` 会真跑一次 `--version`：`WindowsApps` 下的**执行别名可能是空壳**
+（文件在、包没为这个用户装，`Popen` 直接 WinError 3），不验就会拿一个跑不起来的路径去装东西。
+
 
 `open_vscode()` 不只是开窗：它**把 Claude 面板也一起打开**。VSCode 命令行没有 `--command`
 这种东西，所以走的是插件自己注册的 URI 入口 `vscode://anthropic.claude-code/open`
@@ -932,6 +950,11 @@ Windows 上用一次 PowerShell 的 `Get-CimInstance` 读，非 Windows 或取�
   `winget.exe` 能跑（`--version`、`search` 都正常）、分支逻辑全有离线测试。
   没验到的是 `Add-AppxPackage` 那一步真的落到一台没有 App Installer 的机器上 ——
   手上没有这样的机器。装不上也不会卡住：会退到便携版，再不行才打开下载页。
+- **新装的 winget 源索引是空的**，2026-10-30 用户在真机上撞到 `0x8A15004B`。
+  已经加了 `source update` / `source reset --force` 重试和「直接下微软安装包」那条兜底，
+  但**没有在这台机器上复现过**（本机的 winget 本来就是装好的、源索引也在）。
+  下次再遇到，日志里会多出「已装好 winget（正式安装 / 便携版）」和
+  「刷新源索引后再试一次」这些行，能直接看出走到哪一步。
 
 - **Linux 发的是服务器版，不是桌面版。** 从发这一版起，`linux-x64` 那个包没有图形界面：
   老的 Linux 桌面用户被自动更新换上之后，双击图标（如果他们手动装过 `.desktop`）

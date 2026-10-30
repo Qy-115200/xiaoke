@@ -213,7 +213,8 @@ class WindowsInstallTests(unittest.TestCase):
         self.winget = self.tmp / "winget.exe"
         self.winget.write_bytes(b"")
 
-    def _patches(self, run_result=(b"", b"", False, 0), found=None):
+    def _patches(self, run_result=(b"", b"", False, 0), found=None,
+                 setup_result=None):
         return [
             mock.patch.object(win_backend, "HOME", self.fake_home),
             mock.patch.object(win_backend, "find_vscode", return_value=found),
@@ -223,6 +224,11 @@ class WindowsInstallTests(unittest.TestCase):
             mock.patch.object(win_backend, "run_capture", return_value=run_result),
             mock.patch.object(common, "open_url", return_value=True),
             mock.patch.object(win_backend.time, "sleep"),
+            # 最后那条"直接下微软安装包"的路：默认装作下不动，免得真发请求。
+            # 要测它自己的用 test_winget.py 里的 SetupInstallerTests。
+            mock.patch.object(win_backend, "_install_from_setup",
+                              return_value=setup_result
+                              or ("", "下载 VSCode 安装包失败（离线）")),
         ]
 
     def test_already_installed(self):

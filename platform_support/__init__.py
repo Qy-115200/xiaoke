@@ -115,7 +115,7 @@ def find_winget() -> str | None:
     return fn() if fn is not None else None
 
 
-def ensure_winget(on_progress=None) -> dict:
+def ensure_winget(on_progress=None, on_note=None) -> dict:
     """确保有 winget：没有就下载微软官方的 App Installer 装上（Windows 专用）。
 
     返回 {"ok", "exe", "mode", "note"}；mode = existing / appx / portable。
@@ -125,16 +125,16 @@ def ensure_winget(on_progress=None) -> dict:
     if fn is None:
         return {"ok": False, "exe": "", "mode": "",
                 "note": "这个平台没有 winget"}
-    return fn(on_progress)
+    return fn(on_progress, on_note)
 
 
-def install_vscode(on_progress=None) -> str:
+def install_vscode(on_progress=None, on_note=None) -> str:
     m = _impl()
     fn = getattr(m, "install_vscode", None)
     if fn is None:
         from platform_support.common import download_page_fallback
         return download_page_fallback("这个平台没有自动安装 VSCode 的实现")
-    return fn(on_progress)
+    return fn(on_progress, on_note)
 
 
 def open_vscode(directory: str = "", new_window: bool = False) -> str:

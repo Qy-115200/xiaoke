@@ -30,6 +30,19 @@ from platform_support.common import (
 # 自己的子进程用，跟 bash 工具的 600 秒上限无关。
 VSCODE_INSTALL_TIMEOUT = 900
 
+# winget 的源索引没准备好时，`source update` 要现下一份 20MB 的索引；
+# 慢网络下别让它把整个安装挂死。
+WINGET_SOURCE_TIMEOUT = 180
+
+# ★ 最后一条路：不经过 winget，直接下微软官方的用户级安装包（和下载页给用户的
+#   是同一个文件）。winget 的源索引在有些机器上就是起不来（代理、组策略、
+#   App Installer 装不全），2026-10-30 用户在真机上撞到的就是这种：
+#   `winget install` 当场返回 0x8A15004B（SourceOpenFailed）。
+VSCODE_SETUP_URL = "https://update.code.visualstudio.com/latest/win32-x64-user/stable"
+# 这个地址会 302 到 vscode.download.prss.microsoft.com 上带版本号的真实文件。
+# 实测 2026-10-30：250MB 左右，国内直连 ~380KB/s，十几分钟。所以给足 30 分钟。
+VSCODE_SETUP_TIMEOUT = 1800
+
 
 def platform_key() -> str:
     machine = platform.machine().lower()
@@ -257,17 +270,37 @@ def _winget_portable_dir() -> Path:
     return HOME / "AppData" / "Local" / "aikaui" / "winget" / WINGET_VERSION
 
 
-def find_winget() -> str | None:
+def find_winget(verify: bool = False) -> str | None:
     """找 winget：PATH → App Installer 的执行别名 → 我们解压出来的便携版。
 
     ★ 别名那条不能省：刚装完 App Installer 时，PATH 还是本进程启动时的那份，
-      `shutil.which("winget")` 找不到它，但文件已经在那儿了。"""
+      `shutil.which("winget")` 找不到它，但文件已经在那儿了。
+    ★ verify=True 时要真跑一次 `--version`：WindowsApps 下的执行别名可能是个空壳
+      （文件在，但那个包不是给这个用户装的），创建进程直接 WinError 3。
+      本机 2026-10-30 就是这样 —— 不验就会拿一个跑不起来的路径去装东西。"""
     for cand in (shutil.which("winget"), shutil.which("winget.exe"),
                  str(HOME / "AppData" / "Local" / "Microsoft" / "WindowsApps" / "winget.exe"),
                  str(_winget_portable_dir() / "winget.exe")):
-        if cand and Path(cand).is_file():
-            return str(cand)
+        if not cand or not Path(cand).is_file():
+            continue
+        if verify and not _winget_runs(cand):
+            continue
+        return str(cand)
     return None
+
+
+def _winget_runs(exe: str) -> bool:
+    """这个 winget 真的起得来吗？只用来挡"执行别名是空壳"这一类。
+
+    ★ 只看"能不能创建进程"，不看退出码也不看超时：返回非零、甚至卡住了，都算
+      有东西（后面 `winget install` 自己会报具体错误，那条路有兜底）。
+      这一条只用来挡"执行别名是空壳"—— 那种情况 Popen 直接抛 WinError 3。"""
+    try:
+        run_capture([exe, "--version"], timeout=30, env=clean_env(),
+                    stdin=subprocess.DEVNULL)
+    except Exception:
+        return False
+    return True
 
 
 def _sha256_of(path: Path) -> str:
@@ -303,7 +336,7 @@ def _download(url: str, dest: Path, on_progress=None) -> str:
                     done += len(chunk)
                     if on_progress:
                         try:
-                            on_progress(done, total or WINGET_MSIX_SIZE)
+                            on_progress(done, total or WINGET_MSIX_SIZE, "winget")
                         except Exception:
                             pass
             if total and total != WINGET_MSIX_SIZE:
@@ -401,12 +434,25 @@ def _extract_portable(msix: Path) -> tuple[str | None, str]:
     return str(exe), ""
 
 
-def ensure_winget(on_progress=None) -> dict:
+def _note(cb, msg: str) -> None:
+    """往对话里打一句话（调用方没给回调就什么都不做）。回调出错绝不能影响安装。"""
+    if not cb or not msg:
+        return
+    try:
+        cb(msg)
+    except Exception:
+        pass
+
+
+def ensure_winget(on_progress=None, on_note=None) -> dict:
     """确保这台机器上有 winget。返回 {"ok", "exe", "mode", "note"}。
 
     mode 取值：existing（本来就有）/ appx（这次装上的）/ portable（解压即用）。
-    装不上时 ok=False，note 里是一句能直接讲给用户听的原因 —— 别让它变成异常。"""
-    exe = find_winget()
+    装不上时 ok=False，note 里是一句能直接讲给用户听的原因 —— 别让它变成异常。
+
+    on_note(msg)：往对话里打一行进度/结论。2026-10-30 加了它，因为上次装失败
+    时日志里只有下载百分比，看不出最后走的是 AppX 还是便携版。"""
+    exe = find_winget(verify=True)          # 空壳别名不算数
     if exe:
         return {"ok": True, "exe": exe, "mode": "existing", "note": ""}
 
@@ -418,14 +464,17 @@ def ensure_winget(on_progress=None) -> dict:
         appx_why = _install_appx(msix)
         if not appx_why:
             for _ in range(3):                  # 别名文件有几十毫秒的延迟
-                exe = find_winget()
+                exe = find_winget(verify=True)
                 if exe:
+                    _note(on_note, "已装好 winget（正式安装）")
                     return {"ok": True, "exe": exe, "mode": "appx", "note": ""}
                 time.sleep(1)
-            appx_why = "装完了却找不到 winget.exe"
+            appx_why = "装完了却找不到能用的 winget.exe"
 
+        _note(on_note, f"winget 装不上（{appx_why}），改用便携版")
         exe, port_why = _extract_portable(msix)
         if exe:
+            _note(on_note, "已装好 winget（便携版，解压即用）")
             return {"ok": True, "exe": exe, "mode": "portable", "note": ""}
         return {"ok": False, "exe": "", "mode": "install",
                 "note": f"{appx_why}；便携版也不行（{port_why}）"}
@@ -437,24 +486,45 @@ def ensure_winget(on_progress=None) -> dict:
             pass
 
 
-def install_vscode(on_progress=None) -> str:
-    """用 winget 装 VSCode（用户级安装，不提权）。装不上就打开下载页。
+def _run_source_update(exe: str) -> str:
+    """跑一次 `winget source update`。成功返回空串，失败返回一句原因。"""
+    try:
+        out, err, timed_out, rc = run_capture(
+            [exe, "source", "update"], timeout=WINGET_SOURCE_TIMEOUT,
+            env=clean_env(), stdin=subprocess.DEVNULL)
+    except Exception as e:
+        return f"跑不起来：{e}"
+    if timed_out:
+        return f"超过 {WINGET_SOURCE_TIMEOUT} 秒"
+    if rc == 0:
+        return ""
+    detail = (err or out or b"").decode("utf-8", "replace").strip().splitlines()
+    return f"返回 {rc}" + (f"：{detail[-1][:120]}" if detail else "")
 
-    没 winget 时先调 ensure_winget() 把它装上——见上面那段注释。
-    on_progress(已下载字节, 总字节) 只在下 winget 时回调，用来给界面报进度。"""
-    found = find_vscode()
-    if found:
-        return f"已经装过 VSCode，不用重复安装（{found['exe']}）"
 
-    winget = find_winget()
-    if not winget:
-        got = ensure_winget(on_progress)
-        if not got["ok"]:
-            return download_page_fallback(got["note"])
-        winget = got["exe"]
+def _prepare_winget_sources(exe: str, note=None) -> str:
+    """把 winget 的源索引准备好。成功返回空串，失败返回原因。
 
+    ★ 新装的 winget（App Installer 装完、从没启动过的时候尤其）源索引是空的，
+      任何 install 都会当场返回 0x8A15004B（SourceOpenFailedSuggestion）——
+      用户 2026-10-30 撞到的就是这个。先 update 一次；还不行就 reset --force
+      再 update 一次（winget 自己给的补救建议就是这两条）。"""
+    why = _run_source_update(exe)
+    if not why:
+        return ""
+    _note(note, f"winget 源索引更新失败（{why}），重置后重试…")
+    try:
+        run_capture([exe, "source", "reset", "--force"], timeout=60,
+                    env=clean_env(), stdin=subprocess.DEVNULL)
+    except Exception:
+        pass
+    return _run_source_update(exe)
+
+
+def _winget_install_once(exe: str) -> str:
+    """`winget install VSCode` 一次。成功返回空串，失败返回一句原因。"""
     argv = [
-        winget, "install", "-e", "--id", "Microsoft.VisualStudioCode",
+        exe, "install", "-e", "--id", "Microsoft.VisualStudioCode",
         "--scope", "user",                     # 用户级：不弹 UAC
         "--accept-package-agreements", "--accept-source-agreements",
     ]
@@ -463,24 +533,172 @@ def install_vscode(on_progress=None) -> str:
             argv, timeout=VSCODE_INSTALL_TIMEOUT, env=clean_env(),
             stdin=subprocess.DEVNULL)
     except Exception as e:
-        return download_page_fallback(f"winget 跑不起来：{e}")
-
+        return f"跑不起来：{e}"
     if timed_out:
-        return download_page_fallback(f"winget 超过 {VSCODE_INSTALL_TIMEOUT} 秒没装完")
+        return f"超过 {VSCODE_INSTALL_TIMEOUT} 秒没装完"
     if rc != 0:
         # 只取最后一行有用信息，别把整段 winget 日志倒给模型
         detail = (err or out or b"").decode("utf-8", "replace").strip().splitlines()
-        return download_page_fallback(
-            f"winget 返回 {rc}" + (f"：{detail[-1][:120]}" if detail else ""))
+        return f"返回 {rc}" + (f"：{detail[-1][:120]}" if detail else "")
+    return ""
+
+
+_SOURCE_PROBLEM_HINTS = ("sourceopenfailed", "0x8a15", "source", "源")
+
+
+def _looks_like_source_problem(why: str) -> bool:
+    """这次失败像是"源索引没准备好"吗？只有这种才值得刷新源再试一次。
+
+    ★ 超时不算：再试一次等于把 15 分钟的上限翻倍，宁可直接走下载安装包那条路。
+      用户 2026-10-30 撞到的是 `SourceOpenFailedSuggestion`（0x8A15004B），
+      属于这一类。"""
+    low = (why or "").lower()
+    if "超过" in low and "秒" in low:      # 超时
+        return False
+    return any(h in low for h in _SOURCE_PROBLEM_HINTS)
+
+
+def _install_via_winget(exe: str, note=None) -> tuple[str, str]:
+    """用 winget 装 VSCode。成功返回 ("已安装 VSCode（…）", "")，失败返回 ("", 原因)。"""
+    why = _winget_install_once(exe)
+    if why and _looks_like_source_problem(why):
+        # 源索引没准备好是最常见的失败（0x8A15004B）。刷新一次再给一次机会 ——
+        # 这一步很便宜，比直接放弃去下 240MB 划算。
+        _note(note, f"winget 装失败了（{why}），刷新源索引后再试一次…")
+        src = _prepare_winget_sources(exe, note)
+        why2 = _winget_install_once(exe)
+        if why2:
+            tail = f"刷新源索引（{src}）后仍然" if src else "刷新源索引后仍然"
+            return "", f"winget {why}；{tail}失败（{why2}）"
+    elif why:
+        return "", f"winget {why}"
 
     # 装是装完了，但 PATH 还是旧的（winget 写的是用户环境变量，本进程读不到），
     # 所以再走一遍注册表/标准目录。杀软和安装器收尾会拖一点，重试几次。
     for _ in range(3):
         found = find_vscode()
         if found:
-            return f"已安装 VSCode（{found['exe']}）"
+            return f"已安装 VSCode（{found['exe']}）", ""
         time.sleep(2)
-    return download_page_fallback("winget 说装成功了，但找不到 VSCode 的安装位置")
+    return "", "winget 说装成功了，但找不到 VSCode 的安装位置"
+
+
+def _fetch_vscode_setup(on_progress=None) -> tuple[Path | None, str]:
+    """下微软官方的用户级安装包。返回 (文件, 空) 或 (None, 原因)。"""
+    try:
+        import requests
+    except Exception as e:
+        return None, f"没有请求库：{e}"
+
+    dest = Path(tempfile.gettempdir()) / "aikaui-VSCodeUserSetup-x64.exe"
+    tmp = Path(str(dest) + ".part")
+    done = 0
+    try:
+        with requests.get(VSCODE_SETUP_URL, stream=True, timeout=(15, 60)) as r:
+            if r.status_code != 200:
+                return None, f"HTTP {r.status_code}"
+            total = int(r.headers.get("content-length") or 0)
+            with open(tmp, "wb") as f:
+                for chunk in r.iter_content(1 << 20):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    done += len(chunk)
+                    if on_progress:
+                        try:
+                            on_progress(done, total or done, "vscode")
+                        except Exception:
+                            pass
+        with open(tmp, "rb") as f:          # ★ 先关文件再删：Windows 上删不掉打开着的文件
+            head = f.read(2)
+        if head != b"MZ":
+            tmp.unlink(missing_ok=True)
+            return None, "下下来的不是 Windows 可执行文件"
+        if done < 50 * 1024 * 1024:
+            tmp.unlink(missing_ok=True)
+            return None, f"下下来的文件太小（{done} 字节）"
+    except Exception as e:
+        tmp.unlink(missing_ok=True)
+        return None, f"{type(e).__name__}：{str(e)[:80]}"
+
+    tmp.replace(dest)
+    return dest, ""
+
+
+def _install_from_setup(on_progress=None, note=None) -> tuple[str, str]:
+    """最后一条路：不经过 winget，下微软官方的安装包静默装。
+
+    winget 这条路整个不通时（源索引起不来、组策略挡了、AppX 装不上还解压不了）
+    才会走到这儿。下的文件和下载页给用户的是同一个，签名也是微软的。"""
+    _note(note, "winget 这条路走不通，改成直接下载微软官方的安装包（约 240MB，几分钟）…")
+    setup, why = _fetch_vscode_setup(on_progress)
+    if setup is None:
+        return "", f"下载 VSCode 安装包失败（{why}）"
+
+    try:
+        argv = [str(setup), "/VERYSILENT", "/NORESTART", "/SP-",
+                "/SUPPRESSMSGBOXES", "/MERGETASKS=!runcode"]
+        try:
+            out, err, timed_out, rc = run_capture(
+                argv, timeout=VSCODE_SETUP_TIMEOUT, env=clean_env(),
+                stdin=subprocess.DEVNULL)
+        except Exception as e:
+            return "", f"安装包跑不起来：{e}"
+        if timed_out:
+            return "", f"安装包超过 {VSCODE_SETUP_TIMEOUT} 秒没装完"
+        if rc not in (0, 3010):                # 3010 = 装好了但要求重启
+            detail = (err or out or b"").decode("utf-8", "replace").strip().splitlines()
+            return "", f"安装包返回 {rc}" + (f"：{detail[-1][:120]}" if detail else "")
+    finally:
+        try:
+            setup.unlink(missing_ok=True)      # 240MB 别留在临时目录里
+        except Exception:
+            pass
+
+    for _ in range(5):
+        found = find_vscode()
+        if found:
+            return f"已安装 VSCode（{found['exe']}）", ""
+        time.sleep(2)
+    return "", "安装包说装完了，但找不到 VSCode 的安装位置"
+
+
+def install_vscode(on_progress=None, on_note=None) -> str:
+    """装 VSCode（用户级，不提权）。三条路依次试，都不行才打开下载页。
+
+    1. winget 本来就有的机器：直接 `winget install`（最快，不用多下东西）；
+    2. 没有 winget 就先装上（ensure_winget，58MB），再走第 1 条；
+    3. winget 整个不通（源索引起不来 / AppX 装不上）时，直接下微软官方的
+       用户级安装包静默安装 —— 这条不依赖 winget 的任何组件。
+
+    on_progress(已下载字节, 总字节, "winget"|"vscode") 用来给界面报进度；
+    on_note(msg) 用来往对话里打一行说明（走的哪条路、卡在哪一步）。"""
+    found = find_vscode()
+    if found:
+        return f"已经装过 VSCode，不用重复安装（{found['exe']}）"
+
+    reasons = []
+
+    winget = find_winget(verify=True)
+    if not winget:
+        got = ensure_winget(on_progress, on_note)
+        if got["ok"]:
+            winget = got["exe"]
+        else:
+            reasons.append(got["note"])
+
+    if winget:
+        text, why = _install_via_winget(winget, on_note)
+        if text:
+            return text
+        reasons.append(why)
+
+    text, why = _install_from_setup(on_progress, on_note)
+    if text:
+        return text
+    reasons.append(why)
+
+    return download_page_fallback("；".join(r for r in reasons if r))
 
 
 def open_vscode(directory: str = "", new_window: bool = False) -> str:

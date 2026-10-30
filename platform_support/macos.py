@@ -335,11 +335,12 @@ def _find_brew() -> str:
     return shutil.which("brew") or ""
 
 
-def install_vscode(on_progress=None) -> str:
+def install_vscode(on_progress=None, on_note=None) -> str:
     """有 brew 就用 brew 装，没有/失败就打开下载页。
 
-    on_progress 是 Windows 那边下 winget 用的，这里没有可报的进度，忽略。"""
-    del on_progress
+    on_progress / on_note 是 Windows 那边下 winget、下安装包用的，
+    这里没有可报的进度，忽略。"""
+    del on_progress, on_note
     found = find_vscode()
     if found:
         return f"已经装过 VSCode，不用重复安装（{found['exe']}）"
