@@ -105,7 +105,7 @@ def run_one_task(messages, task_text, *, tools=None, tool_map=None,
       marks_complete         这个工具调用算不算"把用户领进门了"（默认 _marks_install_complete）
       status                 可变的 dict，出问题时写进 status["error"]
                              （no_identity / balance / model / bad_response / max_steps）
-                             —— 服务器版要靠它区分"连不上模型"和"跑满了 25 步"
+                             —— 服务器版要靠它区分"连不上模型"和"跑满了 MAX_STEPS 步"
     """
     if tools is None:
         tools = globals()["tools"]
@@ -121,7 +121,7 @@ def run_one_task(messages, task_text, *, tools=None, tool_map=None,
     installing = False      # 这一轮调过 register_device（安装流程的起点）
     launched = False        # 真的把用户领进门了：开了终端，或者开了 VSCode
 
-    for _step in range(MAX_STEPS):      # 最多循环 25 次
+    for _step in range(MAX_STEPS):      # 最多循环 MAX_STEPS 次（config.py）
         messages = _sanitize_messages(messages)   # 每次调用前先清理（防被裁剪破坏结构）
 
         try:
