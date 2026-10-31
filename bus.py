@@ -92,7 +92,7 @@ def poll_queue(gui):
                             "不是您的（比如这是共用电脑）就关掉这个窗口。"),
                 )
             elif kind == "recovered":
-                # 注册时服务器按硬件指纹认出了旧账号，把余额还回来了
+                # 注册时服务器按设备指纹认出了旧账号，直接登回去了
                 gui.show_recovered_notice()
             elif kind == "ask":
                 # ask_user 带了选项 → 渲染成可点 / 可键盘选的列表

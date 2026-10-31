@@ -46,6 +46,22 @@ def platform_key() -> str:
     return _impl().platform_key()
 
 
+def fingerprint_parts() -> dict:
+    """本机的原始标识（主板序列号 / MachineGuid / IOPlatformUUID / machine-id …）。
+
+    给 server/fingerprint.py 拼指纹用：粘合/哈希/取舍都在那边做，这里只管"这个
+    平台能读到什么"。后端没实现、或者读失败 → 返回 {}，调用方必须能接受空。
+    ★ 这些是原始值，不是指纹：别打进日志，也别显示给用户。"""
+    m = _impl()
+    fn = getattr(m, "fingerprint_parts", None)
+    if fn is None:
+        return {}
+    try:
+        return dict(fn() or {})
+    except Exception:
+        return {}
+
+
 def register_url_protocol() -> str:
     return _impl().register_url_protocol()
 

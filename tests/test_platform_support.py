@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -82,6 +83,75 @@ class PlatformApiTests(unittest.TestCase):
 
     def test_desktop_dir_is_path(self):
         self.assertIsInstance(platform_support.desktop_dir(), Path)
+
+
+class FingerprintPartsTests(unittest.TestCase):
+    """原始标识的读取层：只验"读到什么键"，不验哈希（那在 test_credentials）。
+
+    ★ 不能真去读这台机器的硬件 —— 全部把底层读法 mock 掉。"""
+
+    def test_windows_parts(self):
+        from platform_support import windows
+
+        with mock.patch.object(windows, "_cim_ids",
+                               return_value={"board": " BRD-1 ", "cpu": "CPU-1"}), \
+                mock.patch.object(windows, "_machine_guid", return_value="GUID-1"):
+            parts = windows.fingerprint_parts()
+        self.assertEqual(parts, {"board": "BRD-1", "cpu": "CPU-1",
+                                 "machine_guid": "GUID-1"})
+
+    def test_windows_never_raises(self):
+        from platform_support import windows
+
+        with mock.patch.object(windows, "_cim_ids", side_effect=RuntimeError("boom")), \
+                mock.patch.object(windows, "_machine_guid", side_effect=RuntimeError("boom")):
+            # 读硬件失败绝不能把注册搞挂：返回空键，上层还有别的来源可退
+            self.assertEqual(windows.fingerprint_parts(),
+                             {"board": "", "cpu": "", "machine_guid": ""})
+
+    def test_macos_parses_ioreg(self):
+        from platform_support import macos
+
+        stdout = (
+            '    "IOPlatformSerialNumber" = "SER-1"\n'
+            '    "IOPlatformUUID" = "UUID-1"\n'
+            '    "IOPlatformProduct" = "MacBookPro18,3"\n'
+        )
+
+        class _Proc:
+            returncode = 0
+            stdout = ""
+
+        proc = _Proc()
+        proc.stdout = stdout
+
+        with mock.patch.object(macos.subprocess, "run", return_value=proc) as run:
+            parts = macos.fingerprint_parts()
+        self.assertEqual(parts, {"platform_uuid": "UUID-1", "serial": "SER-1"})
+        self.assertEqual(run.call_args[0][0][0], "ioreg")
+
+    def test_linux_reads_files_and_container(self):
+        from platform_support import linux
+
+        values = {
+            "/etc/machine-id": "abc123\n",
+            "/sys/class/dmi/id/product_uuid": "UUID-2\n",
+            "/sys/class/dmi/id/board_serial": "BRD-2\n",
+        }
+        with mock.patch.object(linux, "_read_first",
+                               side_effect=lambda paths: next(
+                                   (values[p] for p in paths if p in values), "").strip()), \
+                mock.patch.object(linux, "_in_container", return_value=True), \
+                mock.patch.object(linux.socket, "gethostname", return_value="c1"):
+            parts = linux.fingerprint_parts()
+        self.assertEqual(parts, {"machine_id": "abc123", "product_uuid": "UUID-2",
+                                 "board_serial": "BRD-2", "container": "c1"})
+
+    def test_backend_without_impl_returns_empty(self):
+        # 平台后端没实现 → {}，调用方（server/fingerprint.py）必须能接受
+        with mock.patch.object(platform_support, "_impl",
+                               return_value=object()):
+            self.assertEqual(platform_support.fingerprint_parts(), {})
 
 
 if __name__ == "__main__":

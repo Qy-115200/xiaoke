@@ -6,6 +6,7 @@ macOS/Linux 在 import 阶段就崩掉。现在 winreg / win32com 全部收进�
 模块本身在任何平台上都能安全 import。
 """
 
+import json
 import os
 import platform
 import re
@@ -1386,6 +1387,83 @@ def notify(title: str, message: str) -> None:
         )
     except Exception:
         pass
+
+
+# ================= 设备指纹（给注册链路用） =================
+#
+# 服务器要的是 sha256 前 32 位，原始值在这里取：
+#   主板序列号 + CPU ProcessorId  → 主板是占位串时再退到 MachineGuid。
+# ★ MachineGuid 是 Windows 安装时生成的，每台机器（每次重装系统）都不一样，
+#   比 CPU ID 靠谱得多 —— ProcessorId 对同型号 CPU 是常量，不是序列号。
+# ★ 这些原始值**不是凭据**，本机任何程序都读得到；别打进日志、别显示给用户
+#   （能查保修、也能被用来冒充）。理由见 server/fingerprint.py 的文件头。
+
+# PowerShell 起来要半秒到两秒，给足时间；超时就当取不到（注册不能因此失败）。
+FP_TIMEOUT = 20
+
+# 一次进程问两样东西。$ErrorActionPreference 设成静默：老机器上可能没有某个
+# CIM 类，让它返回空而不是抛错。
+_FP_PS = (
+    "$ErrorActionPreference='SilentlyContinue';"
+    "$b=(Get-CimInstance -ClassName Win32_BaseBoard | "
+    "Select-Object -First 1).SerialNumber;"
+    "$c=(Get-CimInstance -ClassName Win32_Processor | "
+    "Select-Object -First 1).ProcessorId;"
+    "@{board=$b;cpu=$c} | ConvertTo-Json -Compress"
+)
+
+
+def _machine_guid() -> str:
+    """HKLM\\SOFTWARE\\Microsoft\\Cryptography\\MachineGuid。读不到返回 ""。
+
+    用 winreg 而不是再起一次 PowerShell：值就在注册表里，一行的事。
+    """
+    try:
+        import winreg                          # Windows 才有，函数内 import
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Microsoft\Cryptography") as key:
+            value, _kind = winreg.QueryValueEx(key, "MachineGuid")
+        return str(value or "").strip()
+    except Exception:
+        return ""
+
+
+def _cim_ids() -> dict:
+    """起一次 PowerShell 问主板 / CPU。失败返回 {}（绝不抛）。"""
+    try:
+        out, _err, timed_out, rc = run_capture(
+            ["powershell", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass", "-Command", _FP_PS],
+            timeout=FP_TIMEOUT, env=clean_env(), stdin=subprocess.DEVNULL)
+    except Exception:
+        return {}
+    if timed_out or rc != 0:
+        return {}
+    text = smart_decode(out).strip()
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def fingerprint_parts() -> dict:
+    """原始标识：board / cpu / machine_guid，取不到的键是空串。绝不抛异常。"""
+    try:
+        data = _cim_ids()
+    except Exception:
+        data = {}
+    try:
+        guid = _machine_guid()
+    except Exception:
+        guid = ""
+    return {
+        "board": str(data.get("board") or "").strip(),
+        "cpu": str(data.get("cpu") or "").strip(),
+        "machine_guid": guid,
+    }
 
 
 # ================= 命令执行 =================

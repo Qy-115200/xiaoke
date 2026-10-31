@@ -14,7 +14,7 @@
   3. **打码不是加密。** 明文就在本地凭证里，能碰到这台电脑的人点一下就能看到。
      所以旁边那句红字警告是**必需品**，不是装饰。
 
-`ui_recovered()` 是给 Agent 线程调的回调（服务器说"认出旧账号了、余额还回来了"），
+`ui_recovered()` 是给 Agent 线程调的回调（服务器说"认出这台机器的旧账号了"），
 它只往 bus.msg_queue 里丢消息，真正的弹窗由主线程的 show_recovered_notice() 弹。
 """
 
@@ -255,7 +255,7 @@ class AccountMixin:
             font=font(S_DIALOG, "bold"), text_color=GREEN,
         ).pack(pady=(26, 10))
         ctk.CTkLabel(
-            dlg, text="检测到您之前已注册过，已为您自动恢复原有账户和余额。",
+            dlg, text="检测到这台机器之前已经注册过，已直接登回原来的账户。",
             font=font(S_SMALL), text_color=TEXT, wraplength=400, justify="center",
         ).pack(padx=28)
         ctk.CTkButton(

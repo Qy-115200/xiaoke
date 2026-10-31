@@ -425,6 +425,39 @@ def notify(title: str, message: str) -> None:
         pass
 
 
+# ================= 设备指纹（给注册链路用） =================
+
+# ioreg 偶尔会慢（刚开机、机器很旧），但绝不能把注册卡住。
+FP_TIMEOUT = 15
+
+
+def fingerprint_parts() -> dict:
+    """IOPlatformUUID（每台 Mac 唯一，重装系统也不变）+ 硬件序列号。绝不抛异常。
+
+    ★ 这两个原始值**不是凭据**：本机任何程序都读得到。别打进日志、别显示给用户。
+      理由见 server/fingerprint.py 的文件头。
+    """
+    try:
+        proc = subprocess.run(
+            ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+            capture_output=True, timeout=FP_TIMEOUT, text=True,
+            encoding="utf-8", errors="replace")
+    except Exception:
+        return {}
+    out = {}
+    for line in (proc.stdout or "").splitlines():
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip().strip('"')
+        value = value.strip().strip('"')
+        if key == "IOPlatformUUID":
+            out["platform_uuid"] = value
+        elif key == "IOPlatformSerialNumber":
+            out["serial"] = value
+    return out
+
+
 # ================= 命令执行 =================
 
 def shell_command(cmd: str) -> tuple[list[str], bool]:

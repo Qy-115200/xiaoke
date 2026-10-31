@@ -110,7 +110,7 @@ class ConsoleUI:
 
     def ui_recovered(self):
         self._clear_line()
-        self._write("    服务器认出了你原来的账号，余额已经还回来了。")
+        self._write("    服务器认出了这台机器原来的账号，已经直接登回去了。")
 
     def on_token_acquired(self):
         """桌面版这里会重置 LLM 客户端；服务器版不用模型，什么都不做。"""

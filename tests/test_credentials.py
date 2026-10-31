@@ -83,9 +83,76 @@ class FingerprintTests(unittest.TestCase):
         value = fplib.compute("BOARD-123", "")
         self.assertEqual(len(value), 32)
 
-    def test_non_windows_returns_empty(self):
-        with mock.patch.object(fplib.sys, "platform", "linux"):
-            self.assertEqual(fplib._run_powershell(), {})
+    def test_board_cpu_formula_is_frozen(self):
+        # 线上已经入库的指纹全是老公式 sha256("board|cpu")[:32] 算的 —— 换了公式
+        # 等于把那些账号的"按指纹找回"全部作废。这个值钉死，改公式这条就红。
+        self.assertEqual(fplib.compute("BOARD-123", "BFEBFBFF000906A3"),
+                         "ef803a4cc5d0773e46411edc6ea9b3e7")
+        value, source = fplib.derive(
+            {"board": "BOARD-123", "cpu": "BFEBFBFF000906A3",
+             "machine_guid": "SOMETHING-ELSE"})
+        self.assertEqual(source, "board+cpu")       # 主板可用时 MachineGuid 不参与
+        self.assertEqual(value, "ef803a4cc5d0773e46411edc6ea9b3e7")
+
+    def test_machine_guid_when_board_is_placeholder(self):
+        value, source = fplib.derive(
+            {"board": "Default string", "cpu": "BFEBFBFF000906A3",
+             "machine_guid": "4f2a1c3e-1111-2222-3333-444455556666"})
+        self.assertEqual(source, "machine-guid")
+        self.assertEqual(len(value), 32)
+        int(value, 16)
+
+    def test_placeholder_guid_does_not_become_a_constant(self):
+        # MachineGuid 理论上不该是占位串，但"读成 unknown"这种烂值不能当指纹用
+        value, source = fplib.derive({"board": "", "cpu": "", "machine_guid": "unknown"})
+        self.assertEqual((value, source), ("", ""))
+
+    def test_macos_platform_uuid_beats_serial(self):
+        parts = {"platform_uuid": "UUID-1", "serial": "SERIAL-1"}
+        value, source = fplib.derive(parts)
+        self.assertEqual(source, "platform-uuid")
+        serial_only, src2 = fplib.derive({"serial": "SERIAL-1"})
+        self.assertEqual(src2, "platform-serial")
+        self.assertNotEqual(value, serial_only)
+
+    def test_linux_machine_id_and_dmi(self):
+        parts = {"machine_id": "abc123", "product_uuid": "UUID-2",
+                 "board_serial": "BRD-9"}
+        value, source = fplib.derive(parts)
+        self.assertEqual(source, "machine-id+dmi")
+        self.assertEqual(len(value), 32)
+        # 缺一部分也不能变成空（服务器要求注册带上它）
+        value2, source2 = fplib.derive({"machine_id": "abc123"})
+        self.assertEqual(source2, "machine-id+dmi")
+        self.assertNotEqual(value, value2)
+
+    def test_container_hostname_changes_the_fingerprint(self):
+        # 同一宿主机、同一镜像的两个容器 machine-id/DMI 完全一样 —— 只有 hostname
+        # 能分开它们。分不开就等于"谁的指纹撞上来谁登进别人的号"。
+        base = {"machine_id": "abc123", "product_uuid": "UUID-2"}
+        a, _ = fplib.derive(dict(base, container="c1"))
+        b, _ = fplib.derive(dict(base, container="c2"))
+        self.assertNotEqual(a, b)
+
+    def test_device_id_is_the_last_resort(self):
+        value, source = fplib.derive({"device_id": "dev-abc"})
+        self.assertEqual(source, "device-id")
+        self.assertEqual(len(value), 32)
+
+    def test_nothing_available_is_empty(self):
+        self.assertEqual(fplib.derive({}), ("", ""))
+
+    def test_never_empty_when_device_id_exists(self):
+        # "永不空"：只读得到 device_id 也要给出指纹（服务器靠它防清配置刷号）
+        with mock.patch.object(fplib, "raw_ids", return_value={}), \
+                mock.patch.object(fplib, "_device_id_part", return_value="dev-abc"):
+            info = fplib.get_device_fingerprint_info()
+        self.assertEqual(len(info["fingerprint"]), 32)
+        self.assertEqual(info["source"], "device-id")
+
+    def test_empty_only_when_everything_fails(self):
+        with mock.patch.object(fplib, "raw_ids", return_value={}), \
+                mock.patch.object(fplib, "_device_id_part", return_value=""):
             self.assertEqual(fplib.get_device_fingerprint(), "")
 
     def test_never_raises(self):

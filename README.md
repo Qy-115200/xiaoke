@@ -704,11 +704,11 @@ agent_demo/
 ├── prompts.py                    614   系统提示词（按平台给安装指令 + 工作目录 + VSCode 询问分支 + 余额分寸）
 │
 ├── platform_support/                  三平台差异（调用方只 import 这个包）
-│   ├── __init__.py               160   按 sys.platform 延迟加载并转发
+│   ├── __init__.py               181   按 sys.platform 延迟加载并转发
 │   ├── common.py                 230   safe_cwd（HOME 越界检查）、find_claude、clean_env、跑子进程抓输出、VSCode 值解析
-│   ├── windows.py               1397   注册表协议 / .lnk / cmd / WinRT toast / VSCode 探测 + winget 安装（含"没 winget 就装一个"、问 AppX 注册表定位、240MB 安装包 6 路分段下）
-│   ├── macos.py                  425   Info.plist 协议 + Apple Event / .command 快捷方式 / Terminal.app / VSCode 探测 + brew 安装
-│   └── linux.py                  314   .desktop + xdg-mime / 终端探测 / notify-send / VSCode 探测（安装只开下载页）
+│   ├── windows.py               1475   注册表协议 / .lnk / cmd / WinRT toast / VSCode 探测 + winget 安装（含"没 winget 就装一个"、问 AppX 注册表定位、240MB 安装包 6 路分段下）/ 指纹原始值（主板+CPU、MachineGuid）
+│   ├── macos.py                  467   Info.plist 协议 + Apple Event / .command 快捷方式 / Terminal.app / VSCode 探测 + brew 安装 / 指纹原始值（IOPlatformUUID）
+│   └── linux.py                  387   .desktop + xdg-mime / 终端探测 / notify-send / VSCode 探测（安装只开下载页）/ 指纹原始值（machine-id + DMI，容器里带 hostname）
 │
 ├── server/                            服务端与工具层（不 import 界面）
 │   ├── ui_bridge.py               31   GUI 注入桥：set_ui / get_ui
@@ -716,8 +716,8 @@ agent_demo/
 │   ├── console_ui.py             128   终端里的进度实现（实现 ui_bridge 那几个钩子，不阻塞、没 tty 也不卡住）
 │   ├── node_setup.py             346   Node 检测 / 选 LTS / 从 npmmirror 下载校验 / 解到 ~/.local/node / 软链命令
 │   ├── claude_setup.py           462   npm install -g --prefix ~/.local（清掉继承的 npm_config_*，显式 --include=optional + --allow-scripts；原生包没下来时单独补装，断网自己重试）
-│   ├── identity.py               515   设备指纹、PoW 注册、本地凭证、换设备登录、_ensure_account_code / _ensure_user_id、pending_recovery
-│   ├── fingerprint.py            147   硬件指纹：主板序列号 + CPU ID → SHA-256 前 32 位（不是凭据，只在注册时上报）
+│   ├── identity.py               561   设备身份、PoW 注册、本地凭证、换设备登录、_ensure_account_code / _ensure_user_id、pending_recovery
+│   ├── fingerprint.py            186   设备指纹：按来源优先取（board+cpu / MachineGuid / IOPlatformUUID / machine-id+dmi / device_id）→ SHA-256 前 32 位（不是凭据，注册时上报，服务器按它还回旧账号）
 │   ├── vault.py                  213   凭证的"第二份"：账户码存注册表（DPAPI 加密）/ 配置目录
 │   ├── pow.py                    128   PoW 求解（进度 / 取消 / 90 秒超时），和服务器 pow.js 逐位对齐
 │   ├── api.py                    504   余额 / 用量 / 充值 HTTP 层（永远不抛异常）
@@ -752,8 +752,8 @@ agent_demo/
 │   ├── test_download.py               本地假服务器：下载、哈希、404、缓存回退
 │   ├── test_apply.py                  备份、回滚、失败上限、锁、更新提示
 │   ├── test_pow.py                    PoW 求解（和服务器 pow.js 的测试向量对齐）
-│   ├── test_register_flow.py          本地假服务器说真契约：注册、不重注册、不泄密、指纹字段、is_recovered、保险箱
-│   ├── test_credentials.py            打码、硬件指纹（占位符 / 非 Windows / 绝不抛异常）、保险箱往返
+│   ├── test_register_flow.py          本地假服务器说真契约：注册、不重注册、不泄密、指纹字段、fingerprint_required、is_recovered、保险箱不被动静冲掉
+│   ├── test_credentials.py            打码、设备指纹（各来源 / 占位符 / 老公式冻结 / 失败兜底）、保险箱往返
 │   ├── test_ui_messages.py            poll_queue 把 recovery / recovered 送到对的界面方法
 │   ├── test_bash_timeout.py           bash 工具的超时与杀干净
 │   ├── test_platform_support.py       三平台抽象层
@@ -909,7 +909,7 @@ from server.api import refresh_balance as fetch_balance   # 查完返回 dict，
 > 注册**不是幂等的**：新契约下"注册"= 用 PoW 开一个新账号，所以只要本地有凭证，
 > 客户端**一次请求都不会再发**（重复注册会开新号、把余额丢掉）。
 
-### 凭证丢了怎么找回来（两条路，都不靠硬件指纹）
+### 凭证丢了怎么找回来（三条路）
 
 1. **本机凭证被删 / 被清理工具带走**：注册或换设备登录成功时，账户码和账户密钥会另存一份到
    `server/vault.py`（Windows 注册表 + DPAPI）。下次启动发现 `identity.json` 不在了、
@@ -919,6 +919,12 @@ from server.api import refresh_balance as fetch_balance   # 查完返回 dict，
    等于把余额送给陌生人。
 2. **换了机器 / 重装了系统**：只能靠用户自己存下来的账户码 + 账户密钥（这也是「🔐 账户信息」页
    要红字提醒"截图保存"的原因）。
+3. **同一台机器上再注册一次**（2026-10-31 起）：`/api/auto-register` 会拿设备指纹去找有没有
+   属于这台机器的账号，**有就直接把那个账号还回来**（响应 `is_recovered: true`，界面上会弹
+   「账号已自动恢复」）。这是为了堵住"删掉 `identity.json` 再注册一次就多领一份赠送额度"。
+   ★ 这条**只发 `api_key` + `account_code`，不发 `account_key`**：指纹不是秘密（见下一节），
+   撞号或泄露的风险只能靠"不交主人凭证"来兜底。所以保险箱里的密钥客户端自己续上，
+   `identity.py` 里专门处理了"恢复时别拿空值冲掉旧密钥"。
 
 ### 换设备登录要两样
 
@@ -941,25 +947,37 @@ from server.api import refresh_balance as fetch_balance   # 查完返回 dict，
 从来没下发过，现发一把会让"只知道码的人先登录把真用户锁在外面"。所以客户端**不**把密钥
 设成必填，空着照样发，由服务端决定。
 
-### 硬件指纹是什么、不是什么
+### 设备指纹是什么、不是什么
 
-注册时会把 `SHA-256(主板序列号 | ProcessorId)[:32]` 一起发给服务器（`server/fingerprint.py`，
-Windows 上用一次 PowerShell 的 `Get-CimInstance` 读，非 Windows 或取不到就是空串、不发这个字段）。
-它**只当反滥用线索**，理由写在那份文件开头：
+注册时随请求发一个 32 位十六进制的设备指纹（`server/fingerprint.py`）。取值按顺序，
+第一个拿到的赢：
 
-- 它不保密 —— 本机任何程序都能读到，随手也能往接口里传任意字符串，所以**不能**用它认人；
-- `ProcessorId` 对同型号 CPU 是常量（CPUID 特性位 + 型号签名，不是序列号）；
-- 不少 OEM 主板 / 虚拟机的序列号是 `Default string`、`To be filled by O.E.M.` 这类占位符 ——
-  这些情况一律返回空串，不拿 "`|` + CPU" 去凑一个全网同型号共用的常量。
+| 来源 | 平台 | 取的是什么 |
+|---|---|---|
+| `board+cpu` | Windows | `SHA-256(主板序列号 \| ProcessorId)[:32]` —— **老公式，一个字都不能改**（线上已入库的指纹还认它） |
+| `machine-guid` | Windows | 主板序列号是占位串 / 虚拟机时，退到 `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid`（`winreg` 读，不起 PowerShell） |
+| `platform-uuid` / `platform-serial` | macOS | `ioreg -rd1 -c IOPlatformExpertDevice` 的 `IOPlatformUUID`（读不到才用硬件序列号） |
+| `machine-id+dmi` | Linux | `/etc/machine-id` + DMI 的 `product_uuid` / `board_serial`；**容器里再加 hostname**（同宿主机同镜像的两个容器前三个完全一样，不加就撞号） |
+| `device-id` | 全平台 | 兜底：主机名 + MAC + 架构。弱，但保证不会空 |
 
-**服务端目前对指纹只落库、不恢复**：`/api/auto-register` 收下 `fingerprint` 存进
-`cc_accounts.fingerprint`（以后能统计"一个指纹建过多少号"），但**从不**据此发账号；
-响应里的 `is_recovered` 恒为 `false`。
+原始值的读取全在 `platform_support/{windows,macos,linux}.py` 的 `fingerprint_parts()`；
+哈希和"选哪个来源"在 `server/fingerprint.py` 的纯函数 `derive()` 里，测试不碰系统。
+指纹连同来源一起上报（`fingerprint_src`），只进服务端日志 —— 两个人"撞"到同一个账号时，
+得能一眼看出是哪个来源撞的。
 
-这是刻意的：指纹不保密，拿它当凭据等于"谁知道这串值谁能领走账号和余额" —— 同型号 CPU
-撞号、共用电脑换人，都会把别人的余额送出去。真正能证明"这账号是我的"的，是账户码 +
-账户密钥。客户端的恢复提示（`is_recovered: true` → 「检测到您之前已注册过…」）保留着，
-服务端哪天改主意接上就能用，现在它不会触发。
+**它不是凭据**：本机任何程序都读得到，随手也能往接口里传任意字符串；`ProcessorId` 对同型号
+CPU 是常量（CPUID 特性位 + 型号签名，不是序列号）；不少 OEM 主板 / 虚拟机的序列号是
+`Default string`、`To be filled by O.E.M.` 这类占位符 —— 这些值一律当"没有"，退到下一个来源。
+
+服务端拿它做两件事：**同一指纹再注册就还回原来的账号**（见上一节第 3 条），以及
+**同一指纹 24 小时内最多 5 次新注册**（`POW_FP_HARD`，和 IP 硬阈值一个数量级）。
+恢复本身不计入这个配额（审计记 `outcome='recovered'`，配额只数 `'registered'`）。
+
+> 上线顺序：**客户端先发**（指纹永不空、始终上报），**服务端随后**。服务端第一版
+> `FINGERPRINT_REQUIRED=0`（缺指纹照旧放行，兼容 1.5.5 及更老的客户端），等日志里确认
+> 指纹齐全了再翻成 `1` 硬拒。
+
+真正能证明"这账号是我的"的，只有账户码 + 账户密钥。
 
 ## 服务端接口
 
@@ -969,7 +987,7 @@ Windows 上用一次 PowerShell 的 `Get-CimInstance` 读，非 Windows 或取�
 | 接口 | 用途 |
 |---|---|
 | `GET /api/challenge` | 取一个 PoW 挑战（带 `X-Agent-Key`） |
-| `POST /api/auto-register` | 提交 `{challenge, nonce, fingerprint?}`，换回账号与专属 `api_key`（`is_recovered` 目前恒为 `false`） |
+| `POST /api/auto-register` | 提交 `{challenge, nonce, fingerprint, fingerprint_src?}`，换回账号与专属 `api_key`；指纹已对应到账号时**直接还回那个账号**（`is_recovered: true`，不发 `account_key`） |
 | `POST /api/bind-account` | 用 `{account_code, account_key, device_id}` 换设备登录（不需要 `X-Agent-Key`；老账号 `account_key` 可省） |
 | `GET /api/balance` | 查余额（按 `account_code` 查） |
 | `GET /api/usage` | 查 token 消耗 |
@@ -989,9 +1007,10 @@ Windows 上用一次 PowerShell 的 `Get-CimInstance` 读，非 Windows 或取�
 （进度条上有个「取消」）、单次 90 秒硬超时**，一次注册最多重来 3 次（每次都重新取挑战）。
 失败原因会照实带到界面上：注册关闭、网络太频繁、认不出 IP，三种情况用户该做的事不一样。
 
-提交时可能多带一个 `fingerprint` 字段（见上面「硬件指纹是什么、不是什么」）。服务端还是
-老版本、不认识这个字段而整条请求 400 时，客户端会**去掉字段再试一轮** —— 指纹是加分项，
-不能因为它把注册搞挂。
+提交时一定带 `fingerprint`（除非连 `device_id` 都拿不到，那是极端情况，见上面
+「设备指纹是什么、不是什么」）。服务端还是老版本、不认识这个字段而整条请求 400 时，
+客户端会**去掉字段再试一轮** —— 兼容老服务端用；但服务端明确回 `fingerprint_required`
+时**不**重试（丢掉指纹只会失败得更难看），直接如实报错让用户升级。
 
 `server/api.py` 里的所有函数**永远不抛异常** —— 失败就返回 `(None, 错误说明)` 或
 `{"error": "..."}`，错误原文会被翻译成大白话带到界面上。余额查不到、支付平台挂了，

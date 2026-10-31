@@ -47,6 +47,7 @@ class _State:
         self.challenges = {}     # challenge -> 是否已被用过
         self.bodies = []         # 收到的 POST 正文（看客户端发了什么字段）
         self.reject_fingerprint = False   # 模拟"服务端不认识 fingerprint 字段"
+        self.require_fingerprint = False  # 模拟"服务端要求必须带指纹"
         self.recovered = False            # 模拟"按指纹认出了旧账号"
         self.good_key = "k" * 64          # bind-account 认的账户密钥
         self.key_required = True          # 模拟新账号：必须给密钥
@@ -98,6 +99,9 @@ def _make_handler(state: _State):
             # 模拟老服务端：不认识 fingerprint 这个字段，整条请求 400 掉
             if state.reject_fingerprint and "fingerprint" in body:
                 return self._send(400, {"error": "unexpected_field"})
+            # 模拟新服务端：缺失指纹直接拒（客户端应当如实报错，不是丢掉再试）
+            if state.require_fingerprint and not body.get("fingerprint"):
+                return self._send(400, {"error": "fingerprint_required"})
             challenge = body.get("challenge") or ""
             nonce = body.get("nonce")
             with state.lock:
@@ -121,7 +125,10 @@ def _make_handler(state: _State):
                 "balance": "3.00",
             }
             if state.recovered:
+                # ★ 线上恢复路径**不发 account_key**（那是主人凭证，见 server/fingerprint.py）；
+                #   这里照着线上来，否则测不出"空值冲掉保险箱"那个坑。
                 payload["is_recovered"] = True
+                payload["account_key"] = None
             return self._send(200, payload)
 
         def _bind(self, body):
@@ -175,8 +182,9 @@ class _FakeServerCase(unittest.TestCase):
 
         # ★ 指纹用固定的假值，别真去起 PowerShell 读主板序列号
         fplib._reset_cache()
-        self._fp = mock.patch.object(fplib, "get_device_fingerprint",
-                                     return_value="f" * 32)
+        self._fp = mock.patch.object(
+            fplib, "get_device_fingerprint_info",
+            return_value={"fingerprint": "f" * 32, "source": "board+cpu"})
         self._fp.start()
 
     def tearDown(self):
@@ -239,18 +247,34 @@ class RegisterFlowTests(_FakeServerCase):
         self.assertIsNone(err)
         self.assertTrue(powlib.verify("a" * 32, nonce, DIFFICULTY))
 
-    # ---------- 硬件指纹 ----------
+    # ---------- 设备指纹 ----------
 
     def test_fingerprint_is_sent_with_register(self):
         identity.register_device()
         body = self.state.bodies[-1]
         self.assertEqual(body.get("fingerprint"), "f" * 32)
+        # 来源只进日志：撞指纹时得能看出是哪个来源撞的
+        self.assertEqual(body.get("fingerprint_src"), "board+cpu")
 
     def test_fingerprint_omitted_when_unavailable(self):
-        # 非 Windows / 主板序列号是占位符 → 算出来是空串 → 压根不发这个字段
-        with mock.patch.object(fplib, "get_device_fingerprint", return_value=""):
+        # 只有连 device_id 都拿不到的极端情况才会空 —— 那时压根不发这个字段
+        with mock.patch.object(
+                fplib, "get_device_fingerprint_info",
+                return_value={"fingerprint": "", "source": ""}):
             identity.register_device()
         self.assertNotIn("fingerprint", self.state.bodies[-1])
+        self.assertNotIn("fingerprint_src", self.state.bodies[-1])
+
+    def test_fingerprint_required_is_reported_not_retried(self):
+        # 服务器明确要求指纹、这台机器却算不出来：如实报错，别再解一遍 PoW 重试。
+        self.state.require_fingerprint = True
+        with mock.patch.object(
+                fplib, "get_device_fingerprint_info",
+                return_value={"fingerprint": "", "source": ""}):
+            result = identity.register_device()
+        self.assertFalse(result.startswith("{"), result)
+        self.assertEqual(len(self.state.bodies), 1, "要求指纹时重试没有意义")
+        self.assertIn("新版", result)              # 话术指向"去下载新版"
 
     def test_unknown_fingerprint_field_is_dropped_and_retried(self):
         # 服务端还是老版本、不认识 fingerprint：别让整次注册死在这儿，
@@ -311,6 +335,21 @@ class RegisterFlowTests(_FakeServerCase):
     def test_recovered_defaults_to_false(self):
         result = identity.register_device()
         self.assertFalse(json.loads(result)["recovered"])
+
+    def test_recovery_does_not_clobber_the_vault_key(self):
+        # 服务器按指纹还回旧账号时不发 account_key（主人凭证）。这时候拿空值去
+        # vault.save()，会把注册表里原有的密钥冲掉 —— 用户仅剩的"换设备找回"
+        # 能力就一起没了。必须把旧密钥续上。
+        vault.save("CC-AAAAAA-BBBBBB", "k" * 64, 42)
+        self.state.recovered = True
+
+        result = identity.register_device()
+
+        self.assertTrue(json.loads(result)["recovered"])
+        kept = vault.load() or {}
+        self.assertEqual(kept.get("account_key"), "k" * 64, "保险箱里的密钥被冲掉了")
+        local = json.loads(identity.IDENTITY_FILE.read_text(encoding="utf-8"))
+        self.assertFalse(local.get("account_key"))     # 服务器没给，本地也不该编一个
 
 
 class BindAccountTests(_FakeServerCase):

@@ -222,7 +222,7 @@ class FreshMachineTests(unittest.TestCase):
                                return_value=ok_json(recovered=True)):
             result = agent_install.bootstrap_identity(None, Args(), ui)
         self.assertTrue(result["recovered"])
-        self.assertIn("余额", result["note"])
+        self.assertIn("原来的账号", result["note"])
 
 
 class AnswerParsingTests(unittest.TestCase):

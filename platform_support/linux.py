@@ -9,6 +9,7 @@
 import os
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -328,6 +329,55 @@ def notify(title: str, message: str) -> None:
         subprocess.run(["notify-send", title, message], capture_output=True, timeout=10)
     except Exception:
         pass
+
+
+# ================= 设备指纹（给注册链路用） =================
+
+def _read_first(paths) -> str:
+    for p in paths:
+        try:
+            value = Path(p).read_text(encoding="utf-8", errors="replace").strip()
+        except Exception:
+            continue
+        if value:
+            return value
+    return ""
+
+
+def _in_container() -> bool:
+    """是不是跑在容器里（docker / k8s / lxc）。认不出就当不是。"""
+    try:
+        if Path("/.dockerenv").exists():
+            return True
+    except Exception:
+        pass
+    try:
+        text = Path("/proc/1/cgroup").read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+    return any(x in text for x in ("docker", "kubepods", "containerd", "lxc"))
+
+
+def fingerprint_parts() -> dict:
+    """machine-id + DMI 的 product_uuid / 主板序列号。绝不抛异常。
+
+    ★ 容器里还要带上 hostname：同一宿主机、同一镜像的两个容器，machine-id（来自
+      镜像）和 DMI（来自宿主机）全都一样 —— 只靠它们会把两个人的账号合成一个，
+      等于"谁的指纹撞上来了谁就登进别人的号"。
+    ★ 这些原始值**不是凭据**（本机任何程序都读得到），别打进日志、别显示给用户。
+      理由见 server/fingerprint.py 的文件头。
+    """
+    parts = {
+        "machine_id": _read_first(["/etc/machine-id", "/var/lib/dbus/machine-id"]),
+        "product_uuid": _read_first(["/sys/class/dmi/id/product_uuid"]),
+        "board_serial": _read_first(["/sys/class/dmi/id/board_serial"]),
+    }
+    if _in_container():
+        try:
+            parts["container"] = socket.gethostname()
+        except Exception:
+            parts["container"] = ""
+    return parts
 
 
 # ================= 命令执行 =================

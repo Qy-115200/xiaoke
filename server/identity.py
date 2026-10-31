@@ -3,7 +3,7 @@
 
 这一层管的是"这台电脑是谁、这个账号是谁"：
 
-  _device_id()       本机指纹（主机名 + MAC + 架构 的 sha256 前 16 位）
+  _device_id()       本机标识（主机名 + MAC + 架构 的 sha256 前 16 位），不是指纹
   register_device()  第一次运行时走 /api/challenge + /api/auto-register 开一个新账号，
                      把服务器给的专属 api_key 缓存到 identity.json
   load_identity()    读本地缓存（没文件 / 损坏 / 缺 api_key 都当没领过）
@@ -27,8 +27,10 @@
 
 ★ device_id 只是本机的本地标识（bind-account 用它做去重），**不再是身份凭证**。
   服务器不再凭它发 token，所以猜中别人的 device_id 也拿不到任何东西。
-★ server/fingerprint.py 的硬件指纹同理：它连同一条注册请求发给服务器当反滥用
-  线索，但**不能**单独拿来换账号（它不保密、同型号 CPU 还会撞号）。
+★ server/fingerprint.py 的硬件指纹同理：它随注册请求发给服务器，服务器拿它做两件事
+  ——「同一台机器再注册就还回原来的账号」和一个 5 次/24 小时的配额。但它**仍然
+  不是凭据**（不保密、同型号 CPU / 虚拟机还会撞号），所以服务器按指纹命中时只发
+  api_key + account_code，**绝不发 account_key**；真正的"主人凭证"只有 account_key。
 ★ 注册/绑定成功后额外把账户码存进 server/vault.py（注册表 / 配置目录）。
   identity.json 被删掉时靠它把账号找回来，而不是默默开一个新号。
 """
@@ -135,6 +137,8 @@ _ERROR_TEXT = {
     "invalid_ip": "服务器认不出这台电脑的网络出口，换个网络再试。",
     "forbidden": "这台设备被服务器拒绝了。换个网络再试，不行就联系客服。",
     "gone": "服务器接口已经升级，这个版本的客户端太旧了，请到 aikaui.com 下载新版。",
+    "fingerprint_required": "服务器要求注册时带上设备指纹，这个客户端太旧了，请到 aikaui.com 下载新版。",
+    "fingerprint_invalid": "服务器没认出来这台机器的设备指纹，请到 aikaui.com 下载新版再试。",
 }
 
 
@@ -187,9 +191,12 @@ def _run_pow(challenge: str, difficulty: int):
 def _register_new_account():
     """走一次完整注册。成功返回 (身份 dict, None, "", None)，失败返回四个参数。"""
     last = (None, "注册失败", "", None)
-    # 硬件指纹（取不到就是 ""）。它只是个反滥用线索，**不是凭据** —— 见
-    # server/fingerprint.py 里的说明。为空时压根不发这个字段。
-    fp = fplib.get_device_fingerprint()
+    # 设备指纹（跨平台、永不空，见 server/fingerprint.py）。
+    # ★ 它**不是凭据**：服务器只拿它做"这台机器以前来过吗"和一个 5 次/24h 的配额。
+    #   真正的身份是 api_key，真正的"主人凭证"是 account_key。
+    fp_info = fplib.get_device_fingerprint_info()
+    fp = fp_info.get("fingerprint") or ""
+    fp_src = fp_info.get("source") or ""
     send_fp = bool(fp)
     for attempt in range(1, POW_MAX_ATTEMPTS + 1):
         data, err, code, wait = _post_json("/api/challenge")
@@ -214,15 +221,24 @@ def _register_new_account():
         body = {"challenge": challenge, "nonce": nonce}
         if send_fp:
             body["fingerprint"] = fp
+            if fp_src:
+                body["fingerprint_src"] = fp_src   # 只进日志，方便排查"撞指纹"
         reg, err, code, wait = _post_json("/api/auto-register", body, method="POST")
         if reg:
             if not reg.get("api_key"):
                 return None, "服务器返回异常：没给 api_key", "", None
             if fp:
                 reg["fingerprint"] = fp          # 存进本地凭证，排查时能看到
+                reg["fingerprint_src"] = fp_src
             return reg, None, "", None
 
         last = (None, err, code, wait)
+
+        # ★ 「服务器要求指纹」不是"字段不被接受"，把指纹丢掉再试只会失败得更难看。
+        #   这两个码在 _ERROR_TEXT 里，本来就到不了下面的丢弃分支；这里显式写一句，
+        #   免得以后有人把话术删了又把它带回来。
+        if code in ("fingerprint_required", "fingerprint_invalid"):
+            return last
 
         # ★ 服务端还是老版本、不认识 fingerprint 这个字段时，可能整条请求被 400 掉。
         #   认不出的错误码先按"可能是字段不被接受"处理：去掉它再试一次。
@@ -257,8 +273,18 @@ def _save_identity(data: dict) -> None:
     # ★ 另存一份"命"到程序目录之外（注册表 / 配置目录）。identity.json 被删掉时，
     #   就靠这一份把账号找回来 —— 否则只能开新号，余额全丢。
     #   失败只是没存上，绝不影响注册本身。
+    #
+    # ★ 服务器按指纹把老账号还回来时**不会**给 account_key（那是主人凭证，理由见
+    #   server/fingerprint.py 的文件头）。这时别拿空值把注册表里原有的密钥冲掉 ——
+    #   那等于把用户仅剩的"换设备找回"能力一起抹了。
+    account_code = data.get("account_code")
+    account_key = data.get("account_key")
     try:
-        vault.save(data.get("account_code"), data.get("account_key"), data.get("user_id"))
+        if not account_key and account_code:
+            old = vault.load() or {}
+            if old.get("account_code") == account_code:
+                account_key = old.get("account_key")
+        vault.save(account_code, account_key, data.get("user_id"))
     except Exception:
         pass
 
@@ -480,10 +506,11 @@ def register_device() -> str:
             return f"注册成功但凭证没存下来：{e}"
         note = "领取成功"
 
-        # ★ 服务器按硬件指纹认出了旧账号，把原来的账号和余额还回来了
+        # ★ 服务器按设备指纹认出了旧账号，直接把原来的账号还回来了
         #   （响应里 is_recovered: true）→ 让界面弹一次提示，别让用户以为是新号。
         #   走的还是 ui_bridge：这里在 Agent 线程上，真弹窗只能交给主线程。
         if data.get("is_recovered"):
+            note = "服务器认出了这台机器原来的账号，已直接登回去"
             u = get_ui()
             if u and hasattr(u, "ui_recovered"):
                 try:
@@ -508,7 +535,7 @@ def register_device() -> str:
         "user_id": data.get("user_id"),            # 后续查余额 / 充值要用
         "account_code": data.get("account_code"),  # 账户码，充值 & 换机找回用
         "balance": data.get("balance"),            # 余额（注册时服务器下发）
-        # 服务器按硬件指纹认出了旧账号、把原来的账号和余额还回来了
+        # 服务器按设备指纹认出了旧账号，直接把原来的账号还回来了
         "recovered": bool(data.get("is_recovered")),
     }, ensure_ascii=False)
 

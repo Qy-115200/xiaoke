@@ -189,7 +189,7 @@ def _register(ctx, ui) -> dict:
     except Exception:
         info = {}
     acc = info.get("account_code") or ""
-    note = "服务器认出了这台机器原来的账号，余额已经还回来了" \
+    note = "服务器认出了这台机器原来的账号，已直接登回去" \
         if info.get("recovered") else "领到一个新账号"
     return _ok(acc, bool(info.get("recovered")), note)
 
