@@ -282,6 +282,10 @@ class AppxPackageTests(unittest.TestCase):
         self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
         self.pkg = self.tmp / "x.appx"
         self.pkg.write_bytes(b"pkg")
+        # 失败要睡 2 秒等杀软松口；测试里别真等
+        patch = mock.patch.object(win_backend.time, "sleep")
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def _run_with(self, rc, err=b""):
         return mock.patch.object(win_backend, "run_capture",
@@ -298,7 +302,7 @@ class AppxPackageTests(unittest.TestCase):
         with self._run_with(1, err):
             self.assertEqual(win_backend._add_appx_package(self.pkg), "")
 
-    def test_failure_keeps_the_last_lines(self):
+    def test_failure_keeps_the_hrtsult_line(self):
         """用户 2026-10-30 的日志只剩「返回 1: and」，什么都看不出来。"""
         err = (b"Add-AppxPackage : Deployment failed with HRESULT: 0x80073CFF\r\n"
                b"App package deployment failed with the following error\r\n"
@@ -309,6 +313,70 @@ class AppxPackageTests(unittest.TestCase):
         self.assertIn("返回 1", why)
         self.assertIn("0x80073CFF", why)
         self.assertIn("sideloading", why)
+
+    def test_failure_summary_drops_the_position_marker(self):
+        """2026-10-31 用户截图里的那种形状：正文被 `+ ~~~~` 和
+        `+ Add-AppxPackage -Path …` 的回声占满，HRESULT 那行反被挤掉了。
+        现在第一行（带 HRESULT）必须保住，装饰行必须扔掉。"""
+        err = (b"Add-AppxPackage : Deployment failed with HRESULT: 0x80073CF6, "
+               b"Package could not be registered.\r\n"
+               b"At line:1 char:1\r\n"
+               b"+ Add-AppxPackage -Path 'C:\\Users\\x\\a.msix' -ErrorAction Stop\r\n"
+               b"+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n"
+               b"    + CategoryInfo          : WriteError: (C:\\Users\\x\\a.msix:String) "
+               b"[Add-AppxPackage], IOException\r\n"
+               b"    + FullyQualifiedErrorId : DeploymentError,Microsoft.Windows.Appx."
+               b"PackageManager.Commands.AddAppxPackageCommand\r\n")
+        with self._run_with(1, err):
+            why = win_backend._add_appx_package(self.pkg)
+        self.assertIn("0x80073CF6", why)
+        self.assertIn("IOException", why)
+        self.assertIn("DeploymentError", why)
+        self.assertNotIn("~~~", why)
+        self.assertNotIn("-ErrorAction Stop", why, "源命令回声不该占字符预算")
+        self.assertLessEqual(len(why), 360, why)
+
+    def test_chinese_path_in_the_error_is_decoded(self):
+        """中文 Windows 上 PowerShell 按 GBK 写输出。按 UTF-8 硬解会把路径里的
+        中文变成 `????`，用户截图就是这样 —— 连发生在哪个文件上都看不出来。"""
+        err = ("Add-AppxPackage : 部署失败：找不到 C:\\Users\\瞿毅\\a.msix"
+               .encode("gbk"))
+        with self._run_with(1, err):
+            why = win_backend._add_appx_package(self.pkg)
+        self.assertIn("瞿毅", why)
+        self.assertNotIn("????", why)
+
+    def test_failure_is_retried_once_after_a_pause(self):
+        """杀软可能正扫着刚下来的包 —— 隔一会儿再试一次常常就过了。"""
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv[-1])
+            rc = 1 if len(calls) == 1 else 0
+            return b"", (b"Deployment failed with HRESULT: 0x80073D05" if rc else b""), False, rc
+
+        with mock.patch.object(win_backend, "run_capture", side_effect=fake_run):
+            why = win_backend._install_appx(self.pkg)
+        self.assertEqual(why, "")
+        self.assertEqual(len(calls), 2)
+        win_backend.time.sleep.assert_called()      # 试之前先歇了一下
+
+    def test_two_failures_report_both_attempts(self):
+        calls = []
+
+        def fake_add(path, **kw):
+            calls.append(path.name)
+            return "装不上"
+
+        with mock.patch.object(win_backend, "_add_appx_package", side_effect=fake_add):
+            why = win_backend._install_appx(self.pkg)
+        self.assertIn("装不上", why)
+        self.assertIn("再试一次", why)
+        self.assertEqual(calls, ["x.appx", "x.appx"], "主包两次")
+
+    def test_ascii_copy_only_when_the_path_has_non_ascii(self):
+        """包路径本来就全是 ASCII 时不要白复制 58MB。"""
+        self.assertIsNone(win_backend._ascii_copy(self.pkg))
 
     def test_deps_are_installed_before_the_main_package(self):
         seen = []

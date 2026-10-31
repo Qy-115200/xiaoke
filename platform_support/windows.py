@@ -8,6 +8,7 @@ macOS/Linux 在 import 阶段就崩掉。现在 winreg / win32com 全部收进�
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,7 @@ from platform_support.common import (
     launch_argv_for,
     run_capture,
     safe_cwd,
+    smart_decode,
 )
 
 # 装 VSCode 可能要一两分钟（下载 + 安装 + 杀软扫一遍）。这个超时只给 install_vscode
@@ -434,8 +436,47 @@ def _add_appx_command(path: Path) -> str:
     return "Add-AppxPackage -Path '" + str(path).replace("'", "''") + "' -ErrorAction Stop"
 
 
-def _add_appx_package(path: Path) -> str:
-    """Add-AppxPackage 一个包。成功（含"本来就在"）返回空串，失败返回一句原因。"""
+def _summarize_powershell_error(text: str, rc: int) -> str:
+    """从 PowerShell 那一坨报错里挑出有用的几行，压成一句话。返回 "" = 没输出。
+
+    ★ 2026-10-31 的教训。以前取「最后三行」，正好把第一行
+      「Add-AppxPackage : Deployment failed with HRESULT: 0x80073CF…」
+      挤掉 —— 用户截图里只剩 CategoryInfo 和 FullyQualifiedErrorId，
+      等于什么都没说，白跑一趟发布。现在留三类：
+        1) 第一行（带 HRESULT 和 cmdlet 名字）
+        2) 另一条带 HRESULT 的说明行（常常才是人话，比如"sideloading 没开"）
+        3) CategoryInfo / FullyQualifiedErrorId（能看出异常类型）
+      `+ Add-AppxPackage -Path …` 和 `+ ~~~~~~~~` 这种定位装饰一律扔掉：
+      它们只是把源命令回声出来，对判断原因零帮助，还占满字符预算。"""
+    lines = [ln.strip() for ln in (text or "").splitlines()]
+    lines = [ln for ln in lines if ln and not all(c in "+~ " for c in ln)]
+
+    def keep(ln: str) -> bool:
+        if not ln.startswith("+ "):
+            return True
+        return "CategoryInfo" in ln or "FullyQualifiedErrorId" in ln
+
+    lines = [ln for ln in lines if keep(ln)]
+    if not lines:
+        return ""
+
+    picked = [lines[0]]
+    for ln in lines[1:]:
+        if re.search(r"0x8[0-9a-f]{7}", ln, re.I):
+            picked.append(ln)
+            break
+    for tag in ("CategoryInfo", "FullyQualifiedErrorId"):
+        hit = next((ln for ln in lines[1:] if tag in ln), None)
+        if hit and hit not in picked:
+            picked.append(hit)
+    return " ".join(" ".join(picked).split())[:320]
+
+
+def _add_appx_package(path: Path, *, wait_after_failure: float = 0.0) -> str:
+    """Add-AppxPackage 一个包。成功（含"本来就在"）返回空串，失败返回一句原因。
+
+    wait_after_failure：失败后先睡一会儿再返回。给 `_install_appx` 的重试用
+    —— 包刚写完时杀软可能正读着它，部署会短暂失败（2026-10-31 的 IOException）。"""
     argv = ["powershell", "-NoProfile", "-NonInteractive",
             "-ExecutionPolicy", "Bypass", "-Command", _add_appx_command(path)]
     try:
@@ -447,17 +488,20 @@ def _add_appx_package(path: Path) -> str:
     if timed_out:
         return f"Add-AppxPackage 超过 {WINGET_INSTALL_TIMEOUT} 秒"
 
-    text = (err or out or b"").decode("utf-8", "replace").strip()
+    # ★ smart_decode 不能换成 utf-8：中文 Windows 上 PowerShell 按 GBK 写输出，
+    #   按 UTF-8 解会把路径里的中文变成 `????`（2026-10-31 用户截图就是这样），
+    #   连发生在哪个文件上都看不出来。
+    text = smart_decode(err or out or b"").strip()
     low = text.lower()
     if any(code in low for code in _ALREADY_THERE) \
             or any(w in low for w in _ALREADY_THERE_WORDS):
         return ""
     if rc != 0:
-        # ★ 整段错误都留着：2026-10-30 用户那条日志只剩「Add-AppxPackage 返回 1： and」，
-        #   什么都判断不出来。取最后三行，比一行有用得多。
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        detail = " ".join(lines[-3:])[:240]
-        return f"Add-AppxPackage 返回 {rc}" + (f"：{detail}" if detail else "")
+        detail = _summarize_powershell_error(text, rc)
+        why = f"Add-AppxPackage 返回 {rc}" + (f"：{detail}" if detail else "")
+        if wait_after_failure:
+            time.sleep(wait_after_failure)
+        return why
     return ""
 
 
@@ -495,14 +539,8 @@ def _fetch_winget_deps() -> tuple[list[Path], str]:
     return files, ""
 
 
-def _install_appx(msix: Path, deps=()) -> str:
-    """用 Add-AppxPackage 正式安装（用户级，不提权）。成功返回空串。
-
-    ★ 这是微软签名的包，不需要开发者模式；装完 winget.exe 会出现在
-      %LOCALAPPDATA%\\Microsoft\\WindowsApps\\ 下，用户以后自己也能用。
-
-    deps：主包依赖的框架包（UI.Xaml / VCLibs），先装它们。装依赖失败不直接放弃
-    —— 依赖可能本来就在，主包照样能装；两个都失败才把两句话一起报出去。"""
+def _install_appx_from(msix: Path, deps) -> str:
+    """装一遍：先依赖包，再主包。成功返回空串。"""
     dep_why = ""
     for dep in deps:
         why = _add_appx_package(Path(dep))
@@ -513,6 +551,58 @@ def _install_appx(msix: Path, deps=()) -> str:
     if why and dep_why:
         return f"{why}（{dep_why}）"
     return why
+
+
+def _ascii_copy(path: Path) -> Path | None:
+    """把包复制到一个**纯 ASCII** 的目录，供重试时用。做不到就返回 None。
+
+    ★ 为什么值得一试：AppX 部署服务内部有几段走的是 ANSI 路径，用户目录名带中文
+      （用户机器是 `C:\\Users\\瞿毅\\…`）时，个别 Windows 版本会以 `IOException`
+      失败，而错误正文里看不出跟路径有关（2026-10-31）。`C:\\Users\\Public` 是
+      系统固定名字，永远是 ASCII。
+    ★ 放公共目录不怕别人塞东西：包有大小 + sha256 双重校验，塞进来的过不了。
+    ★ 路径本来就全是 ASCII 时直接返回 None —— 没必要多复制 58MB。"""
+    if str(path).isascii():
+        return None
+    public = os.environ.get("PUBLIC") or r"C:\Users\Public"
+    try:
+        target = Path(public) / "aikaui"
+        target.mkdir(parents=True, exist_ok=True)
+        dest = target / path.name
+        shutil.copyfile(path, dest)
+        return dest
+    except Exception:
+        return None
+
+
+def _install_appx(msix: Path, deps=()) -> str:
+    """用 Add-AppxPackage 正式安装（用户级，不提权）。成功返回空串。
+
+    ★ 这是微软签名的包，不需要开发者模式；装完 winget.exe 会出现在
+      %LOCALAPPDATA%\\Microsoft\\WindowsApps\\ 下，用户以后自己也能用。
+
+    deps：主包依赖的框架包（UI.Xaml / VCLibs），先装它们。装依赖失败不直接放弃
+    —— 依赖可能本来就在，主包照样能装；两个都失败才把两句话一起报出去。
+
+    ★ 失败后**换个条件再试一次**（2026-10-31 加的，因为用户机器上报的是
+      `DeploymentError / IOException`，那是最像"临时性"的一种失败）：
+        1. 隔 2 秒 —— 包刚写完，杀软可能正扫着它，部署会短暂拿不到句柄；
+        2. 用户目录名带中文时，把包复制到 `C:\\Users\\Public\\aikaui` 再装一遍。
+      两次都失败才认输，返回两次的原因（第二句更像真因）。"""
+    why = _install_appx_from(msix, deps)
+    if not why:
+        return ""
+
+    time.sleep(2.0)
+    alt = _ascii_copy(msix)
+    try:
+        why2 = _install_appx_from(alt or msix, deps)
+    finally:
+        if alt is not None:
+            _unlink_quiet(alt)
+    if not why2:
+        return ""
+    return f"{why}；换个时机/路径再试一次还是失败：{why2}"
 
 
 def _extract_portable(msix: Path) -> tuple[str | None, str]:
