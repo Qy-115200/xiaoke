@@ -93,11 +93,23 @@ Windows 10/11 的家庭版精简镜像、老 LTSC、服务器版都可能不带 
   Microsoft.Windows.Appx.PackageManager.Commands.AddAppxPackageCommand`，整条命令一句都没执行。
   表现就是用户日志里的「Add-AppxPackage 返回 1」，然后一路退到 240MB 的官方安装包 ——
   走得通，但慢得多。`-Path` 认通配符，所以路径里真带 `[` `]` `` ` `` 时会先
-  `Set-Location -LiteralPath <目录>` 再只传文件名。失败时保留最后三行错误
-  （只留一行时正文正好被截成「返回 1： and」，什么都看不出来）。
-- 先 `Add-AppxPackage`（用户级、不弹 UAC、不改系统策略）；装不上（老系统 / 没有商店 /
-  组策略禁了 AppX）就**解压即用**：把 msix 里的 `winget.exe` 解到
-  `%LOCALAPPDATA%\aikaui\winget\<版本>\`，下次直接用它，不再下载。
+  `Set-Location -LiteralPath <目录>` 再只传文件名。
+- **失败时要留下能看的错误**（2026-10-31 重写）。原来是「取最后三行」—— 取到的正好
+  是 PowerShell 的 `+ ~~~~` 位置标记，真正有信息的第一行
+  `Deployment failed with HRESULT: 0x8007…` 反被丢了；而且硬按 UTF-8 解码，
+  中文路径 `瞿毅` 在用户日志里变成 `????`（中文 Windows 的 PowerShell 写 GBK）。
+  现在 `_summarize_powershell_error()`：先去掉纯装饰行，保留第一行，再补一条带
+  `0x8…` 的、一条 `CategoryInfo`、一条 `FullyQualifiedErrorId`；解码走
+  `smart_decode()`（UTF-8 → 本地编码）。
+- 失败后**隔 2 秒再试一次**，第二次把 msix 复制到 `%PUBLIC%\aikaui\`（纯 ASCII 路径）
+  再装 —— AppX 部署对非 ASCII 路径有过 IO 报错，ASCII 副本是绕开它的最省事办法。
+  `_ascii_copy()` 只在原路径含非 ASCII 时才做，装完（无论成败）删掉副本。
+  两次都失败就报两段的错误。
+- 先 `Add-AppxPackage`（用户级、不弹 UAC、不改系统策略）。**装不上就认，不再解压
+  便携版**（2026-10-31 删掉）：便携版没注册成 AppX 包，源索引永远打不开，
+  `winget install` 必然 `0x8A15004B`。以前这里会解压一份、打一行「已装好 winget
+  （便携版，解压即用）」，下一句紧接着就是「读不到软件源，改用官方安装包」——
+  白等十几秒，日志还自相矛盾。现在直接返回失败原因，`install_vscode()` 跳第 3 条。
 - 下载边写边算 sha256，对不上就删掉、换下一个源；两个源（CDN / 回源）都失败才回到下载页。
 - 58MB 的安装包用完即删；只有第一次需要，之后 `find_winget()` 直接命中。
 
@@ -110,17 +122,28 @@ Windows 10/11 的家庭版精简镜像、老 LTSC、服务器版都可能不带 
    `winget source update`，不行再 `source reset --force` + `update`，然后重试一次。
    超时之类的失败不重试 —— 那等于把上限翻倍。
 2. 没有 winget 就先 `ensure_winget()` 装上（上面那 58MB），再走第 1 条。
-   **但如果装出来的只是便携版，就不走第 1 条了**（2026-10-31）：便携版没注册成 AppX
-   包，源索引永远打不开，`winget install` 必然还是 `0x8A15004B` —— 白跑一趟。
-   直接跳第 3 条。
+   `ensure_winget()` 失败（`Add-AppxPackage` 两次都没成）就**直接跳第 3 条** ——
+   不再解压便携版，理由见上。
 3. **都不通就绕开 winget**：直接下微软官方的用户级安装包
    （`update.code.visualstudio.com/latest/win32-x64-user/stable`，约 240MB），
    `/VERYSILENT /MERGETASKS=!runcode` 静默装，退出码 3010（要求重启）也算成功。
    这条和下载页给用户的是同一个文件，签名也是微软的。
 
 三条都不行才打开下载页，并把每一步卡在哪如实说出来（`on_note` 会往对话里打行）。
-`find_winget(verify=True)` 会真跑一次 `--version`：`WindowsApps` 下的**执行别名可能是空壳**
+
+`find_winget(verify=True)` 的顺序是 **PATH → 执行别名 → 最后问一次 AppX 注册表**，
+前面那几个候选手到之后都会真跑一次 `--version`：`WindowsApps` 下的**执行别名可能是空壳**
 （文件在、包没为这个用户装，`Popen` 直接 WinError 3），不验就会拿一个跑不起来的路径去装东西。
+**便携版那条候选删掉了**（2026-10-31）：老的解压目录就算还在，拿它装东西也必然失败。
+
+最后那道 `_winget_from_appx_registration()`（2026-10-31 加）是**不再靠猜路径**的兜底：
+问系统 `(Get-AppxPackage Microsoft.DesktopAppInstaller).InstallLocation` 拿到包真正装在哪，
+再用那里的 `winget.exe`。加它的原因很实在 —— 用户机器上 winget **明明是好的**
+（`Get-AppxPackage` 报 1.29.380 / Ok，别名跑 `--version` 回 `v1.29.380`），我们却判定
+「没有 winget」，于是白下 58MB、白装一遍（还失败）、再白下 240MB。上面那些候选全靠猜：
+PATH 最前面那条 `WindowsApps` 可能属于**另一个账户**（本机就是，Administrator 的空壳），
+`%USERPROFILE%` 也可能不是你以为的那个目录（本机 `USERNAME` 是 `瞿毅`，profile 却是
+`C:\Users\QY`）。问 AppX 注册表则没有「猜」这回事。
 
 
 `open_vscode()` 不只是开窗：它**把 Claude 面板也一起打开**。VSCode 命令行没有 `--command`
@@ -667,7 +690,7 @@ agent_demo/
 ├── platform_support/                  三平台差异（调用方只 import 这个包）
 │   ├── __init__.py               160   按 sys.platform 延迟加载并转发
 │   ├── common.py                 230   safe_cwd（HOME 越界检查）、find_claude、clean_env、跑子进程抓输出、VSCode 值解析
-│   ├── windows.py               1066   注册表协议 / .lnk / cmd / WinRT toast / VSCode 探测 + winget 安装（含"没 winget 就装一个"）
+│   ├── windows.py               1148   注册表协议 / .lnk / cmd / WinRT toast / VSCode 探测 + winget 安装（含"没 winget 就装一个"、问 AppX 注册表定位）
 │   ├── macos.py                  425   Info.plist 协议 + Apple Event / .command 快捷方式 / Terminal.app / VSCode 探测 + brew 安装
 │   └── linux.py                  314   .desktop + xdg-mime / 终端探测 / notify-send / VSCode 探测（安装只开下载页）
 │
@@ -720,7 +743,7 @@ agent_demo/
 │   ├── test_platform_support.py       三平台抽象层
 │   ├── test_prompts.py                提示词按平台切换 + VSCode 询问分支的关键句
 │   ├── test_vscode.py                 VSCode 探测 / 安装 / 打开（三平台，全程打桩）
-│   ├── test_winget.py                 没 winget 时自动装：sha256 校验、依赖包先装、便携版跳过、临时包删干净
+│   ├── test_winget.py                 没 winget 时自动装：sha256 校验、依赖包先装、失败报错要能看（HRESULT / 中文不乱码 / 重试一次）、不再解压便携版、问 AppX 注册表
 │   ├── test_cancel.py                 「中断」：牌子语义、子进程登记/清理、下载到一半能停
 │   ├── test_tools_vscode.py           四个 VSCode 工具的返回值、失败归类、Claude 面板什么时候发链接
 │   ├── test_agent_core.py             install_done 什么时候触发（"这一轮真装完了"的判定）
@@ -995,26 +1018,36 @@ Windows 上用一次 PowerShell 的 `Get-CimInstance` 读，非 Windows 或取�
 
 ## 已知限制
 
-- **「没 winget 就自动装」没在真·没有 winget 的机器上跑过完整一遍。**
-  能确定的是：包从 CDN 下得下来（实测 58MB / 11 秒 / sha256 对得上）、解压出来的
-  `winget.exe` 能跑（`--version`、`search` 都正常）、分支逻辑全有离线测试。
-  没验到的是 `Add-AppxPackage` 那一步真的落到一台没有 App Installer 的机器上 ——
-  手上没有这样的机器。装不上也不会卡住：会退到便携版，再不行才打开下载页。
+- **「没 winget 就自动装」这一步，真机上还没成功过一次。**
+  能确定的是：包从 CDN 下得下来（实测 58MB / 11 秒 / sha256 对得上）、
+  `Add-AppxPackage` 的参数绑定不再报错、分支逻辑全有离线测试。
+  用户的机器走到的是 `DeploymentError` / `IOException`（部署进程已排队，然后 IO 失败），
+  **这属于 AppX 部署本机故障，不是我们能绕的**：1.5.4 那次的 `ParameterBindingException`
+  已经修掉，剩下的这类失败会如实报出来、隔 2 秒换 ASCII 路径再试一次，还不行就退到
+  240MB 官方安装包，不会卡住。手上没有一台"干净、没有 App Installer"的机器，
+  所以这条路没跑过完整成功一遍。
 - **`Add-AppxPackage 返回 1` 的原因查清了**（2026-10-31）。不是缺依赖，是**参数名写错**：
   `Add-AppxPackage` 没有 `-LiteralPath`，写上它 PowerShell 抛 `ParameterBindingException`、
   一句都不执行。10-30 那次的日志只剩「返回 1： and」，所以当时猜成了缺框架包；
   10-31 的日志留了三行，`FullyQualifiedErrorId: NamedParameterNotFound,…AddAppxPackageCommand`
-  才把它点破。现在用 `-Path`（带通配符字符时先 `Set-Location -LiteralPath` 再传文件名），
-  并且失败时保留最后三行。**这台机器还是没能复现"真的装一遍"**（本机的 App Installer
-  本来就是装好的），验到的是参数绑定不再报错、走到"找不到路径"这一步。
+  才把它点破。现在用 `-Path`（带通配符字符时先 `Set-Location -LiteralPath` 再传文件名）。
+  1.5.4 之后用户那边的报错换成了 `DeploymentError` / `IOException` ——
+  说明参数这关过去了，卡在 AppX 部署本身（本机 `WindowsApps\Deleted` 下有删不掉的残留、
+  `ClipSVC` 停着，都是仓库受损的迹象）。
 - **便携版 winget 装不了东西**（2026-10-31 确认）。它不是 AppX 包，源索引永远打不开，
-  `winget install` 必然 `0x8A15004B`。所以 `install_vscode()` 拿到 `mode == "portable"`
-  就直接跳过 winget，去走官方安装包那条路 —— 以前会白跑一次、白等一个 900 秒的上限。
+  `winget install` 必然 `0x8A15004B`。所以 2026-10-31 起**不再解压便携版**（以前解压完
+  打一行「已装好」、下一行就说「读不到软件源」，白等十几秒还自相矛盾）：
+  `ensure_winget()` 装不上就返回失败原因，`install_vscode()` 直接走官方安装包。
+- **`find_winget` 不再靠猜路径**（2026-10-31）。用户机器上 winget 是好的，我们却报了
+  「没有 winget」：PATH 里第一条 `WindowsApps` 属于别的账户（空壳别名），`%USERPROFILE%`
+  和实际 profile 目录也可能不是一个（本机 `USERNAME=瞿毅`，profile 是 `C:\Users\QY`）。
+  现在最后一道是问 `Get-AppxPackage Microsoft.DesktopAppInstaller` 的 `InstallLocation`。
+  这条**在这台机器上验证过**（能准确拿到 1.29.380 的包目录），但它依赖 PowerShell 能起得来；
+  起不来就当没有，行为退回以前。
 - **新装的 winget 源索引是空的**，2026-10-30 用户在真机上撞到 `0x8A15004B`。
   已经加了 `source update` / `source reset --force` 重试和「直接下微软安装包」那条兜底，
   但**没有在这台机器上复现过**（本机的 winget 本来就是装好的、源索引也在）。
-  下次再遇到，日志里会多出「已装好 winget（正式安装 / 便携版）」和
-  「刷新源索引后再试一次」这些行，能直接看出走到哪一步。
+  下次再遇到，日志里会多出「刷新源索引后再试一次」这些行，能直接看出走到哪一步。
 - **「中断」不回滚。** 点中断只会停下正在跑的东西，装了一半的 winget / VSCode 还在，
   再跑一次会接着用（`find_winget` / `find_vscode` 都会先探测）。另外被子进程自己
   `start_new_session` 出去的孙进程（极少数）可能杀不干净，`taskkill /T` 能盖住绝大多数。

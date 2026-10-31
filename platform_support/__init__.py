@@ -118,7 +118,9 @@ def find_winget() -> str | None:
 def ensure_winget(on_progress=None, on_note=None) -> dict:
     """确保有 winget：没有就下载微软官方的 App Installer 装上（Windows 专用）。
 
-    返回 {"ok", "exe", "mode", "note"}；mode = existing / appx / portable。
+    返回 {"ok", "exe", "mode", "note"}；mode = existing / appx（失败时还会是
+    cancelled / download / install）。没有 portable 了 —— 便携版装不了东西，
+    2026-10-31 删掉。
     其它平台直接返回 ok=False —— 调用方要判平台，别把它当成通用能力。"""
     m = _impl()
     fn = getattr(m, "ensure_winget", None)

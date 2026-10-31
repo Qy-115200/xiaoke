@@ -8,7 +8,7 @@
 这里钉住的行为：
   · 本来就有 winget 就一次网络都不走；
   · 下的包必须过 sha256，不对就删掉重来，绝不拿去装进系统；
-  · AppX 装不上要退到便携版（解压即用），不能直接放弃；
+  · AppX 装不上就认输、把原因带回去，**不再解压便携版**（它装不了任何东西）；
   · 装箱的临时文件用完要删掉（58MB）；
   · 哪一步失败都返回一句人话，不抛异常、不留半截状态。
 """
@@ -18,7 +18,6 @@ import json
 import sys
 import tempfile
 import unittest
-import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -59,6 +58,12 @@ class FindWingetTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        # 最后那道"问 AppX 注册表"会真的起 PowerShell 查本机 —— 测试里关掉，
+        # 否则 CI / 开发机上装着 App Installer 会让"找不到"的用例反过来红。
+        patcher = mock.patch.object(win_backend, "_winget_from_appx_registration",
+                                    return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_path_first(self):
         exe = self.tmp / "winget.exe"
@@ -76,24 +81,83 @@ class FindWingetTests(unittest.TestCase):
              mock.patch.object(win_backend.shutil, "which", return_value=None):
             self.assertEqual(win_backend.find_winget(), str(alias))
 
-    def test_portable_copy_is_remembered(self):
-        """便携版解压到本地目录后，下次直接用它，不重复下载 58MB。"""
-        portable = self.tmp / WINGET_PORTABLE_VERSION / "winget.exe"
+    def test_leftover_portable_copy_is_ignored(self):
+        """老版本解压出来的便携版还躺在原地 —— 别再拿它：它装不了任何东西
+        （没注册成 AppX 包，源索引永远打不开，`winget install` 必然 0x8A15004B），
+        拿它只会让 install_vscode 白撞一次墙、白等一个超时。"""
+        portable = self.tmp / "AppData" / "Local" / "aikaui" / "winget" / \
+            win_backend.WINGET_VERSION / "winget.exe"
         portable.parent.mkdir(parents=True)
         portable.write_bytes(b"")
-        with mock.patch.object(win_backend, "_winget_portable_dir",
-                               return_value=portable.parent), \
-             mock.patch.object(win_backend, "HOME", self.tmp / "nohome"), \
+        with mock.patch.object(win_backend, "HOME", self.tmp), \
              mock.patch.object(win_backend.shutil, "which", return_value=None):
-            self.assertEqual(win_backend.find_winget(), str(portable))
+            self.assertIsNone(win_backend.find_winget())
 
     def test_nothing_found(self):
         with mock.patch.object(win_backend, "HOME", self.tmp / "nohome"), \
              mock.patch.object(win_backend.shutil, "which", return_value=None):
             self.assertIsNone(win_backend.find_winget())
 
+    def test_asks_appx_registration_before_giving_up(self):
+        """2026-10-31 用户机器上：PATH 里最前面那个 WindowsApps 属于**另一个账户**
+        （空壳别名，一创建进程就 WinError 3），HOME 也指向一个没装 App Installer
+        的目录。那几个"猜"的候选全落空，但 winget 明明是好的。
+        所以最后必须问一次系统自己知道答案的地方。"""
+        installed = r"C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.29.380.0_x64__8wekyb3d8bbwe\winget.exe"
+        with mock.patch.object(win_backend, "HOME", self.tmp / "nohome"), \
+             mock.patch.object(win_backend.shutil, "which", return_value=None), \
+             mock.patch.object(win_backend, "_winget_from_appx_registration",
+                               return_value=installed):
+            self.assertEqual(win_backend.find_winget(verify=True), installed)
 
-WINGET_PORTABLE_VERSION = win_backend.WINGET_VERSION
+    def test_appx_registration_candidate_is_verified_too(self):
+        """找出来的那个也得真跑得起来，否则等于把 WinError 3 往后挪一步。"""
+        with mock.patch.object(win_backend, "HOME", self.tmp / "nohome"), \
+             mock.patch.object(win_backend.shutil, "which", return_value=None), \
+             mock.patch.object(win_backend, "_winget_from_appx_registration",
+                               return_value=r"C:\x\winget.exe"), \
+             mock.patch.object(win_backend, "_winget_runs", return_value=False):
+            self.assertIsNone(win_backend.find_winget(verify=True))
+
+
+class AppxRegistrationLookupTests(unittest.TestCase):
+    """`_winget_from_appx_registration` 自己：只解析，不许抛。
+
+    ★ 单独一个类：FindWingetTests.setUp 会把整个函数替换掉（免得真起 PowerShell），
+      在这里调它就成了调替身。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+
+    def test_reads_install_location(self):
+        pkg = self.tmp / "Microsoft.DesktopAppInstaller_1.29.380.0_x64__8wekyb3d8bbwe"
+        pkg.mkdir()
+        (pkg / "winget.exe").write_bytes(b"")
+        with mock.patch.object(win_backend, "run_capture",
+                               return_value=(str(pkg).encode() + b"\r\n", b"", False, 0)):
+            got = win_backend._winget_from_appx_registration()
+        self.assertEqual(got, str(pkg / "winget.exe"))
+
+    def test_location_without_winget_exe_is_ignored(self):
+        pkg = self.tmp / "broken"
+        pkg.mkdir()
+        with mock.patch.object(win_backend, "run_capture",
+                               return_value=(str(pkg).encode(), b"", False, 0)):
+            self.assertIsNone(win_backend._winget_from_appx_registration())
+
+    def test_gives_up_quietly(self):
+        """没装 / PowerShell 挂了 / 超时 —— 一律 None，不许抛。"""
+        for returns in ((b"", b"", False, 0),
+                        (b"", b"boom", False, 1),
+                        (b"", b"", True, -1)):
+            with mock.patch.object(win_backend, "run_capture", return_value=returns):
+                self.assertIsNone(win_backend._winget_from_appx_registration())
+
+    def test_run_capture_exploding_is_not_fatal(self):
+        with mock.patch.object(win_backend, "run_capture",
+                               side_effect=OSError("nope")):
+            self.assertIsNone(win_backend._winget_from_appx_registration())
 
 
 class DownloadTests(unittest.TestCase):
@@ -181,39 +245,39 @@ class EnsureWingetTests(unittest.TestCase):
         with mock.patch.object(win_backend, "find_winget", side_effect=[None, alias]), \
              mock.patch.object(win_backend, "_fetch_winget_msix",
                                return_value=(self.msix, "")), \
-             mock.patch.object(win_backend, "_install_appx", return_value="") as appx, \
-             mock.patch.object(win_backend, "_extract_portable") as portable:
+             mock.patch.object(win_backend, "_install_appx", return_value="") as appx:
             got = win_backend.ensure_winget()
         appx.assert_called_once()
-        portable.assert_not_called()
         self.assertEqual(got["mode"], "appx")
         self.assertEqual(got["exe"], alias)
         self.assertFalse(self.msix.exists(), "58MB 的安装包用完要删掉")
 
-    def test_appx_failure_falls_back_to_portable(self):
+    def test_appx_failure_gives_up_instead_of_extracting_portable(self):
+        """便携版装不了任何东西（源索引永远打不开），所以别再解压了 ——
+        以前会解压一份、打"已装好 winget（便携版）"、下一句又说"读不到软件源"，
+        既白费时间又自相矛盾（2026-10-31）。现在直接把原因交回去，让
+        install_vscode 去走官方安装包那条路。"""
+        notes = []
         with mock.patch.object(win_backend, "find_winget", return_value=None), \
              mock.patch.object(win_backend, "_fetch_winget_msix",
                                return_value=(self.msix, "")), \
              mock.patch.object(win_backend, "_install_appx",
-                               return_value="Add-AppxPackage 返回 1：0x80073CFF"), \
-             mock.patch.object(win_backend, "_extract_portable",
-                               return_value=(r"C:\p\winget.exe", "")):
-            got = win_backend.ensure_winget()
-        self.assertTrue(got["ok"])
-        self.assertEqual(got["mode"], "portable")
-        self.assertEqual(got["exe"], r"C:\p\winget.exe")
+                               return_value="Add-AppxPackage 返回 1：0x80073CFF"):
+            got = win_backend.ensure_winget(on_note=notes.append)
+        self.assertFalse(got["ok"])
+        self.assertIn("0x80073CFF", got["note"])
+        self.assertTrue(any("官方安装包" in n for n in notes), notes)
+        # 不能出现自相矛盾的"已装好 winget"
+        self.assertFalse(any("已装好" in n for n in notes), notes)
 
-    def test_both_fail_reports_both_reasons(self):
+    def test_failure_note_carries_the_appx_reason(self):
         with mock.patch.object(win_backend, "find_winget", return_value=None), \
              mock.patch.object(win_backend, "_fetch_winget_msix",
                                return_value=(self.msix, "")), \
-             mock.patch.object(win_backend, "_install_appx", return_value="AppX 被禁"), \
-             mock.patch.object(win_backend, "_extract_portable",
-                               return_value=(None, "解压后没有 winget.exe")):
+             mock.patch.object(win_backend, "_install_appx", return_value="AppX 被禁"):
             got = win_backend.ensure_winget()
         self.assertFalse(got["ok"])
         self.assertIn("AppX 被禁", got["note"])
-        self.assertIn("解压后没有 winget.exe", got["note"])
 
     def test_install_appx_runs_powershell_with_the_path(self):
         seen = {}
@@ -481,50 +545,6 @@ class WingetDepsTests(unittest.TestCase):
         self.assertIn("HTTP 500", why)
 
 
-class PortableTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
-        self.msix = self.tmp / "AppInstaller_x64.msix"
-        with zipfile.ZipFile(self.msix, "w") as z:
-            z.writestr("winget.exe", b"MZ")
-            z.writestr("WindowsPackageManager.dll", b"MZ")
-            z.writestr("Assets/logo.png", b"png")
-            z.writestr("../../evil.exe", b"MZ")
-        self.target = self.tmp / "portable"
-
-    def test_extracts_binaries_and_skips_assets(self):
-        with mock.patch.object(win_backend, "_winget_portable_dir",
-                               return_value=self.target), \
-             mock.patch.object(win_backend, "run_capture",
-                               return_value=(b"v1.11.430", b"", False, 0)):
-            exe, why = win_backend._extract_portable(self.msix)
-        self.assertEqual(why, "")
-        self.assertEqual(exe, str(self.target / "winget.exe"))
-        self.assertTrue((self.target / "WindowsPackageManager.dll").is_file())
-        self.assertFalse((self.target / "Assets").exists())
-        self.assertFalse((self.tmp.parent / "evil.exe").exists())
-
-    def test_broken_binary_is_reported(self):
-        with mock.patch.object(win_backend, "_winget_portable_dir",
-                               return_value=self.target), \
-             mock.patch.object(win_backend, "run_capture",
-                               side_effect=OSError("ERROR_BAD_EXE_FORMAT")):
-            exe, why = win_backend._extract_portable(self.msix)
-        self.assertIsNone(exe)
-        self.assertIn("便携版跑不起来", why)
-
-    def test_missing_winget_exe(self):
-        empty = self.tmp / "empty.msix"
-        with zipfile.ZipFile(empty, "w") as z:
-            z.writestr("readme.txt", b"")
-        with mock.patch.object(win_backend, "_winget_portable_dir",
-                               return_value=self.tmp / "p2"):
-            exe, why = win_backend._extract_portable(empty)
-        self.assertIsNone(exe)
-        self.assertIn("没有 winget.exe", why)
-
-
 class InstallVscodeUsesWingetTests(unittest.TestCase):
     def test_bootstraps_winget_then_installs(self):
         info = {"exe": r"D:\vs code\Code.exe"}
@@ -543,29 +563,6 @@ class InstallVscodeUsesWingetTests(unittest.TestCase):
         ensure.assert_called_once()
         setup.assert_not_called()               # 正式装上了就不用下 240MB
         self.assertEqual(argv[0], r"C:\p\winget.exe")
-
-    def test_portable_winget_skips_straight_to_the_installer(self):
-        """便携版 winget 没注册成 AppX，源索引永远打不开 —— 别再让它试一次。
-
-        2026-10-30 用户那次：先花时间下 58MB、解压出便携版，再用它 install，
-        必然返回 0x8A15004B，最后还是得下 240MB。这里把中间那步直接砍掉。"""
-        info = {"exe": r"D:\Code.exe"}
-        notes = []
-        with mock.patch.object(win_backend, "find_vscode",
-                               side_effect=[None, info]), \
-             mock.patch.object(win_backend, "find_winget", return_value=None), \
-             mock.patch.object(win_backend, "ensure_winget",
-                               return_value={"ok": True, "exe": r"C:\p\winget.exe",
-                                             "mode": "portable", "note": ""}), \
-             mock.patch.object(win_backend, "run_capture") as run, \
-             mock.patch.object(win_backend, "_install_from_setup",
-                               return_value=(f"已安装 VSCode（{info['exe']}）", "")) as setup:
-            text = win_backend.install_vscode(on_note=notes.append)
-
-        self.assertEqual(text, f"已安装 VSCode（{info['exe']}）")
-        setup.assert_called_once()
-        run.assert_not_called()                 # 便携版 winget 一次都没跑
-        self.assertTrue(any("便携版" in n for n in notes), notes)
 
     def test_bootstrap_failure_still_tries_the_official_installer(self):
         """连 winget 都没装成，不能就此放弃 —— 直接下微软的安装包。"""

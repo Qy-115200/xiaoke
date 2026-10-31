@@ -281,27 +281,65 @@ WINGET_DEPS = (
 )
 
 
-def _winget_portable_dir() -> Path:
-    """便携版放哪：解压出来的 winget.exe 在这里，下次直接用，不重复下载。"""
-    return HOME / "AppData" / "Local" / "aikaui" / "winget" / WINGET_VERSION
+def _winget_from_appx_registration() -> str | None:
+    """问系统：App Installer 这个包注册在哪个目录。比猜路径可靠得多。
+
+    ★ 2026-10-31 血的教训。用户机器上 winget **明明是好的** ——
+      `Get-AppxPackage Microsoft.DesktopAppInstaller` 报 1.29.380、状态 Ok，
+      别名直接跑 `--version` 也回 `v1.29.380`。我们却判定"没有 winget"，
+      于是白下 58MB、白装一遍（还失败）、再白下 240MB。
+
+      为什么找不到：上面那几个候选全靠"猜"——
+        · PATH 最前面那条 WindowsApps 属于**另一个账户**（Administrator），
+          那是个空壳别名，一创建进程就 WinError 3；
+        · `%USERPROFILE%` 也不一定对：这台机器用户名是 `瞿毅`，
+          而 profile 目录叫 `C:\\Users\\QY`，两者的 WindowsApps 不是同一份。
+      问 AppX 注册表就没有"猜"这回事 —— 系统自己知道包装在哪。"""
+    ps = ("$ErrorActionPreference='SilentlyContinue';"
+          "(Get-AppxPackage Microsoft.DesktopAppInstaller).InstallLocation")
+    try:
+        out, _err, timed_out, rc = run_capture(
+            ["powershell", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass", "-Command", ps],
+            timeout=30, env=clean_env(), stdin=subprocess.DEVNULL)
+    except Exception:
+        return None
+    if timed_out or rc != 0:
+        return None
+    for line in smart_decode(out).splitlines():
+        loc = line.strip()
+        if not loc:
+            continue
+        exe = Path(loc) / "winget.exe"
+        if exe.is_file():
+            return str(exe)
+    return None
 
 
 def find_winget(verify: bool = False) -> str | None:
-    """找 winget：PATH → App Installer 的执行别名 → 我们解压出来的便携版。
+    """找 winget：PATH → App Installer 的执行别名 → 最后问一次 AppX 注册表。
 
     ★ 别名那条不能省：刚装完 App Installer 时，PATH 还是本进程启动时的那份，
       `shutil.which("winget")` 找不到它，但文件已经在那儿了。
     ★ verify=True 时要真跑一次 `--version`：WindowsApps 下的执行别名可能是个空壳
       （文件在，但那个包不是给这个用户装的），创建进程直接 WinError 3。
-      本机 2026-10-30 就是这样 —— 不验就会拿一个跑不起来的路径去装东西。"""
+      本机 2026-10-30 就是这样 —— 不验就会拿一个跑不起来的路径去装东西。
+    ★ 前面几条都是"猜目录"，可能是别的账户的、也可能是空壳（2026-10-31 用户机器上
+      全踩了）。所以都不成时再问一次系统（`_winget_from_appx_registration`），
+      那条是权威答案，只是要多起一个 PowerShell（几百毫秒），放最后。
+    ★ 不再找"我们解压出来的便携版"（2026-10-31 删）：便携版装不了任何东西
+      （`0x8A15004B`），找到它只会让 `install_vscode()` 白撞一次墙。"""
     for cand in (shutil.which("winget"), shutil.which("winget.exe"),
-                 str(HOME / "AppData" / "Local" / "Microsoft" / "WindowsApps" / "winget.exe"),
-                 str(_winget_portable_dir() / "winget.exe")):
+                 str(HOME / "AppData" / "Local" / "Microsoft" / "WindowsApps" / "winget.exe")):
         if not cand or not Path(cand).is_file():
             continue
         if verify and not _winget_runs(cand):
             continue
         return str(cand)
+
+    registered = _winget_from_appx_registration()
+    if registered and (not verify or _winget_runs(registered)):
+        return registered
     return None
 
 
@@ -605,45 +643,6 @@ def _install_appx(msix: Path, deps=()) -> str:
     return f"{why}；换个时机/路径再试一次还是失败：{why2}"
 
 
-def _extract_portable(msix: Path) -> tuple[str | None, str]:
-    """解压即用（不装 AppX）。
-
-    老系统 / 没有商店 / 组策略禁了 AppX 时走这条。winget.exe 是自包含的，
-    实测 `winget --version`、`winget search` 都能正常跑。
-    只取 exe/dll/winmd，跳过 Assets（图标，几 MB 全是 png）。"""
-    import zipfile
-
-    target = _winget_portable_dir()
-    try:
-        target.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(msix) as z:
-            for info in z.infolist():
-                name = info.filename
-                if ".." in name or name.startswith("/"):
-                    continue                       # 防目录穿越（包是我们自己的，仍然要挡）
-                if name.lower().startswith("assets/"):
-                    continue
-                if not name.lower().endswith((".exe", ".dll", ".winmd")):
-                    continue
-                z.extract(info, target)
-    except Exception as e:
-        return None, f"解压失败：{e}"
-
-    exe = target / "winget.exe"
-    if not exe.is_file():
-        return None, "解压后没有 winget.exe"
-    # 真跑一次：缺 VC 运行库之类的会在这一步暴露，而不是等到装 VSCode 时才报怪错
-    try:
-        out, err, timed_out, rc = run_capture(
-            [str(exe), "--version"], timeout=30, env=clean_env(),
-            stdin=subprocess.DEVNULL)
-    except Exception as e:
-        return None, f"便携版跑不起来：{e}"
-    if timed_out or rc != 0:
-        return None, "便携版跑不起来（可能缺 VC 运行库）"
-    return str(exe), ""
-
-
 def _note(cb, msg: str) -> None:
     """往对话里打一句话（调用方没给回调就什么都不做）。回调出错绝不能影响安装。"""
     if not cb or not msg:
@@ -657,11 +656,16 @@ def _note(cb, msg: str) -> None:
 def ensure_winget(on_progress=None, on_note=None) -> dict:
     """确保这台机器上有 winget。返回 {"ok", "exe", "mode", "note"}。
 
-    mode 取值：existing（本来就有）/ appx（这次装上的）/ portable（解压即用）。
+    mode 取值：existing（本来就有）/ appx（这次装上的）；失败时还有
+    cancelled（用户中断）/ download（包没下下来）/ install（AppX 装不上）。
+    **没有 portable 了**（2026-10-31 删掉，见下）。
     装不上时 ok=False，note 里是一句能直接讲给用户听的原因 —— 别让它变成异常。
 
+    ★ 装不上就直接认输，不再"解压即用"一份便携版（2026-10-31）：便携版没注册成
+      AppX 包，源索引永远打不开，装不了任何东西。留着它只会让日志自相矛盾。
+
     on_note(msg)：往对话里打一行进度/结论。2026-10-30 加了它，因为上次装失败
-    时日志里只有下载百分比，看不出最后走的是 AppX 还是便携版。"""
+    时日志里只有下载百分比，看不出最后卡在哪一步。"""
     exe = find_winget(verify=True)          # 空壳别名不算数
     if exe:
         return {"ok": True, "exe": exe, "mode": "existing", "note": ""}
@@ -692,16 +696,15 @@ def ensure_winget(on_progress=None, on_note=None) -> dict:
                 time.sleep(1)
             appx_why = "装完了却找不到能用的 winget.exe"
 
-        _note(on_note, f"winget 装不上（{appx_why}），改用便携版")
-        exe, port_why = _extract_portable(msix)
-        if exe:
-            _note(on_note, "已装好 winget（便携版，解压即用）")
-            return {"ok": True, "exe": exe, "mode": "portable", "note": "",
-                    "why_appx": appx_why}
-        return {"ok": False, "exe": "", "mode": "install",
-                "note": f"{appx_why}；便携版也不行（{port_why}）"}
+        _note(on_note, f"winget 装不上（{appx_why}），直接改用官方安装包")
+        # ★ 不再解压便携版（2026-10-31 改）。便携版没注册成 AppX 包，源索引
+        #   永远打不开，`winget install` 必然 0x8A15004B —— 我们自己的实测。
+        #   以前这里会解压出一份、打一行"已装好 winget（便携版，解压即用）"，
+        #   下一句紧接着就是"读不到软件源，改用官方安装包"：白费十几秒，
+        #   日志还自相矛盾。反正用不上，就别装了。
+        return {"ok": False, "exe": "", "mode": "install", "note": appx_why}
     finally:
-        # 58MB 的安装包留着没用（便携版已经把要的东西解出来了）
+        # 58MB 的安装包留着没用（装的装不上，也没解压出别的东西）
         try:
             msix.unlink(missing_ok=True)
         except Exception:
@@ -928,25 +931,14 @@ def install_vscode(on_progress=None, on_note=None) -> str:
         return f"已经装过 VSCode，不用重复安装（{found['exe']}）"
 
     reasons = []
-    mode = ""
 
     winget = find_winget(verify=True)
     if not winget:
         got = ensure_winget(on_progress, on_note)
         if got["ok"]:
             winget = got["exe"]
-            mode = got.get("mode") or ""
         elif got["note"] != "已中断":
             reasons.append(got["note"])
-
-    # ★ 便携版 winget 装不了东西：它没有注册成 AppX 包，源索引起不来
-    #   （`source update` 也失败），`winget install` 必定返回 0x8A15004B。
-    #   2026-10-30 用户机器上就是这样 —— 与其让它去撞一次墙再改道，不如直接走
-    #   下载安装包那条路，省两分钟。
-    if winget and mode == "portable":
-        _note(on_note, "便携版 winget 读不到软件源，直接改用官方安装包")
-        reasons.append("便携版 winget 读不到软件源")
-        winget = ""
 
     if winget:
         text, why = _install_via_winget(winget, on_note)
