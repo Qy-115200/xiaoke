@@ -105,11 +105,16 @@ Windows 10/11 的家庭版精简镜像、老 LTSC、服务器版都可能不带 
   再装 —— AppX 部署对非 ASCII 路径有过 IO 报错，ASCII 副本是绕开它的最省事办法。
   `_ascii_copy()` 只在原路径含非 ASCII 时才做，装完（无论成败）删掉副本。
   两次都失败就报两段的错误。
-- 先 `Add-AppxPackage`（用户级、不弹 UAC、不改系统策略）。**装不上就认，不再解压
-  便携版**（2026-10-31 删掉）：便携版没注册成 AppX 包，源索引永远打不开，
+- **先 `Add-AppxPackage`（用户级、不弹 UAC、不改系统策略）；装不上就认。**
+  2026-10-31 删掉了「解压便携版」那条路：便携版没注册成 AppX 包，源索引永远打不开，
   `winget install` 必然 `0x8A15004B`。以前这里会解压一份、打一行「已装好 winget
   （便携版，解压即用）」，下一句紧接着就是「读不到软件源，改用官方安装包」——
   白等十几秒，日志还自相矛盾。现在直接返回失败原因，`install_vscode()` 跳第 3 条。
+- **装不上时把那个老版本的名字说出来**（2026-10-31）。`Get-AppxPackage
+  Microsoft.DesktopAppInstaller` 可能注册着，但版本是 **1.0.30251.0** ——
+  winget 出现之前的那版，包里根本没有 `winget.exe`（winget 要 1.11 以上才带）。
+  这时候日志里会多一句「太老…在 Microsoft Store「库 → 获取更新」里升级它能一劳永逸」，
+  而不是只有一句看不懂的「装不上」。这是用户真机上撞到的情形。
 - 下载边写边算 sha256，对不上就删掉、换下一个源；两个源（CDN / 回源）都失败才回到下载页。
 - 58MB 的安装包用完即删；只有第一次需要，之后 `find_winget()` 直接命中。
 
@@ -128,8 +133,19 @@ Windows 10/11 的家庭版精简镜像、老 LTSC、服务器版都可能不带 
    （`update.code.visualstudio.com/latest/win32-x64-user/stable`，约 240MB），
    `/VERYSILENT /MERGETASKS=!runcode` 静默装，退出码 3010（要求重启）也算成功。
    这条和下载页给用户的是同一个文件，签名也是微软的。
+   **下载走 6 路分段**（2026-10-31 加，见下），240MB 从 9 分钟变一分半。
 
 三条都不行才打开下载页，并把每一步卡在哪如实说出来（`on_note` 会往对话里打行）。
+
+**240MB 那个安装包用 6 路并发下**（`_download_parallel()`，2026-10-31 加）。
+起因是用户的原话「直接下载微软官方的安装包花的时间太久了」：微软那个 CDN 单条连接
+只有 ~450KB/s，240MB 要 9 分钟。先问一次
+`update.code.visualstudio.com/api/update/win32-x64-user/stable/latest`（几百字节的 JSON）
+拿到带版本号的真实地址和 `sha256hash`，再用 `Range` 把它切成 6 段并发下。
+**本机实测 2.64MB/s、90.9 秒下完 251,590,472 字节、sha256 对得上**（快 6 倍）。
+分段拿不到（代理拦了 `Range`、服务器不支持）就退回单连接那条老路 —— 慢，但通；
+退回去之后**仍然按 API 给的 sha256 校验**，因为"某一段少了一截"的文件头照样是 `MZ`。
+用户点中断时不会偷偷再下一遍。
 
 `find_winget(verify=True)` 的顺序是 **PATH → 执行别名 → 最后问一次 AppX 注册表**，
 前面那几个候选手到之后都会真跑一次 `--version`：`WindowsApps` 下的**执行别名可能是空壳**
@@ -690,7 +706,7 @@ agent_demo/
 ├── platform_support/                  三平台差异（调用方只 import 这个包）
 │   ├── __init__.py               160   按 sys.platform 延迟加载并转发
 │   ├── common.py                 230   safe_cwd（HOME 越界检查）、find_claude、clean_env、跑子进程抓输出、VSCode 值解析
-│   ├── windows.py               1148   注册表协议 / .lnk / cmd / WinRT toast / VSCode 探测 + winget 安装（含"没 winget 就装一个"、问 AppX 注册表定位）
+│   ├── windows.py               1397   注册表协议 / .lnk / cmd / WinRT toast / VSCode 探测 + winget 安装（含"没 winget 就装一个"、问 AppX 注册表定位、240MB 安装包 6 路分段下）
 │   ├── macos.py                  425   Info.plist 协议 + Apple Event / .command 快捷方式 / Terminal.app / VSCode 探测 + brew 安装
 │   └── linux.py                  314   .desktop + xdg-mime / 终端探测 / notify-send / VSCode 探测（安装只开下载页）
 │
@@ -743,7 +759,7 @@ agent_demo/
 │   ├── test_platform_support.py       三平台抽象层
 │   ├── test_prompts.py                提示词按平台切换 + VSCode 询问分支的关键句
 │   ├── test_vscode.py                 VSCode 探测 / 安装 / 打开（三平台，全程打桩）
-│   ├── test_winget.py                 没 winget 时自动装：sha256 校验、依赖包先装、失败报错要能看（HRESULT / 中文不乱码 / 重试一次）、不再解压便携版、问 AppX 注册表
+│   ├── test_winget.py                 没 winget 时自动装：sha256 校验、依赖包先装、失败报错要能看（HRESULT / 中文不乱码 / 重试一次）、不再解压便携版、问 AppX 注册表、老版本要点名、240MB 6 路分段（拼序 / 接不到段 / 中断 / 校验）
 │   ├── test_cancel.py                 「中断」：牌子语义、子进程登记/清理、下载到一半能停
 │   ├── test_tools_vscode.py           四个 VSCode 工具的返回值、失败归类、Claude 面板什么时候发链接
 │   ├── test_agent_core.py             install_done 什么时候触发（"这一轮真装完了"的判定）
@@ -1026,6 +1042,14 @@ Windows 上用一次 PowerShell 的 `Get-CimInstance` 读，非 Windows 或取�
   已经修掉，剩下的这类失败会如实报出来、隔 2 秒换 ASCII 路径再试一次，还不行就退到
   240MB 官方安装包，不会卡住。手上没有一台"干净、没有 App Installer"的机器，
   所以这条路没跑过完整成功一遍。
+- **用户那台机器上的 winget 是"本来就装不上"的**（2026-10-31 查清）。
+  `Get-AppxPackage Microsoft.DesktopAppInstaller` 有结果，但版本是 **1.0.30251.0** ——
+  winget 出现之前的老版本，包里没有 `winget.exe`，`winget` 自然也不在 PATH 里
+  （用户那边报的是 `CommandNotFoundException`，这是**正确**的，不是环境坏了）。
+  我们下的 1.11.430 想把它升级上去，`Add-AppxPackage` 在部署阶段 IO 失败。
+  这种事在用户态没有可靠的绕法（`Remove-AppxPackage` 动的是系统预置包，要管理员权限，
+  而且会把双击安装 msix 的能力一起弄没）—— 所以这事停在这里，交给用户在
+  Microsoft Store 里更新「应用安装程序」。装不上也不会卡：走 240MB 官方安装包。
 - **`Add-AppxPackage 返回 1` 的原因查清了**（2026-10-31）。不是缺依赖，是**参数名写错**：
   `Add-AppxPackage` 没有 `-LiteralPath`，写上它 PowerShell 抛 `ParameterBindingException`、
   一句都不执行。10-30 那次的日志只剩「返回 1： and」，所以当时猜成了缺框架包；

@@ -46,6 +46,19 @@ VSCODE_SETUP_URL = "https://update.code.visualstudio.com/latest/win32-x64-user/s
 # 实测 2026-10-30：250MB 左右，国内直连 ~380KB/s，十几分钟。所以给足 30 分钟。
 VSCODE_SETUP_TIMEOUT = 1800
 
+# 拿"最新版用户安装包"的真实地址 / sha256（一个 400 字节的 JSON，半秒）。
+VSCODE_UPDATE_API = "https://update.code.visualstudio.com/api/update/win32-x64-user/stable/latest"
+
+# ★ 多连接分段下载（2026-10-31 加）。微软那个 CDN 对单条连接限速得厉害：
+#   本机实测单路 ~450KB/s（240MB 要 9 分钟），开 6 路 Concurrent Range 能到
+#   ~2.8MB/s（一分半）。同样一个文件、同样的 sha256，只是把 Range 头用满。
+VSCODE_PIECES = 6
+# 单段至少这么大才值得开并发。太小的文件并行反而是负担（握手 × 6）。
+_PARALLEL_MIN_SIZE = 32 * 1024 * 1024
+_PARALLEL_PIECE_FLOOR = 4 * 1024 * 1024
+# 界面刷新节流：6 条线程各自报进度会把人眼刷花
+_PARALLEL_REPORT_EVERY = 0.2
+
 
 def platform_key() -> str:
     machine = platform.machine().lower()
@@ -314,6 +327,41 @@ def _winget_from_appx_registration() -> str | None:
         if exe.is_file():
             return str(exe)
     return None
+
+
+def _app_installer_version() -> str:
+    """这台机器上注册的「应用安装程序」是哪个版本。问不到就回空串。
+
+    ★ 2026-10-31 加。用户的机器上它注册着，但版本是 **1.0.30251.0** ——
+      那是 winget 出现**之前**的老版本（winget 要 1.11 以上才带），
+      所以 `InstallLocation` 是个没装 winget.exe 的目录，`winget` 也不在 PATH 里。
+      光看"没找到 winget"会让人以为是环境坏了；把版本打出来，一眼就能看懂：
+      要么升级它，要么直接走官方安装包。"""
+    ps = ("$ErrorActionPreference='SilentlyContinue';"
+          "(Get-AppxPackage Microsoft.DesktopAppInstaller).Version")
+    try:
+        out, _err, timed_out, rc = run_capture(
+            ["powershell", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass", "-Command", ps],
+            timeout=30, env=clean_env(), stdin=subprocess.DEVNULL)
+    except Exception:
+        return ""
+    if timed_out or rc != 0:
+        return ""
+    for line in smart_decode(out).splitlines():
+        ver = line.strip()
+        if ver and ver[0].isdigit():
+            return ver
+    return ""
+
+
+def _has_winget_binary(version: str) -> bool:
+    """这个版本的 App Installer 里有没有 winget.exe。1.11 起才有。"""
+    try:
+        major, minor = (int(x) for x in version.split(".")[:2])
+    except Exception:
+        return True                          # 读不懂就别乱下结论
+    return (major, minor) >= (1, 11)
 
 
 def find_winget(verify: bool = False) -> str | None:
@@ -697,6 +745,13 @@ def ensure_winget(on_progress=None, on_note=None) -> dict:
             appx_why = "装完了却找不到能用的 winget.exe"
 
         _note(on_note, f"winget 装不上（{appx_why}），直接改用官方安装包")
+        # ★ 把机器上那个「应用安装程序」的版本说出来（2026-10-31）。用户的机器上是
+        #   1.0.30251.0 —— winget 出现之前的老版本，包里根本没有 winget.exe。
+        #   不报这一句，日志里只有"装不上"，看着像环境坏了，其实原因很具体。
+        old = _app_installer_version()
+        if old and not _has_winget_binary(old):
+            _note(on_note, f"这台机器的「应用安装程序」是 {old}，太老（winget 要 1.11 以上）；"
+                           f"在 Microsoft Store「库 → 获取更新」里升级它能一劳永逸")
         # ★ 不再解压便携版（2026-10-31 改）。便携版没注册成 AppX 包，源索引
         #   永远打不开，`winget install` 必然 0x8A15004B —— 我们自己的实测。
         #   以前这里会解压出一份、打一行"已装好 winget（便携版，解压即用）"，
@@ -820,8 +875,198 @@ def _unlink_quiet(path) -> None:
         pass
 
 
+def _probe_range(url: str) -> tuple[str, int, str]:
+    """问一次：真实地址、文件多大、支不支持 Range。返回 (最终地址, 大小, 空) 或 ("", 0, 原因)。
+
+    ★ 用 `Range: bytes=0-0` 探测而不是 HEAD：微软的 CDN 对 HEAD 回 403（本机实测），
+      对带 Range 的 GET 回 206 + `content-range: bytes 0-0/251590472` ——
+      斜杠后面那个数就是总大小，一个字都不多下。
+    ★ 顺手拿到重定向后的真实地址，让 6 条连接都直连它，不必各自再跳一次。"""
+    try:
+        import requests
+    except Exception as e:
+        return "", 0, f"没有请求库：{e}"
+    try:
+        with requests.get(url, headers={"Range": "bytes=0-0"}, stream=True,
+                          timeout=(15, 60)) as r:
+            if r.status_code != 206:
+                return "", 0, f"服务器不支持分段（HTTP {r.status_code}）"
+            cr = r.headers.get("content-range") or ""
+            if "/" not in cr:
+                return "", 0, "服务器没告诉总大小"
+            try:
+                total = int(cr.rsplit("/", 1)[1].strip())
+            except ValueError:
+                return "", 0, "服务器给的总大小看不懂"
+            final = r.url or url
+            if total <= 0:
+                return "", 0, "服务器说文件是 0 字节"
+            return final, total, ""
+    except Exception as e:
+        return "", 0, f"{type(e).__name__}：{str(e)[:80]}"
+
+
+def _download_parallel(url: str, dest: Path, on_progress=None, *, size: int = 0,
+                       sha256: str = "", kind: str = "vscode",
+                       pieces: int = VSCODE_PIECES) -> str:
+    """切成 pieces 段并发下。成功返回空串，失败返回一句原因。
+
+    ★ 失败不抛异常，也不留半截：调用方看见了就退回单连接那条老路 —— 慢，但通。
+      这里只保证要么拿到完整文件、要么什么都没剩下。
+    ★ 每段每 1MB 看一眼「中断」牌子，行为和 `_download` 一致。
+    ★ 最后还是要过大小和 sha256：分段下最容易出的错是"某一段少了一截"，
+      而文件头尾都是对的，光看头两字节（MZ）发现不了。"""
+    import threading
+
+    try:
+        import requests
+    except Exception as e:
+        return f"没有请求库：{e}"
+
+    final, total, why = _probe_range(url)
+    if why:
+        return why
+    if size and total != size:
+        return f"文件大小不对（{total} ≠ {size}）"
+    if total < _PARALLEL_MIN_SIZE:
+        return "文件不够大，不值得分段"
+
+    pieces = max(1, min(int(pieces), total // _PARALLEL_PIECE_FLOOR))
+    step = (total + pieces - 1) // pieces
+    parts = [Path(f"{dest}.part{i}") for i in range(pieces)]
+    lock = threading.Lock()
+    state = {"done": 0, "err": "", "cancel": False}
+    last_report = [0.0]
+
+    def report():
+        if not on_progress:
+            return
+        now = time.time()
+        if now - last_report[0] < _PARALLEL_REPORT_EVERY:   # 6 条线程同时报会把界面刷爆
+            return
+        last_report[0] = now
+        try:
+            on_progress(state["done"], total, kind)
+        except Exception:
+            pass
+
+    def fetch(i: int):
+        start = i * step
+        end = min(start + step, total) - 1
+        if start > end:
+            return
+        try:
+            with requests.get(final, headers={"Range": f"bytes={start}-{end}"},
+                              stream=True, timeout=(15, 60)) as r:
+                if r.status_code != 206:
+                    raise IOError(f"HTTP {r.status_code}")
+                with open(parts[i], "wb") as f:
+                    for chunk in r.iter_content(1 << 20):
+                        if is_cancelled():
+                            state["cancel"] = True
+                            return
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        with lock:
+                            state["done"] += len(chunk)
+                        report()
+        except Exception as e:
+            with lock:
+                if not state["err"]:
+                    state["err"] = f"{type(e).__name__}：{str(e)[:80]}"
+
+    threads = [threading.Thread(target=fetch, args=(i,), daemon=True)
+               for i in range(pieces)]
+    for t in threads:
+        t.start()
+    try:
+        for t in threads:
+            while t.is_alive():             # 有超时地等，才能及时响应中断
+                t.join(0.5)
+                if is_cancelled():
+                    state["cancel"] = True
+    except Exception as e:                  # noqa: BLE001 - 线程这边不该把安装搞崩
+        state["err"] = state["err"] or f"{type(e).__name__}：{str(e)[:80]}"
+
+    def cleanup():
+        for p in parts:
+            _unlink_quiet(p)
+
+    if state["cancel"] or is_cancelled():
+        cleanup()
+        return "已中断"
+    if state["err"]:
+        cleanup()
+        return state["err"]
+
+    tmp = Path(str(dest) + ".part")
+    try:
+        with open(tmp, "wb") as out:
+            for p in parts:
+                with open(p, "rb") as f:
+                    shutil.copyfileobj(f, out, 1 << 20)
+        cleanup()
+        got = tmp.stat().st_size
+        if got != total:
+            _unlink_quiet(tmp)
+            return f"拼起来的文件不对（{got} ≠ {total}）"
+        if sha256 and _sha256_of(tmp) != sha256:
+            _unlink_quiet(tmp)
+            return "校验不过（sha256 对不上）"
+        tmp.replace(dest)
+    except Exception as e:
+        _unlink_quiet(tmp)
+        cleanup()
+        return f"{type(e).__name__}：{str(e)[:80]}"
+    return ""
+
+
+def _vscode_setup_target() -> tuple[str, str, str]:
+    """问微软要"最新版用户安装包"的真实地址和 sha256。返回 (地址, sha256, 原因)。
+
+    拿不到就返回空串，调用方直接走老的 `latest/...` 地址 —— 那条一定能跳转对，
+    只是没有 sha256 可校验。这个 API 只有几百字节，失败不值得报给用户。"""
+    try:
+        import requests
+    except Exception as e:
+        return "", "", f"没有请求库：{e}"
+    try:
+        r = requests.get(VSCODE_UPDATE_API, timeout=(10, 20))
+        if r.status_code != 200:
+            return "", "", f"HTTP {r.status_code}"
+        info = r.json() or {}
+        url = str(info.get("url") or "")
+        sha = str(info.get("sha256hash") or "").lower()
+        if not url.startswith("https://"):
+            return "", "", "地址不像话"
+        return url, sha, ""
+    except Exception as e:
+        return "", "", f"{type(e).__name__}：{str(e)[:80]}"
+
+
 def _fetch_vscode_setup(on_progress=None) -> tuple[Path | None, str]:
-    """下微软官方的用户级安装包。返回 (文件, 空) 或 (None, 原因)。"""
+    """下微软官方的用户级安装包。返回 (文件, 空) 或 (None, 原因)。
+
+    ★ 两条路（2026-10-31 加）：先问一次 API 拿到带版本号的真实地址 + sha256，
+      6 路分段下 —— 国内实测 450KB/s → 2.8MB/s，240MB 从 9 分钟变一分半。
+      分段不成（代理拦了 Range、服务器不支持）就退回单连接那条老路，慢，但通。"""
+    dest = Path(tempfile.gettempdir()) / "aikaui-VSCodeUserSetup-x64.exe"
+    _unlink_quiet(dest)
+
+    url, sha, _api_why = _vscode_setup_target()
+    if url:
+        why = _download_parallel(url, dest, on_progress, sha256=sha, kind="vscode")
+        if not why:
+            return dest, ""
+        if why == "已中断":
+            return None, why
+        # 分段失败不致命：单连接慢一点，但大概率能成
+    return _fetch_vscode_setup_single(on_progress, sha)
+
+
+def _fetch_vscode_setup_single(on_progress=None, sha256: str = "") -> tuple[Path | None, str]:
+    """单连接下官方安装包（老路，兜底用）。"""
     try:
         import requests
     except Exception as e:
@@ -869,6 +1114,10 @@ def _fetch_vscode_setup(on_progress=None) -> tuple[Path | None, str]:
     if is_cancelled():
         _unlink_quiet(tmp)
         return None, "已中断"
+
+    if sha256 and _sha256_of(tmp) != sha256:
+        _unlink_quiet(tmp)
+        return None, "校验不过（sha256 对不上）"
 
     try:
         tmp.replace(dest)

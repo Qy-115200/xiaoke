@@ -160,6 +160,37 @@ class AppxRegistrationLookupTests(unittest.TestCase):
             self.assertIsNone(win_backend._winget_from_appx_registration())
 
 
+class AppInstallerVersionTests(unittest.TestCase):
+    """把机器上那个「应用安装程序」的版本读出来，说给用户听。"""
+
+    def test_version_is_read(self):
+        with mock.patch.object(win_backend, "run_capture",
+                               return_value=(b"1.0.30251.0\r\n", b"", False, 0)):
+            self.assertEqual(win_backend._app_installer_version(), "1.0.30251.0")
+
+    def test_empty_when_not_installed(self):
+        with mock.patch.object(win_backend, "run_capture",
+                               return_value=(b"\r\n", b"", False, 0)):
+            self.assertEqual(win_backend._app_installer_version(), "")
+
+    def test_quiet_on_failure(self):
+        with mock.patch.object(win_backend, "run_capture",
+                               side_effect=OSError("nope")):
+            self.assertEqual(win_backend._app_installer_version(), "")
+
+    def test_1_0_has_no_winget_binary(self):
+        """1.0.30251.0 是 winget 出现之前的老版本 —— 这次用户的机器就是它。"""
+        self.assertFalse(win_backend._has_winget_binary("1.0.30251.0"))
+        self.assertFalse(win_backend._has_winget_binary("1.10.9.0"))
+
+    def test_1_11_and_newer_do(self):
+        self.assertTrue(win_backend._has_winget_binary("1.11.430.0"))
+        self.assertTrue(win_backend._has_winget_binary("1.29.380.0"))
+
+    def test_garbage_does_not_cause_a_wrong_verdict(self):
+        self.assertTrue(win_backend._has_winget_binary(""))
+
+
 class DownloadTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -278,6 +309,37 @@ class EnsureWingetTests(unittest.TestCase):
             got = win_backend.ensure_winget()
         self.assertFalse(got["ok"])
         self.assertIn("AppX 被禁", got["note"])
+
+    def test_ancient_app_installer_is_named_in_the_log(self):
+        """用户机器上注册的是 1.0.30251.0 —— winget 出现之前的老版本。
+
+        只说"装不上"会让人以为是环境坏了；把版本说出来，用户才知道
+        去 Store 里更新一下它就能一劳永逸（2026-10-31）。"""
+        notes = []
+        with mock.patch.object(win_backend, "find_winget", return_value=None), \
+             mock.patch.object(win_backend, "_fetch_winget_msix",
+                               return_value=(self.msix, "")), \
+             mock.patch.object(win_backend, "_install_appx",
+                               return_value="Add-AppxPackage 返回 1：0x80073CF9"), \
+             mock.patch.object(win_backend, "_app_installer_version",
+                               return_value="1.0.30251.0"):
+            got = win_backend.ensure_winget(on_note=notes.append)
+        self.assertFalse(got["ok"])
+        self.assertTrue(any("1.0.30251.0" in n and "Store" in n for n in notes), notes)
+
+    def test_modern_app_installer_is_not_lectured_about(self):
+        """版本是新的就别说"太老"那句 —— 那时候问题是别的（部署报错）。"""
+        notes = []
+        with mock.patch.object(win_backend, "find_winget", return_value=None), \
+             mock.patch.object(win_backend, "_fetch_winget_msix",
+                               return_value=(self.msix, "")), \
+             mock.patch.object(win_backend, "_install_appx",
+                               return_value="Add-AppxPackage 返回 1：0x80073CF9"), \
+             mock.patch.object(win_backend, "_app_installer_version",
+                               return_value="1.29.380.0"):
+            got = win_backend.ensure_winget(on_note=notes.append)
+        self.assertFalse(got["ok"])
+        self.assertFalse(any("太老" in n for n in notes), notes)
 
     def test_install_appx_runs_powershell_with_the_path(self):
         seen = {}
@@ -723,6 +785,216 @@ class SetupInstallerTests(unittest.TestCase):
             got, why = win_backend._fetch_vscode_setup()
         self.assertIsNone(got)
         self.assertIn("不是 Windows 可执行文件", why)
+
+
+class _RangeResp:
+    """带 Range 的假响应：只吐 [start, end] 这一段，并回 206 + content-range。"""
+
+    def __init__(self, payload: bytes, start: int, end: int, total=None):
+        total = len(payload) if total is None else total
+        self._chunk = payload[start:end + 1]
+        self.status_code = 206
+        self.headers = {"content-range": f"bytes {start}-{end}/{total}"}
+        self.url = "https://cdn.example/VSCodeUserSetup-x64.exe"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def iter_content(self, chunk_size=1 << 20):
+        for i in range(0, len(self._chunk), chunk_size):
+            yield self._chunk[i:i + chunk_size]
+
+
+class _RangeRequests:
+    """假的 requests：认 Range 头。不带 Range 就当普通 200 全量（单连接那条路）。"""
+
+    def __init__(self, payload: bytes, *, honor_range=True, fail_at=None, api=None):
+        self.payload = payload
+        self.honor_range = honor_range
+        self.fail_at = fail_at
+        self.api = api
+        self.seen_ranges = []
+
+    def get(self, url, headers=None, stream=False, timeout=None, **kw):
+        if url == win_backend.VSCODE_UPDATE_API:
+            return _JsonResp(self.api if self.api is not None else {})
+        rng = (headers or {}).get("Range")
+        if not rng:
+            return _FakeResp(self.payload)
+        spec = rng.split("=", 1)[1]
+        s, e = (int(x) for x in spec.split("-"))
+        self.seen_ranges.append((s, e))
+        if not self.honor_range:
+            return _FakeResp(self.payload)              # 老服务器：无视 Range 回 200
+        if self.fail_at is not None and s == self.fail_at:
+            return _FakeResp(b"", status=500)
+        return _RangeResp(self.payload, s, e)
+
+
+class _JsonResp:
+    def __init__(self, data):
+        self._data = data
+        self.status_code = 200
+
+    def json(self):
+        return self._data
+
+
+class ParallelDownloadTests(unittest.TestCase):
+    """240MB 那个安装包：6 路分段下（2026-10-31 加）。
+
+    起因是用户的日志：「直接下载微软官方的安装包花的时间太久了」。本机实测
+    单连接 ~450KB/s（240MB 要 9 分钟），6 路并发 ~2.8MB/s（一分半）。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        self.payload = bytes(range(256)) * 8192          # 2MB，内容可验证
+        self.dest = self.tmp / "vscode.exe"
+        for name, val in (("_PARALLEL_MIN_SIZE", 1024),
+                          ("_PARALLEL_PIECE_FLOOR", 4096),
+                          ("_PARALLEL_REPORT_EVERY", 0.0)):
+            p = mock.patch.object(win_backend, name, val)
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(mock.patch.object(win_backend, "is_cancelled",
+                                          return_value=False).stop)
+
+    def _run(self, fake):
+        with mock.patch.dict(sys.modules, {"requests": fake}):
+            return win_backend._download_parallel(
+                "https://update.code.visualstudio.com/latest/win32-x64-user/stable",
+                self.dest, pieces=4)
+
+    def test_pieces_are_reassembled_in_order(self):
+        why = self._run(_RangeRequests(self.payload))
+        self.assertEqual(why, "")
+        self.assertEqual(self.dest.read_bytes(), self.payload)
+        self.assertEqual(list(self.tmp.glob("*.part*")), [], "分片要清干净")
+
+    def test_sha256_is_checked(self):
+        fake = _RangeRequests(self.payload)
+        with mock.patch.dict(sys.modules, {"requests": fake}):
+            why = win_backend._download_parallel(
+                "https://x/latest", self.dest, pieces=4, sha256="0" * 64)
+        self.assertIn("sha256", why)
+        self.assertFalse(self.dest.exists())
+
+    def test_server_without_range_support_gives_up(self):
+        why = self._run(_RangeRequests(self.payload, honor_range=False))
+        self.assertIn("不支持分段", why)
+        self.assertFalse(self.dest.exists())
+
+    def test_one_broken_piece_leaves_nothing_behind(self):
+        why = self._run(_RangeRequests(self.payload, fail_at=0))
+        self.assertIn("500", why)
+        self.assertFalse(self.dest.exists())
+        self.assertEqual(list(self.tmp.glob("*.part*")), [])
+
+    def test_cancel_stops_and_cleans_up(self):
+        with mock.patch.object(win_backend, "is_cancelled", return_value=True):
+            why = self._run(_RangeRequests(self.payload))
+        self.assertEqual(why, "已中断")
+        self.assertFalse(self.dest.exists())
+        self.assertEqual(list(self.tmp.glob("*.part*")), [])
+
+    def test_progress_is_reported(self):
+        seen = []
+        fake = _RangeRequests(self.payload)
+        with mock.patch.dict(sys.modules, {"requests": fake}):
+            win_backend._download_parallel(
+                "https://x/latest", self.dest, lambda d, t, k: seen.append((d, t, k)),
+                pieces=4)
+        self.assertTrue(seen)
+        self.assertEqual(seen[-1][1], len(self.payload))
+        self.assertEqual(seen[-1][2], "vscode")
+
+    def test_tiny_file_is_not_worth_splitting(self):
+        with mock.patch.object(win_backend, "_PARALLEL_MIN_SIZE", 10 << 20):
+            why = self._run(_RangeRequests(self.payload))
+        self.assertIn("不值得分段", why)
+
+
+class VscodeSetupTests(unittest.TestCase):
+    """`_fetch_vscode_setup` 的路由：先 6 路分段，不成退回单连接。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        p = mock.patch.object(win_backend.tempfile, "gettempdir",
+                              return_value=str(self.tmp))
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(mock.patch.object(win_backend, "is_cancelled",
+                                          return_value=False).stop)
+
+    def test_uses_the_api_url_and_sha(self):
+        """API 给了带版本号的真实地址 + sha256，就按它下 —— 下完能验哈希。"""
+        seen = {}
+
+        def fake_parallel(url, dest, on_progress=None, **kw):
+            seen["url"] = url
+            seen["sha"] = kw.get("sha256")
+            Path(dest).write_bytes(b"MZ" + b"\0" * 64)
+            return ""
+
+        with mock.patch.object(win_backend, "_vscode_setup_target",
+                               return_value=("https://cdn/x.exe", "ab" * 32, "")), \
+             mock.patch.object(win_backend, "_download_parallel", fake_parallel):
+            got, why = win_backend._fetch_vscode_setup()
+        self.assertEqual(why, "")
+        self.assertEqual(got.name, "aikaui-VSCodeUserSetup-x64.exe")
+        self.assertEqual(seen["url"], "https://cdn/x.exe")
+        self.assertEqual(seen["sha"], "ab" * 32)
+
+    def test_falls_back_to_one_connection(self):
+        payload = b"MZ" + b"\0" * (51 * 1024 * 1024)
+        sha = __import__("hashlib").sha256(payload).hexdigest()
+        fake = _RangeRequests(payload, api={"url": "https://cdn/x.exe",
+                                            "sha256hash": sha})
+        with mock.patch.dict(sys.modules, {"requests": fake}), \
+             mock.patch.object(win_backend, "_download_parallel",
+                               return_value="服务器不支持分段（HTTP 200）"):
+            got, why = win_backend._fetch_vscode_setup()
+        self.assertEqual(why, "")
+        self.assertEqual(got.read_bytes()[:2], b"MZ")
+
+    def test_single_connection_also_checks_the_hash(self):
+        """退回单连接也不能丢掉校验：拼错一段的文件头照样是 MZ。"""
+        payload = b"MZ" + b"\0" * (51 * 1024 * 1024)
+        fake = _RangeRequests(payload, api={"url": "https://cdn/x.exe",
+                                            "sha256hash": "cd" * 32})
+        with mock.patch.dict(sys.modules, {"requests": fake}), \
+             mock.patch.object(win_backend, "_download_parallel",
+                               return_value="分段失败"):
+            got, why = win_backend._fetch_vscode_setup()
+        self.assertIsNone(got)
+        self.assertIn("sha256", why)
+        self.assertEqual(list(self.tmp.glob("*.part*")), [], "半截文件要清掉")
+
+    def test_cancel_during_parallel_does_not_retry(self):
+        with mock.patch.object(win_backend, "_vscode_setup_target",
+                               return_value=("https://cdn/x.exe", "", "")), \
+             mock.patch.object(win_backend, "_download_parallel",
+                               return_value="已中断"), \
+             mock.patch.object(win_backend, "_fetch_vscode_setup_single") as single:
+            got, why = win_backend._fetch_vscode_setup()
+        single.assert_not_called()          # 用户说停就停，别再偷偷下一遍
+        self.assertIsNone(got)
+        self.assertEqual(why, "已中断")
+
+    def test_no_api_still_downloads(self):
+        payload = b"MZ" + b"\0" * (51 * 1024 * 1024)
+        fake = _RangeRequests(payload)
+        with mock.patch.dict(sys.modules, {"requests": fake}), \
+             mock.patch.object(win_backend, "_vscode_setup_target",
+                               return_value=("", "", "HTTP 503")):
+            got, why = win_backend._fetch_vscode_setup()
+        self.assertEqual(why, "")
+        self.assertTrue(got.is_file())
 
 
 class BrokenAliasTests(unittest.TestCase):
