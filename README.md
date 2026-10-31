@@ -716,9 +716,10 @@ agent_demo/
 │   ├── console_ui.py             128   终端里的进度实现（实现 ui_bridge 那几个钩子，不阻塞、没 tty 也不卡住）
 │   ├── node_setup.py             346   Node 检测 / 选 LTS / 从 npmmirror 下载校验 / 解到 ~/.local/node / 软链命令
 │   ├── claude_setup.py           462   npm install -g --prefix ~/.local（清掉继承的 npm_config_*，显式 --include=optional + --allow-scripts；原生包没下来时单独补装，断网自己重试）
-│   ├── identity.py               561   设备身份、PoW 注册、本地凭证、换设备登录、_ensure_account_code / _ensure_user_id、pending_recovery
+│   ├── identity.py               581   设备身份、PoW 注册、本地凭证、换设备登录、_ensure_account_code / _ensure_user_id、pending_recovery
+│   ├── device_key.py              68   本机密钥：首次注册生成 32 字节随机数，存在比 identity.json 深的地方，**只随注册请求**发给服务器（服务器只存 sha256，用来认出"这台机器来过"）
 │   ├── fingerprint.py            186   设备指纹：按来源优先取（board+cpu / MachineGuid / IOPlatformUUID / machine-id+dmi / device_id）→ SHA-256 前 32 位（不是凭据，注册时上报，服务器按它还回旧账号）
-│   ├── vault.py                  213   凭证的"第二份"：账户码存注册表（DPAPI 加密）/ 配置目录
+│   ├── vault.py                  268   凭证的"第二份"：账户码存注册表（DPAPI 加密）/ 配置目录；本机密钥也存在这里，但是另一个槽位
 │   ├── pow.py                    128   PoW 求解（进度 / 取消 / 90 秒超时），和服务器 pow.js 逐位对齐
 │   ├── api.py                    504   余额 / 用量 / 充值 HTTP 层（永远不抛异常）
 │   ├── claude_config.py          495   把身份写进两份配置 + 事后对账自愈（坏文件不覆盖、外家中转不碰）
@@ -873,6 +874,7 @@ from server.api import refresh_balance as fetch_balance   # 查完返回 dict，
 |---|---|
 | `~/.claude-agent/identity.json` | 本机凭证：`device_id`、`api_key`、`account_key`、`api_base`、`model`、`fast_model`、`user_id`、`account_code`、`balance`、`fingerprint`（取到时），以及最近一笔充值订单 `last_order`。POSIX 上权限是 `0600` |
 | `HKCU\Software\aikaui\ClaudeCodeAssistant` | **凭证的第二份**（只有 `account_code` / `account_key` / `user_id`），值用 DPAPI 加密 —— 只有同一个 Windows 用户、同一台机器解得开。macOS 在 `~/Library/Application Support/aikaui/credential.json`，Linux 在 `~/.config/aikaui/credential.json`（都 `0600`） |
+| 同一个注册表键下的值 `m` / 凭证目录里的 `.state` | **本机密钥**（`server/device_key.py`），和上面那份分开存：`vault.clear()` 不会动它。它**不进** `identity.json`、不进界面、不进日志，只在注册请求里发一次 |
 | `~/.claude.json` | Claude Code 的配置，`set_model_config` 往它的 `env` 里写中转地址、token 和各档位模型映射 |
 | `~/.claude/settings.json` | Claude Code 的用户级设置，`set_model_config` 会把同一套 `env` 也写进去（优先级更高），并把 `model` 钉成 flash，其它键原样保留 |
 
@@ -926,6 +928,9 @@ from server.api import refresh_balance as fetch_balance   # 查完返回 dict，
    撞号或泄露的风险只能靠"不交主人凭证"来兜底。所以保险箱里的密钥客户端自己续上，
    `identity.py` 里专门处理了"恢复时别拿空值冲掉旧密钥"。
 
+   2026-11-01 起这条路前面还多加了一道**本机密钥**（见「本机密钥」一节）：它比指纹强，
+   命中时优先按它恢复 —— 删掉 `~/.claude-agent` 删不掉它，所以"清配置刷号"这一步就断了。
+
 ### 换设备登录要两样
 
 服务端 `POST /api/bind-account` 要 `{account_code, account_key, device_id}`：
@@ -978,6 +983,30 @@ CPU 是常量（CPUID 特性位 + 型号签名，不是序列号）；不少 OEM
 > 指纹齐全了再翻成 `1` 硬拒。
 
 真正能证明"这账号是我的"的，只有账户码 + 账户密钥。
+
+### 本机密钥（device key）是什么、不是什么
+
+指纹能挡住"清配置刷号"，但它有个弱点：**不保密**，本机随便一个程序都读得到，改一改还能
+伪造。所以 2026-11-01 加了一串客户端自己生成的密钥：
+
+- **是什么**：第一次注册时生成的 32 字节随机数（64 位 hex，`server/device_key.py`）。
+  它**只随 `/api/auto-register` 发一次**，和 `device_id` 一起上去；服务器只存 `SHA-256`
+  （`cc_accounts.device_key_hash` + `device_id`），日志里连哈希都只打前 8 位。
+- **存在哪**：比 `identity.json` 深一层 —— Windows 是 `HKCU\Software\aikaui\ClaudeCodeAssistant`
+  下的另一个值（值名 `m`，DPAPI 加密），macOS / Linux 是凭证目录里一个 `0600` 的 `.state`。
+  **不在** `identity.json` 里、不进界面、不进日志、不进任何给模型看的文本。
+  删掉 `~/.claude-agent` 不会把它一起删掉；`vault.clear()`（换账号）也不动它。
+- **服务器怎么用**：拿到 `SHA-256(device_key)` 先查有没有账号 ——
+  **命中就还回原账号**（和指纹恢复同一个响应形状，只给 `api_key` + `account_code`），
+  优先级**高于**指纹（密钥比指纹强）。没命中再看指纹，都没命中才建新号。
+  闸门和指纹一样在「挑战校验 + PoW + 消费挑战」之后，不然就成了不花算力就能枚举
+  "这台机器有没有账号"的入口。
+- **它不是凭据**：客户端自己能生成，就能被重置（删注册表值 / `.state`，或客服帮忙清）。
+  它抬高的是刷号成本，不是不可伪造的证明。所以命中后**依旧不发 `account_key`**。
+
+服务端开关 `DEVICE_KEY_REQUIRED` 默认 `0`（1.5.6 及更老的客户端不认这个字段，硬拒会让它们
+一装就注册不了），等 1.5.7 铺开、日志里确认密钥齐全之后再翻成 `1`。注册风控白名单
+（`cc_settings.ip_whitelist`）同样跳过这个开关。
 
 ## 服务端接口
 

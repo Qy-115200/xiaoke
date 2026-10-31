@@ -20,6 +20,12 @@ identity.json 只有一份，用户重装客户端、清理工具、手滑删掉
 ★ 这个文件/注册表值是**秘密**。任何时候都不要打印它、不要拼进日志、
   不要塞进给模型看的工具结果。读出来只做两件事：发给服务器、填进界面。
 
+★ 本机密钥（server/device_key.py 那串）也存在这里，但走**另一个槽位**：
+  Windows 同一个注册表键下的另一个值 `m`，其它平台是凭证文件旁边的 `.state`
+  （同样 0600）。分开存是刻意的 —— `clear()` 是"换账号 / 忘掉这台机器"时调的，
+  清账户码不该顺手把"这台机器以前来过没有"一起忘掉，那正是防刷号用的东西。
+  要彻底重置用 `clear_device_key()`。
+
 ★ 所有的失败都只是"这次没存上"，绝不抛异常。存不下凭证不该影响注册本身。
 """
 
@@ -31,6 +37,10 @@ from pathlib import Path
 # Windows 注册表位置。HKCU 是当前用户，不需要管理员权限，也不会影响别的用户。
 _REG_PATH = r"Software\aikaui\ClaudeCodeAssistant"
 _REG_VALUE = "cred"
+# 本机密钥（device key）的槽位。值名故意起得没意义：它不该被谁顺手抄走。
+_REG_DEVICE_VALUE = "m"
+# 文件后端下本机密钥的文件名（和 credential.json 放在同一个目录）。
+_DEVICE_FILE_NAME = ".state"
 
 # 存进去的是一个 dict：{"account_code": …, "account_key": …, "user_id": …}
 # 我们只关心 account_code，其它字段是给客服排查用的。
@@ -79,7 +89,7 @@ def _decrypt(blob: bytes):
 
 # ================= Windows：注册表 =================
 
-def _registry_read():
+def _registry_read(name=_REG_VALUE):
     try:
         import winreg
     except Exception:
@@ -87,7 +97,7 @@ def _registry_read():
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_PATH, 0,
                             winreg.KEY_READ) as key:
-            blob, kind = winreg.QueryValueEx(key, _REG_VALUE)
+            blob, kind = winreg.QueryValueEx(key, name)
     except Exception:
         return None
     if kind != winreg.REG_BINARY or not isinstance(blob, bytes):
@@ -95,24 +105,24 @@ def _registry_read():
     return _decrypt(blob)
 
 
-def _registry_write(raw: bytes) -> bool:
+def _registry_write(raw: bytes, name=_REG_VALUE) -> bool:
     try:
         import winreg
         blob, _protected = _encrypt(raw)
         with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _REG_PATH, 0,
                                 winreg.KEY_WRITE) as key:
-            winreg.SetValueEx(key, _REG_VALUE, 0, winreg.REG_BINARY, blob)
+            winreg.SetValueEx(key, name, 0, winreg.REG_BINARY, blob)
         return True
     except Exception:
         return False
 
 
-def _registry_clear() -> bool:
+def _registry_clear(name=_REG_VALUE) -> bool:
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_PATH, 0,
                             winreg.KEY_WRITE) as key:
-            winreg.DeleteValue(key, _REG_VALUE)
+            winreg.DeleteValue(key, name)
         return True
     except Exception:
         return False
@@ -129,17 +139,18 @@ def _file_path() -> Path:
     return Path(base) / "aikaui" / "credential.json"
 
 
-def _file_read():
+def _file_read(path: Path = None):
+    path = path or _file_path()
     try:
-        raw = _file_path().read_bytes()
+        raw = path.read_bytes()
     except Exception:
         return None
     return _decrypt(raw) if raw.startswith(b"aikv1:") else raw
 
 
-def _file_write(raw: bytes) -> bool:
+def _file_write(raw: bytes, path: Path = None) -> bool:
     try:
-        path = _file_path()
+        path = path or _file_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         blob, _protected = _encrypt(raw)
         tmp = path.with_name(path.name + ".tmp")
@@ -154,12 +165,17 @@ def _file_write(raw: bytes) -> bool:
         return False
 
 
-def _file_clear() -> bool:
+def _file_clear(path: Path = None) -> bool:
     try:
-        _file_path().unlink()
+        (path or _file_path()).unlink()
         return True
     except Exception:
         return False
+
+
+def _device_path() -> Path:
+    """本机密钥落在**凭证文件旁边**（不是凭证文件里面，见文件头）。"""
+    return _file_path().with_name(_DEVICE_FILE_NAME)
 
 
 # ================= 对外接口 =================
@@ -209,5 +225,44 @@ def load():
 
 
 def clear() -> bool:
-    """换账号 / 用户明确要求"忘掉这台机器"时清掉。"""
+    """换账号 / 用户明确要求"忘掉这台机器"时清掉。
+
+    ★ **不动**本机密钥（clear_device_key 才动）：清账户码是换账号，不是换机器。
+      那串密钥正是"这台机器以前来过没有"的凭据，留着才能挡住删配置刷号。"""
     return _registry_clear() if _use_registry() else _file_clear()
+
+
+# ================= 本机密钥（device key）=================
+# 只放存储；生成和"只发给注册"的规矩在 server/device_key.py。
+# 这里和其它凭证一样：失败只是没存上，绝不抛异常。
+
+def save_device_key(value) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    raw = text.encode("utf-8")
+    if _use_registry():
+        return _registry_write(raw, _REG_DEVICE_VALUE)
+    return _file_write(raw, _device_path())
+
+
+def load_device_key():
+    """读回本机密钥；没有 / 解不开 → None。"""
+    if _use_registry():
+        raw = _registry_read(_REG_DEVICE_VALUE)
+    else:
+        raw = _file_read(_device_path())
+    if not raw:
+        return None
+    try:
+        text = raw.decode("utf-8").strip()
+    except Exception:
+        return None
+    return text or None
+
+
+def clear_device_key() -> bool:
+    """彻底重置这台机器的身份（客服排查 / 用户要求"当作新机器"）。"""
+    if _use_registry():
+        return _registry_clear(_REG_DEVICE_VALUE)
+    return _file_clear(_device_path())

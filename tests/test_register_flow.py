@@ -34,6 +34,7 @@ sys.path.insert(0, str(ROOT))
 
 from server import fingerprint as fplib                # noqa: E402
 from server import pow as powlib                       # noqa: E402
+from server import device_key                          # noqa: E402
 from server import identity                            # noqa: E402
 from server import vault                               # noqa: E402
 
@@ -48,6 +49,8 @@ class _State:
         self.bodies = []         # 收到的 POST 正文（看客户端发了什么字段）
         self.reject_fingerprint = False   # 模拟"服务端不认识 fingerprint 字段"
         self.require_fingerprint = False  # 模拟"服务端要求必须带指纹"
+        self.reject_device_key = False    # 模拟老服务端不认识 device_key 字段
+        self.require_device_key = False   # 模拟"服务端要求必须带本机密钥"
         self.recovered = False            # 模拟"按指纹认出了旧账号"
         self.good_key = "k" * 64          # bind-account 认的账户密钥
         self.key_required = True          # 模拟新账号：必须给密钥
@@ -102,6 +105,11 @@ def _make_handler(state: _State):
             # 模拟新服务端：缺失指纹直接拒（客户端应当如实报错，不是丢掉再试）
             if state.require_fingerprint and not body.get("fingerprint"):
                 return self._send(400, {"error": "fingerprint_required"})
+            # 同上：老服务端不认识本机密钥 / 新服务端要求必须带
+            if state.reject_device_key and "device_key" in body:
+                return self._send(400, {"error": "unexpected_field"})
+            if state.require_device_key and not body.get("device_key"):
+                return self._send(400, {"error": "device_key_required"})
             challenge = body.get("challenge") or ""
             nonce = body.get("nonce")
             with state.lock:
@@ -285,6 +293,53 @@ class RegisterFlowTests(_FakeServerCase):
         self.assertIn("fingerprint", self.state.bodies[0])
         self.assertNotIn("fingerprint", self.state.bodies[-1])
         self.assertTrue(identity.IDENTITY_FILE.exists())
+
+    # ---------- 本机密钥（device key） ----------
+
+    def test_device_key_is_sent_with_register(self):
+        # 注册时本机密钥和 device_id 一起发：服务器靠这一对认出"这台机器来过"，
+        # 删掉 identity.json 再注册就把原账号还回来，而不是再开一个新号。
+        identity.register_device()
+        body = self.state.bodies[-1]
+        key = body.get("device_key")
+        self.assertRegex(key, r"^[0-9a-f]{64}$")
+        self.assertEqual(body.get("device_id"), identity._device_id())
+        # 落盘了：下一次注册（换了新挑战）还得用同一串
+        self.assertEqual(device_key.get(), key)
+
+    def test_device_key_never_reaches_the_identity_file(self):
+        identity.register_device()
+        saved = identity.IDENTITY_FILE.read_text(encoding="utf-8")
+        self.assertNotIn("device_key", saved)
+        self.assertNotIn(device_key.get(), saved)
+
+    def test_device_key_is_not_sent_to_bind_account(self):
+        identity.register_device()
+        identity.bind_account("CC-AAAAAA-BBBBBB", "k" * 64)
+        # 注册请求（没有 account_key），换设备登录请求（有 account_key）
+        reg_bodies = [b for b in self.state.bodies if "account_key" not in b]
+        bind_body = [b for b in self.state.bodies if "account_key" in b][-1]
+        self.assertTrue(any("device_key" in b for b in reg_bodies))
+        self.assertNotIn("device_key", bind_body, "本机密钥只允许发给注册接口")
+
+    def test_device_key_required_is_reported_not_retried(self):
+        self.state.require_device_key = True
+        with mock.patch.object(device_key, "get_or_create", return_value=""):
+            result = identity.register_device()
+        self.assertFalse(result.startswith("{"), result)
+        self.assertEqual(len(self.state.bodies), 1, "服务器要求本机密钥时重试没有意义")
+        self.assertIn("新版", result)
+
+    def test_unknown_device_key_field_is_dropped_and_retried(self):
+        # 老服务端不认识 device_key：先摘掉它再试，**指纹别一起丢**
+        self.state.reject_device_key = True
+        result = identity.register_device()
+        self.assertTrue(result.startswith("{"), result)
+        self.assertIn("device_key", self.state.bodies[0])
+        last = self.state.bodies[-1]
+        self.assertNotIn("device_key", last)
+        self.assertNotIn("device_id", last)
+        self.assertIn("fingerprint", last)
 
     # ---------- 保险箱 / 自动恢复 ----------
 

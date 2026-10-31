@@ -14,6 +14,9 @@
 ★ device_id 和 server/fingerprint.py 那个硬件指纹都不是凭据（见那两处的说明）。
   能证明"这个账号是我的"的是账户码 + 账户密钥：码用来找到账号，密钥用来证明
   手里有注册时下发的那串随机数（服务端只存它的 sha256）。
+★ 注册时还会带上 server/device_key.py 那串**本机密钥**（和 device_id 一起）：
+  它只用来让服务器认出"这台机器来过"——删掉 identity.json 再注册时把原账号
+  还回来，而不是再开一个新号。它同样不是凭据，也**只发给注册**这一个接口。
 
 ★ 注册**不是幂等的**（2026-10 新契约）：/api/issue-token 已经恒返回 410，
   现在"注册"= 用 PoW 换一个新账号。所以 **只要有本地凭证就绝不再注册**，
@@ -42,6 +45,7 @@ import platform
 import uuid
 
 from config import AGENT_KEY, IDENTITY_FILE, POW_MAX_ATTEMPTS, SERVER_URL
+from server import device_key
 from server import fingerprint as fplib
 from server import pow as powlib
 from server import vault
@@ -139,6 +143,7 @@ _ERROR_TEXT = {
     "gone": "服务器接口已经升级，这个版本的客户端太旧了，请到 aikaui.com 下载新版。",
     "fingerprint_required": "服务器要求注册时带上设备指纹，这个客户端太旧了，请到 aikaui.com 下载新版。",
     "fingerprint_invalid": "服务器没认出来这台机器的设备指纹，请到 aikaui.com 下载新版再试。",
+    "device_key_required": "服务器要求注册时带上本机密钥，这个客户端太旧了，请到 aikaui.com 下载新版。",
 }
 
 
@@ -197,7 +202,14 @@ def _register_new_account():
     fp_info = fplib.get_device_fingerprint_info()
     fp = fp_info.get("fingerprint") or ""
     fp_src = fp_info.get("source") or ""
-    send_fp = bool(fp)
+    # 本机密钥：**只在注册这一下发**（理由见 server/device_key.py）。存不下就拿空串，
+    # 注册照常走 —— 服务器那边的开关默认关，缺这个字段不算错。
+    try:
+        dev_key = device_key.get_or_create()
+    except Exception:
+        dev_key = ""
+    dev_id = get_device_id() if dev_key else ""
+    send_key = bool(dev_key)
     for attempt in range(1, POW_MAX_ATTEMPTS + 1):
         data, err, code, wait = _post_json("/api/challenge")
         if not data:
@@ -219,10 +231,15 @@ def _register_new_account():
             continue
 
         body = {"challenge": challenge, "nonce": nonce}
-        if send_fp:
+        if fp:
             body["fingerprint"] = fp
             if fp_src:
                 body["fingerprint_src"] = fp_src   # 只进日志，方便排查"撞指纹"
+        if send_key:
+            # 本机密钥 + device_id 一起发，服务器拿它认"这台机器来过"（双验证）。
+            # ★ 这两样只出现在注册请求里，别的接口一律不带。
+            body["device_key"] = dev_key
+            body["device_id"] = dev_id
         reg, err, code, wait = _post_json("/api/auto-register", body, method="POST")
         if reg:
             if not reg.get("api_key"):
@@ -234,17 +251,20 @@ def _register_new_account():
 
         last = (None, err, code, wait)
 
-        # ★ 「服务器要求指纹」不是"字段不被接受"，把指纹丢掉再试只会失败得更难看。
-        #   这两个码在 _ERROR_TEXT 里，本来就到不了下面的丢弃分支；这里显式写一句，
-        #   免得以后有人把话术删了又把它带回来。
-        if code in ("fingerprint_required", "fingerprint_invalid"):
+        # ★ 「服务器要求指纹 / 本机密钥」不是"字段不被接受"，把字段丢掉再试只会
+        #   失败得更难看。这几个码在 _ERROR_TEXT 里，本来就到不了下面的丢弃分支；
+        #   这里显式写一句，免得以后有人把话术删了又把它带回来。
+        if code in ("fingerprint_required", "fingerprint_invalid", "device_key_required"):
             return last
 
-        # ★ 服务端还是老版本、不认识 fingerprint 这个字段时，可能整条请求被 400 掉。
-        #   认不出的错误码先按"可能是字段不被接受"处理：去掉它再试一次。
-        #   下一轮如果还失败，就原样把错误带回去（不再无限重试）。
-        if send_fp and code not in _RETRYABLE and code not in _ERROR_TEXT:
-            send_fp = False
+        # ★ 服务端还是老版本、不认识这些字段时，可能整条请求被 400 掉。
+        #   认不出的错误码先按"可能是字段不被接受"处理：先摘掉本机密钥再试一次，
+        #   还不认再摘掉指纹。下一轮如果还失败，就原样把错误带回去（不无限重试）。
+        if (send_key or fp) and code not in _RETRYABLE and code not in _ERROR_TEXT:
+            if send_key:
+                send_key = False
+            else:
+                fp = ""
             continue
 
         if code not in _RETRYABLE:
