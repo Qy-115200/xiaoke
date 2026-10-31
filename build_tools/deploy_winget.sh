@@ -21,6 +21,14 @@
 #   DEPLOY_HOST=… ./build_tools/deploy_winget.sh ./build/winget_assets/AppInstaller_x64.msix 1.11.430
 #
 #   DRY_RUN=1  只算 sha256 / 大小，不上传
+#
+# ★ 顺带把两个**依赖框架包**一起传（2026-10-31 加）：
+#   App Installer 依赖 Microsoft.UI.Xaml.2.8 和 Microsoft.VCLibs.140.00.UWPDesktop，
+#   少了它们 Add-AppxPackage 只回一个干巴巴的 `1`。客户端
+#   platform_support/windows.py 的 WINGET_DEPS 从
+#   releases/winget/<版本>/deps/<同名文件> 下它们，所以这两个也得在这儿。
+#   本地放哪：DEPLOY_DEPS_DIR（默认 <脚本目录>/../build/winget_deps）；
+#   里面没有就跳过（老机器上没解过 Dependencies.zip 时还能只发主包），并提醒一句。
 set -euo pipefail
 
 die() { echo "✖ $*" >&2; exit 1; }
@@ -50,10 +58,33 @@ SHA="$("$PY" -c 'import hashlib,sys; h=hashlib.sha256(); f=open(sys.argv[1],"rb"
 [h.update(b) for b in iter(lambda: f.read(1<<20), b"")]; print(h.hexdigest())' "$SRC")"
 echo "▶ $NAME  $SIZE 字节  sha256 $SHA"
 
+# ---------- 依赖框架包 ----------
+# 名字 / 大小 / sha256 必须和 platform_support/windows.py 的 WINGET_DEPS 一模一样，
+# 客户端的 _download 会逐字节校验，对不上就不装。
+DEPS_DIR="${DEPLOY_DEPS_DIR:-$(cd "$(dirname "$0")/.." && pwd)/build/winget_deps}"
+DEP_NAMES=(
+  "Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx"
+  "Microsoft.UI.Xaml.2.8_8.2310.30001.0_x64.appx"
+)
+DEPS=()
+for n in "${DEP_NAMES[@]}"; do
+  if [ -f "$DEPS_DIR/$n" ]; then
+    DEPS+=("$DEPS_DIR/$n")
+  else
+    echo "⚠ 没找到依赖包 $DEPS_DIR/$n —— 跳过它（客户端会退到只装主包）" >&2
+  fi
+done
+for d in "${DEPS[@]}"; do
+  echo "▶ $(basename "$d")  $("$PY" -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$d") 字节"
+done
+
 if [ "$DRY_RUN" = "1" ]; then
   echo "▶ DRY_RUN=1：会执行"
   echo "   ssh $USER_NAME@$HOST mkdir -p $TARGET && scp $SRC → $TARGET/"
   echo "   ssh … coscmd upload -y $NAME $COS_PREFIX/$NAME"
+  for d in "${DEPS[@]}"; do
+    echo "   scp $(basename "$d") → $TARGET/deps/ && coscmd upload → $COS_PREFIX/deps/"
+  done
   echo "▶ 记得把 platform_support/windows.py 里的 WINGET_VERSION / WINGET_MSIX_SIZE /"
   echo "  WINGET_MSIX_SHA256 改成上面这三个值（现在写的是另一份，客户端会校验不过）"
   exit 0
@@ -68,25 +99,49 @@ echo "▶ 传到 nginx（$TARGET/）"
 scp -q "${SSH_OPTS[@]}" "$SRC" "$USER_NAME@$HOST:$TARGET/$NAME"
 "${SSH[@]}" "chmod 644 '$TARGET/$NAME'"
 
+DEPS_TARGET="$TARGET/deps"
+if [ "${#DEPS[@]}" -gt 0 ]; then
+  echo "▶ 依赖包传到 nginx（$DEPS_TARGET/）"
+  "${SSH[@]}" "mkdir -p '$DEPS_TARGET'"
+  for d in "${DEPS[@]}"; do
+    scp -q "${SSH_OPTS[@]}" "$d" "$USER_NAME@$HOST:$DEPS_TARGET/$(basename "$d")"
+    "${SSH[@]}" "chmod 644 '$DEPS_TARGET/$(basename "$d")'"
+  done
+fi
+
 echo "▶ 上传到 COS（$COS_PREFIX/，dl.aikaui.com 的源）"
 "${SSH[@]}" "command -v coscmd >/dev/null 2>&1" \
   || die "服务器上没有 coscmd"
 "${SSH[@]}" "set -euo pipefail; cd '$TARGET'; coscmd upload -y '$NAME' '$COS_PREFIX/$NAME'"
+if [ "${#DEPS[@]}" -gt 0 ]; then
+  for d in "${DEPS[@]}"; do
+    n="$(basename "$d")"
+    "${SSH[@]}" "set -euo pipefail; cd '$DEPS_TARGET'; coscmd upload -y '$n' '$COS_PREFIX/deps/$n'"
+  done
+fi
 
 echo "▶ 两边都验一遍（大小必须和本地一致）"
 check() {
-  local url="$1" label="$2" got=""
+  local url="$1" label="$2" want="$3" got=""
   for _ in 1 2 3 4 5; do          # CDN 首次回源可能要几秒
     got="$(curl -fsSI --max-time 60 "$url" 2>/dev/null | tr -d '\r' \
            | awk 'tolower($1) == "content-length:" { v = $2 } END { print v }')"
-    [ "$got" = "$SIZE" ] && { echo "  ✔ $label  $got 字节"; return 0; }
+    [ "$got" = "$want" ] && { echo "  ✔ $label  $got 字节"; return 0; }
     sleep 3
   done
-  echo "  ✖ $label 期望 $SIZE 字节，拿到 '${got:-取不到}'（$url）" >&2
+  echo "  ✖ $label 期望 $want 字节，拿到 '${got:-取不到}'（$url）" >&2
   return 1
 }
-check "$SITE_BASE/releases/winget/$VERSION/$NAME" "aikaui.com" || die "nginx 上取不到"
-check "$CDN_BASE/releases/winget/$VERSION/$NAME" "dl.aikaui.com" || die "CDN 上取不到"
+check "$SITE_BASE/releases/winget/$VERSION/$NAME" "aikaui.com" "$SIZE" || die "nginx 上取不到"
+check "$CDN_BASE/releases/winget/$VERSION/$NAME" "dl.aikaui.com" "$SIZE" || die "CDN 上取不到"
+for d in "${DEPS[@]}"; do
+  n="$(basename "$d")"
+  want="$("$PY" -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$d")"
+  check "$SITE_BASE/releases/winget/$VERSION/deps/$n" "aikaui.com/deps/$n" "$want" \
+    || die "依赖包在 nginx 上取不到：$n"
+  check "$CDN_BASE/releases/winget/$VERSION/deps/$n" "dl.aikaui.com/deps/$n" "$want" \
+    || die "依赖包在 CDN 上取不到：$n"
+done
 
 echo "✔ 上线了。把 platform_support/windows.py 里的三个常量改成："
 echo "    WINGET_VERSION = \"$VERSION\""
