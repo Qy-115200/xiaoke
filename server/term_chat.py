@@ -28,7 +28,7 @@ from server.console_ui import ConsoleUI
 from server.term_keys import KeyDecoder
 
 BUSY_LABEL = "正在处理"
-ABORT_ARMED = "再按一次 Ctrl-C 中断（已经开始的下载/安装在后台会继续跑完）"
+ABORT_ARMED = "再按一次 Ctrl-C 中断（正在下的包会停下；已经装了一半的不会回滚）"
 ABORTED = "已中断。"
 
 
@@ -549,6 +549,12 @@ class TerminalChat:
         elif kind == "arm_abort":
             self._commit(R.dim_line(ABORT_ARMED, self._size()[0]))
         elif kind == "abort":
+            # 连按两次 Ctrl-C：立牌子 + 掐掉正在跑的子进程，再退出。
+            # 牌子让 worker 里的下载 / 安装知道该停了，子进程被杀才会真的返回。
+            from agent_bus import request_cancel
+            from platform_support.common import kill_active_children
+            request_cancel()
+            kill_active_children()
             self._deliver("（用户中断）")
             self._wake_worker()
             self._done = Outcome(aborted=True)

@@ -46,8 +46,10 @@ def poll_queue(gui):
             elif kind == "busy":
                 if data:                 # 忙碌
                     gui.start_btn.configure(state=tk.DISABLED, text="处理中...")
+                    gui.stop_btn.configure(state=tk.NORMAL, text="中断")
                 else:                    # 空闲
                     gui.start_btn.configure(state=tk.NORMAL, text="一键安装 Claude Code")
+                    gui.stop_btn.configure(state=tk.DISABLED, text="中断")
             elif kind == "recharge":
                 # 服务器说余额不足（代理层把上游的额度 403 归一成 402）
                 # → **不**直接弹充值窗，只在底部问一句

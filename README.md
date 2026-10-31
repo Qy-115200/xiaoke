@@ -15,6 +15,21 @@ Agent —— 它会自己检测环境、装 Node、装 Claude Code、写好配�
 最后**二选一**收尾：装好 Claude 的 VSCode 插件并用 VSCode 打开（默认），或者开一个新终端。
 中途每一步都会用大白话跟你解释一句，要装东西之前会先问过你。
 
+**装到一半不耐烦了可以点「中断」**（2026-10-31 加）
+
+装 winget 要下 58MB、走官方安装包那条路要下 240MB，几分钟很正常。输入框右边有一个
+「中断」按钮，平时是灰的，Agent 一开工就亮起来。点了会同时做三件事：
+
+1. 立一块「中断」牌子（`agent_bus.cancel_event`）—— Agent 循环每走一步、每个下载循环
+   每 1MB 都会看一眼，看见就停；
+2. 掐掉正在跑的子进程（`kill_active_children()`，Windows 上 `taskkill /F /T`），
+   不然 winget / powershell / 安装包能自顾自跑几分钟，按钮就成了摆设；
+3. 如果 Agent 正卡在问你问题那一步，把等待叫醒，别让线程一直挂着。
+
+**已经装到一半的东西不会回滚**，点完的提示里也这么写。下一轮任务开工时牌子会自动摘掉
+（`agent_worker` / 服务器版每轮调 `clear_cancel()`）。服务器版对应的是**连按两次 Ctrl-C**
+（第一次只是「上膛」），同一个牌子、同一套收尾。
+
 **先定工作目录，再启动**
 
 Claude Code 只看得到你给它的**一个**文件夹。所以启动之前 Agent 必须先问清楚"以后在哪个
@@ -49,6 +64,15 @@ Windows 10/11 的家庭版精简镜像、老 LTSC、服务器版都可能不带 
   `platform_support/windows.py` 里）。**不走 GitHub**：2026-10-30 实测国内直连
   `objects.githubusercontent.com` 是 0 字节，而 winget 的 msixbundle 有 200MB+。
   这里只取 bundle 里 x64 的那一份，内容与微软发布的完全一致，没有做任何改动。
+- 先装**依赖框架包**再装主包（2026-10-31 加）：App Installer 依赖
+  `Microsoft.UI.Xaml.2.8` 和 `Microsoft.VCLibs.140.00.UWPDesktop`，微软把它们单独放在
+  `DesktopAppInstaller_Dependencies.zip` 里。漏了这一步，`Add-AppxPackage` 只回一个
+  干巴巴的 `返回 1`（2026-10-30 用户日志里就是「Add-AppxPackage 返回 1： and」）。
+  两个包（6.7MB + 5.1MB，sha256 钉在 `WINGET_DEPS` 里）下到
+  `%TEMP%\aikaui-winget-deps\`，大小和 sha256 都对得上就复用、不再走网络。
+  依赖装不上不直接放弃（机器上可能本来就有），主包照样试；两个都失败才报两句。
+  `Add-AppxPackage` 的 `0x80073D06 / 0x80073CFB / 0x80073D02`（更高版本已装 / 同版本
+  已装 / 资源包已注册）都算成功 —— 重装依赖时天天撞见，不认它就是误报。
 - 先 `Add-AppxPackage`（用户级、不弹 UAC、不改系统策略）；装不上（老系统 / 没有商店 /
   组策略禁了 AppX）就**解压即用**：把 msix 里的 `winget.exe` 解到
   `%LOCALAPPDATA%\aikaui\winget\<版本>\`，下次直接用它，不再下载。
@@ -64,6 +88,9 @@ Windows 10/11 的家庭版精简镜像、老 LTSC、服务器版都可能不带 
    `winget source update`，不行再 `source reset --force` + `update`，然后重试一次。
    超时之类的失败不重试 —— 那等于把上限翻倍。
 2. 没有 winget 就先 `ensure_winget()` 装上（上面那 58MB），再走第 1 条。
+   **但如果装出来的只是便携版，就不走第 1 条了**（2026-10-31）：便携版没注册成 AppX
+   包，源索引永远打不开，`winget install` 必然还是 `0x8A15004B` —— 白跑一趟。
+   直接跳第 3 条。
 3. **都不通就绕开 winget**：直接下微软官方的用户级安装包
    （`update.code.visualstudio.com/latest/win32-x64-user/stable`，约 240MB），
    `/VERYSILENT /MERGETASKS=!runcode` 静默装，退出码 3010（要求重启）也算成功。
@@ -618,7 +645,7 @@ agent_demo/
 ├── platform_support/                  三平台差异（调用方只 import 这个包）
 │   ├── __init__.py               160   按 sys.platform 延迟加载并转发
 │   ├── common.py                 230   safe_cwd（HOME 越界检查）、find_claude、clean_env、跑子进程抓输出、VSCode 值解析
-│   ├── windows.py                671   注册表协议 / .lnk / cmd / WinRT toast / VSCode 探测 + winget 安装（含"没 winget 就装一个"）
+│   ├── windows.py               1040   注册表协议 / .lnk / cmd / WinRT toast / VSCode 探测 + winget 安装（含"没 winget 就装一个"）
 │   ├── macos.py                  425   Info.plist 协议 + Apple Event / .command 快捷方式 / Terminal.app / VSCode 探测 + brew 安装
 │   └── linux.py                  314   .desktop + xdg-mime / 终端探测 / notify-send / VSCode 探测（安装只开下载页）
 │
@@ -644,7 +671,7 @@ agent_demo/
 ├── ui/                                界面层
 │   ├── fonts.py                  179   全界面字体表：按平台选字体 + 字号常量 + 画布缩放
 │   ├── gui.py                     31   class GUI(WindowMixin, OptionsMixin, RechargeMixin, UsageMixin, LoginMixin, AccountMixin, GateMixin)
-│   ├── window.py                 513   WindowMixin：窗口壳、左侧导航、对话页、底部询问条、余额回流
+│   ├── window.py                 551   WindowMixin：窗口壳、左侧导航、对话页、底部询问条、余额回流
 │   ├── usage.py                  625   UsageMixin：用量信息页（余额卡 + 两张按模型的时间分布图 + 充值入口）
 │   ├── account.py                272   AccountMixin：账户信息页（账户码 / 密钥打码、眼睛、复制、防泄露红字）
 │   ├── options.py                219   OptionsMixin：ask_user 选项面板（点击 / ↑↓ / 回车 / Esc）
@@ -671,7 +698,8 @@ agent_demo/
 │   ├── test_platform_support.py       三平台抽象层
 │   ├── test_prompts.py                提示词按平台切换 + VSCode 询问分支的关键句
 │   ├── test_vscode.py                 VSCode 探测 / 安装 / 打开（三平台，全程打桩）
-│   ├── test_winget.py                 没 winget 时自动装：sha256 校验、AppX 失败退便携版、临时包删干净
+│   ├── test_winget.py                 没 winget 时自动装：sha256 校验、依赖包先装、便携版跳过、临时包删干净
+│   ├── test_cancel.py                 「中断」：牌子语义、子进程登记/清理、下载到一半能停
 │   ├── test_tools_vscode.py           四个 VSCode 工具的返回值、失败归类、Claude 面板什么时候发链接
 │   ├── test_agent_core.py             install_done 什么时候触发（自动退出的判定）
 │   ├── test_tool_specs.py             tools[] 和 tool_map 一一对上
@@ -950,11 +978,22 @@ Windows 上用一次 PowerShell 的 `Get-CimInstance` 读，非 Windows 或取�
   `winget.exe` 能跑（`--version`、`search` 都正常）、分支逻辑全有离线测试。
   没验到的是 `Add-AppxPackage` 那一步真的落到一台没有 App Installer 的机器上 ——
   手上没有这样的机器。装不上也不会卡住：会退到便携版，再不行才打开下载页。
+- **`Add-AppxPackage 返回 1` 那次没抓到原因，现在是按最可能的原因修**（2026-10-31）。
+  用户日志里只剩一句「Add-AppxPackage 返回 1： and」，没有 HRESULT —— 判断是缺
+  `Microsoft.UI.Xaml.2.8` / `Microsoft.VCLibs.140.00.UWPDesktop` 两个框架包，
+  于是加了「先装依赖再装主包」这一步，并且失败时把最后三行错误留下来（以前被截没了，
+  下次能看出到底缺什么）。这台机器装不了 App Installer，**没复现过**。
+- **便携版 winget 装不了东西**（2026-10-31 确认）。它不是 AppX 包，源索引永远打不开，
+  `winget install` 必然 `0x8A15004B`。所以 `install_vscode()` 拿到 `mode == "portable"`
+  就直接跳过 winget，去走官方安装包那条路 —— 以前会白跑一次、白等一个 900 秒的上限。
 - **新装的 winget 源索引是空的**，2026-10-30 用户在真机上撞到 `0x8A15004B`。
   已经加了 `source update` / `source reset --force` 重试和「直接下微软安装包」那条兜底，
   但**没有在这台机器上复现过**（本机的 winget 本来就是装好的、源索引也在）。
   下次再遇到，日志里会多出「已装好 winget（正式安装 / 便携版）」和
   「刷新源索引后再试一次」这些行，能直接看出走到哪一步。
+- **「中断」不回滚。** 点中断只会停下正在跑的东西，装了一半的 winget / VSCode 还在，
+  再跑一次会接着用（`find_winget` / `find_vscode` 都会先探测）。另外被子进程自己
+  `start_new_session` 出去的孙进程（极少数）可能杀不干净，`taskkill /T` 能盖住绝大多数。
 
 - **Linux 发的是服务器版，不是桌面版。** 从发这一版起，`linux-x64` 那个包没有图形界面：
   老的 Linux 桌面用户被自动更新换上之后，双击图标（如果他们手动装过 `.desktop`）

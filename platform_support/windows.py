@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from config import HOME
+from agent_bus import is_cancelled
 from platform_support.common import (
     clean_env,
     download_page_fallback,
@@ -264,6 +265,19 @@ WINGET_BASES = (
 WINGET_DOWNLOAD_TIMEOUT = 900          # 58MB，慢网络给足 15 分钟
 WINGET_INSTALL_TIMEOUT = 300           # Add-AppxPackage 本地部署，通常十几秒
 
+# ★ App Installer 这个 msix 不是"独立能装"的：它依赖两个框架包（UI.Xaml 和
+#   VC++ 运行库）。微软的 msixbundle 旁边附了一个 Dependencies.zip 就是干这个的。
+#   2026-10-30 用户机器上 Add-AppxPackage 直接返回 1，很可能就是缺这两个 ——
+#   所以现在装主包之前先把它们装上（已经有了的话 Add-AppxPackage 会报"已安装"，
+#   当成功处理）。
+# 名字和哈希都钉死；文件是微软原包，从 Dependencies.zip 里原样取的 x64 那两份。
+WINGET_DEPS = (
+    ("Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx", 6757465,
+     "077a3d1a5d0622bd3004dca85f5e192d6e98ec79b83d4aa06766759ea6c09c3d"),
+    ("Microsoft.UI.Xaml.2.8_8.2310.30001.0_x64.appx", 5121145,
+     "249d2afb41cc009494841372bd6dd2df46f87386d535ddf8d9f32c97226d2e46"),
+)
+
 
 def _winget_portable_dir() -> Path:
     """便携版放哪：解压出来的 winget.exe 在这里，下次直接用，不重复下载。"""
@@ -312,16 +326,24 @@ def _sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
-def _download(url: str, dest: Path, on_progress=None) -> str:
+def _download(url: str, dest: Path, on_progress=None, *, size: int = 0,
+              sha256: str = "", kind: str = "winget") -> str:
     """下一份到 dest，边下边算 sha256。成功返回空串，失败返回一句原因。
 
-    ★ 一定要校验：这个包要拿去装进系统，CDN 被劫持、文件被截断都得当场发现。"""
+    size / sha256 给了就校验（包要拿去装进系统，CDN 被劫持、文件被截断都得当场发现）；
+    都不给就用 winget 那个包的值 —— 老调用方是这么用的。
+
+    ★ 每 1MB 看一眼「中断」牌子：下 58MB / 240MB 的时候，用户点了中断得真的停下来，
+      不然按钮就是个摆设。"""
+    size = size or WINGET_MSIX_SIZE
+    sha256 = sha256 or WINGET_MSIX_SHA256
     try:
         import requests
     except Exception as e:                     # 打包里一定有，纯属保险
         return f"没有请求库：{e}"
 
     tmp = dest.with_suffix(dest.suffix + ".part")
+    cancelled = False
     try:
         with requests.get(url, stream=True, timeout=(15, 60)) as r:
             if r.status_code != 200:
@@ -330,26 +352,38 @@ def _download(url: str, dest: Path, on_progress=None) -> str:
             done = 0
             with open(tmp, "wb") as f:
                 for chunk in r.iter_content(1 << 20):
+                    if is_cancelled():
+                        # ★ 只立个标记就跳出：文件还开着的时候 Windows 删不掉
+                        #   它（unlink 悄悄不生效，.part 会留在临时目录里）
+                        cancelled = True
+                        break
                     if not chunk:
                         continue
                     f.write(chunk)
                     done += len(chunk)
                     if on_progress:
                         try:
-                            on_progress(done, total or WINGET_MSIX_SIZE, "winget")
+                            on_progress(done, total or size, kind)
                         except Exception:
                             pass
-            if total and total != WINGET_MSIX_SIZE:
-                return f"文件大小不对（{total} ≠ {WINGET_MSIX_SIZE}）"
+            if cancelled:
+                _unlink_quiet(tmp)
+                return "已中断"
+            if total and total != size:
+                return f"文件大小不对（{total} ≠ {size}）"
     except Exception as e:
-        tmp.unlink(missing_ok=True)
+        _unlink_quiet(tmp)
         return f"{type(e).__name__}：{str(e)[:80]}"
 
     got = _sha256_of(tmp)
-    if got != WINGET_MSIX_SHA256:
-        tmp.unlink(missing_ok=True)
-        return f"校验不过（sha256 {got[:12]}…，期望 {WINGET_MSIX_SHA256[:12]}…）"
-    tmp.replace(dest)
+    if got != sha256:
+        _unlink_quiet(tmp)
+        return f"校验不过（sha256 {got[:12]}…，期望 {sha256[:12]}…）"
+    try:
+        tmp.replace(dest)
+    except OSError as e:
+        _unlink_quiet(tmp)
+        return f"改名失败：{str(e)[:80]}"
     return ""
 
 
@@ -365,13 +399,19 @@ def _fetch_winget_msix(on_progress=None) -> tuple[Path | None, str]:
     return None, last or "下载失败"
 
 
-def _install_appx(msix: Path) -> str:
-    """用 Add-AppxPackage 正式安装（用户级，不提权）。成功返回空串。
+# "这个包本来就在"的一堆 HRESULT —— 依赖包尤其容易撞上，都当成功。
+_ALREADY_THERE = (
+    "0x80073d06",        # 已装了更高版本
+    "0x80073cfb",        # 同版本已经装了（Dependencies 重装时最常见）
+    "0x80073d02",        # 资源包已注册
+)
+_ALREADY_THERE_WORDS = ("newer version", "already installed", "已安装", "已存在")
 
-    ★ 这是微软签名的包，不需要开发者模式；装完 winget.exe 会出现在
-      %LOCALAPPDATA%\\Microsoft\\WindowsApps\\ 下，用户以后自己也能用。"""
+
+def _add_appx_package(path: Path) -> str:
+    """Add-AppxPackage 一个包。成功（含"本来就在"）返回空串，失败返回一句原因。"""
     ps = ("Add-AppxPackage -LiteralPath '"
-          + str(msix).replace("'", "''")
+          + str(path).replace("'", "''")
           + "' -ErrorAction Stop")
     argv = ["powershell", "-NoProfile", "-NonInteractive",
             "-ExecutionPolicy", "Bypass", "-Command", ps]
@@ -385,14 +425,71 @@ def _install_appx(msix: Path) -> str:
         return f"Add-AppxPackage 超过 {WINGET_INSTALL_TIMEOUT} 秒"
 
     text = (err or out or b"").decode("utf-8", "replace").strip()
-    lines = [ln for ln in text.splitlines() if ln.strip()]
-    detail = lines[-1][:160] if lines else ""
-    # 已经装了更高版本：不算失败，走到外面再找一次 winget 就行
-    if "0x80073D06" in text or "newer version" in text.lower():
+    low = text.lower()
+    if any(code in low for code in _ALREADY_THERE) \
+            or any(w in low for w in _ALREADY_THERE_WORDS):
         return ""
     if rc != 0:
+        # ★ 整段错误都留着：2026-10-30 用户那条日志只剩「Add-AppxPackage 返回 1： and」，
+        #   什么都判断不出来。取最后三行，比一行有用得多。
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        detail = " ".join(lines[-3:])[:240]
         return f"Add-AppxPackage 返回 {rc}" + (f"：{detail}" if detail else "")
     return ""
+
+
+def _fetch_winget_deps() -> tuple[list[Path], str]:
+    """把主包依赖的两个框架包下下来。返回 (文件列表, "") 或 ([], 原因)。
+
+    以前下过的、大小和 sha256 都对得上就直接用，不再走网络。"""
+    target = Path(tempfile.gettempdir()) / "aikaui-winget-deps"
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        return [], f"建目录失败：{e}"
+
+    files = []
+    for name, size, sha in WINGET_DEPS:
+        dest = target / name
+        try:
+            if dest.is_file() and dest.stat().st_size == size and _sha256_of(dest) == sha:
+                files.append(dest)
+                continue
+        except Exception:
+            pass
+        last = ""
+        got = False
+        for base in WINGET_BASES:
+            why = _download(base + "deps/" + name, dest, size=size, sha256=sha,
+                            kind="deps")
+            if not why:
+                got = True
+                break
+            last = why
+        if not got:
+            return [], f"下载 {name} 失败（{last}）"
+        files.append(dest)
+    return files, ""
+
+
+def _install_appx(msix: Path, deps=()) -> str:
+    """用 Add-AppxPackage 正式安装（用户级，不提权）。成功返回空串。
+
+    ★ 这是微软签名的包，不需要开发者模式；装完 winget.exe 会出现在
+      %LOCALAPPDATA%\\Microsoft\\WindowsApps\\ 下，用户以后自己也能用。
+
+    deps：主包依赖的框架包（UI.Xaml / VCLibs），先装它们。装依赖失败不直接放弃
+    —— 依赖可能本来就在，主包照样能装；两个都失败才把两句话一起报出去。"""
+    dep_why = ""
+    for dep in deps:
+        why = _add_appx_package(Path(dep))
+        if why:
+            dep_why = (dep_why + "；" if dep_why else "") + f"依赖 {Path(dep).name}：{why}"
+
+    why = _add_appx_package(msix)
+    if why and dep_why:
+        return f"{why}（{dep_why}）"
+    return why
 
 
 def _extract_portable(msix: Path) -> tuple[str | None, str]:
@@ -456,12 +553,23 @@ def ensure_winget(on_progress=None, on_note=None) -> dict:
     if exe:
         return {"ok": True, "exe": exe, "mode": "existing", "note": ""}
 
+    if is_cancelled():
+        return {"ok": False, "exe": "", "mode": "cancelled", "note": "已中断"}
+
     msix, why = _fetch_winget_msix(on_progress)
     if msix is None:
+        if why == "已中断":
+            return {"ok": False, "exe": "", "mode": "cancelled", "note": "已中断"}
         return {"ok": False, "exe": "", "mode": "download", "note": f"下载 winget 失败（{why}）"}
 
     try:
-        appx_why = _install_appx(msix)
+        # 主包依赖 UI.Xaml / VCLibs 这两个框架包，先装上。下不动不算致命：
+        # 机器上可能本来就有，主包照样能装。
+        deps, dep_why = _fetch_winget_deps()
+        if dep_why:
+            _note(on_note, f"依赖包没下下来（{dep_why}），先直接装主包试试")
+
+        appx_why = _install_appx(msix, deps)
         if not appx_why:
             for _ in range(3):                  # 别名文件有几十毫秒的延迟
                 exe = find_winget(verify=True)
@@ -475,7 +583,8 @@ def ensure_winget(on_progress=None, on_note=None) -> dict:
         exe, port_why = _extract_portable(msix)
         if exe:
             _note(on_note, "已装好 winget（便携版，解压即用）")
-            return {"ok": True, "exe": exe, "mode": "portable", "note": ""}
+            return {"ok": True, "exe": exe, "mode": "portable", "note": "",
+                    "why_appx": appx_why}
         return {"ok": False, "exe": "", "mode": "install",
                 "note": f"{appx_why}；便携版也不行（{port_why}）"}
     finally:
@@ -583,6 +692,18 @@ def _install_via_winget(exe: str, note=None) -> tuple[str, str]:
     return "", "winget 说装成功了，但找不到 VSCode 的安装位置"
 
 
+def _unlink_quiet(path) -> None:
+    """删文件，删不掉也不吭声。
+
+    ★ 临时目录里的半截文件可能有别人占着句柄（杀毒扫描、上一版进程被强杀），
+      这时候 `unlink` 抛 WinError 32。为它把整个安装流程炸掉不值 —— 留个垃圾
+      文件比让用户看到「装失败」强得多。"""
+    try:
+        Path(path).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _fetch_vscode_setup(on_progress=None) -> tuple[Path | None, str]:
     """下微软官方的用户级安装包。返回 (文件, 空) 或 (None, 原因)。"""
     try:
@@ -593,6 +714,7 @@ def _fetch_vscode_setup(on_progress=None) -> tuple[Path | None, str]:
     dest = Path(tempfile.gettempdir()) / "aikaui-VSCodeUserSetup-x64.exe"
     tmp = Path(str(dest) + ".part")
     done = 0
+    cancelled = False
     try:
         with requests.get(VSCODE_SETUP_URL, stream=True, timeout=(15, 60)) as r:
             if r.status_code != 200:
@@ -600,6 +722,10 @@ def _fetch_vscode_setup(on_progress=None) -> tuple[Path | None, str]:
             total = int(r.headers.get("content-length") or 0)
             with open(tmp, "wb") as f:
                 for chunk in r.iter_content(1 << 20):
+                    if is_cancelled():
+                        # 文件开着的时候删不掉它（见 _download 里的说明）
+                        cancelled = True
+                        break
                     if not chunk:
                         continue
                     f.write(chunk)
@@ -609,19 +735,30 @@ def _fetch_vscode_setup(on_progress=None) -> tuple[Path | None, str]:
                             on_progress(done, total or done, "vscode")
                         except Exception:
                             pass
+        if cancelled:
+            _unlink_quiet(tmp)
+            return None, "已中断"
         with open(tmp, "rb") as f:          # ★ 先关文件再删：Windows 上删不掉打开着的文件
             head = f.read(2)
         if head != b"MZ":
-            tmp.unlink(missing_ok=True)
+            _unlink_quiet(tmp)
             return None, "下下来的不是 Windows 可执行文件"
         if done < 50 * 1024 * 1024:
-            tmp.unlink(missing_ok=True)
+            _unlink_quiet(tmp)
             return None, f"下下来的文件太小（{done} 字节）"
     except Exception as e:
-        tmp.unlink(missing_ok=True)
+        _unlink_quiet(tmp)
         return None, f"{type(e).__name__}：{str(e)[:80]}"
 
-    tmp.replace(dest)
+    if is_cancelled():
+        _unlink_quiet(tmp)
+        return None, "已中断"
+
+    try:
+        tmp.replace(dest)
+    except OSError as e:
+        _unlink_quiet(tmp)
+        return None, f"改名失败：{str(e)[:80]}"
     return dest, ""
 
 
@@ -678,14 +815,25 @@ def install_vscode(on_progress=None, on_note=None) -> str:
         return f"已经装过 VSCode，不用重复安装（{found['exe']}）"
 
     reasons = []
+    mode = ""
 
     winget = find_winget(verify=True)
     if not winget:
         got = ensure_winget(on_progress, on_note)
         if got["ok"]:
             winget = got["exe"]
-        else:
+            mode = got.get("mode") or ""
+        elif got["note"] != "已中断":
             reasons.append(got["note"])
+
+    # ★ 便携版 winget 装不了东西：它没有注册成 AppX 包，源索引起不来
+    #   （`source update` 也失败），`winget install` 必定返回 0x8A15004B。
+    #   2026-10-30 用户机器上就是这样 —— 与其让它去撞一次墙再改道，不如直接走
+    #   下载安装包那条路，省两分钟。
+    if winget and mode == "portable":
+        _note(on_note, "便携版 winget 读不到软件源，直接改用官方安装包")
+        reasons.append("便携版 winget 读不到软件源")
+        winget = ""
 
     if winget:
         text, why = _install_via_winget(winget, on_note)
@@ -697,6 +845,9 @@ def install_vscode(on_progress=None, on_note=None) -> str:
     if text:
         return text
     reasons.append(why)
+
+    if is_cancelled():
+        return "已中断安装 VSCode。"
 
     return download_page_fallback("；".join(r for r in reasons if r))
 

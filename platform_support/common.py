@@ -12,6 +12,7 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
 import webbrowser
 from pathlib import Path
 
@@ -137,6 +138,36 @@ def kill_tree(proc) -> None:
             pass
 
 
+# 正在跑的子进程。用户点「中断」时要能立刻把它们掐掉 —— 不然装 winget / VSCode
+# 这种几分钟的子进程会让"中断"变成"点了没反应"，人只会以为按钮坏了。
+# ★ 用 list + 锁而不是 set：Popen 对象可哈希但没必要，插入顺序也更直观。
+_ACTIVE = []
+_ACTIVE_LOCK = threading.Lock()
+
+
+def kill_active_children() -> int:
+    """掐掉所有正在跑的子进程，返回掐了几个。幂等，失败也不抛。"""
+    with _ACTIVE_LOCK:
+        procs = list(_ACTIVE)
+        _ACTIVE.clear()
+    for proc in procs:
+        kill_tree(proc)
+    return len(procs)
+
+
+def _register(proc):
+    with _ACTIVE_LOCK:
+        _ACTIVE.append(proc)
+
+
+def _unregister(proc):
+    with _ACTIVE_LOCK:
+        try:
+            _ACTIVE.remove(proc)
+        except ValueError:
+            pass
+
+
 def run_capture(argv, *, timeout: int, env: dict, stdin=None,
                 shell: bool = False):
     """跑命令并抓输出，返回 (stdout, stderr, 是否超时, 退出码)。
@@ -155,6 +186,7 @@ def run_capture(argv, *, timeout: int, env: dict, stdin=None,
         kwargs["start_new_session"] = True      # 独立会话，才能整组杀
 
     proc = subprocess.Popen(argv, **kwargs)
+    _register(proc)
     try:
         out, err = proc.communicate(timeout=timeout)
         return out or b"", err or b"", False, proc.returncode
@@ -165,6 +197,8 @@ def run_capture(argv, *, timeout: int, env: dict, stdin=None,
         except subprocess.TimeoutExpired:
             out, err = b"", b""
         return out or b"", err or b"", True, -1
+    finally:
+        _unregister(proc)
 
 
 def open_url(url: str) -> bool:

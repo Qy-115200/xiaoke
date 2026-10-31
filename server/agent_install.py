@@ -21,7 +21,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from agent_bus import user_input_queue
+from agent_bus import clear_cancel as _clear_cancel, user_input_queue
 from server import agent_tools, identity
 from server import prompts_server as P
 from server.cli import EXIT_ACCOUNT, EXIT_FAILED, EXIT_OK, CliError
@@ -330,6 +330,7 @@ def _session(ctx, args, ui, state, preflight):
     while True:
         status = {}
         ui.ui_busy(True)
+        _clear_cancel()                 # 新的一轮开工：把上一轮的中断牌子摘掉
         try:
             run_one_task(messages, task_text,
                          tools=tools, tool_map=tool_map, emit=ui.emit,

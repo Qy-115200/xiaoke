@@ -25,4 +25,26 @@ input_event = threading.Event()
 # 放 ask_user 的回答（配合 input_event 用）
 input_holder = {"value": None}
 
-__all__ = ["msg_queue", "user_input_queue", "input_event", "input_holder"]
+# 「中断」：用户点了界面上的按钮（桌面版）或连按两次 Ctrl-C（服务器版）。
+# ★ 用它而不是直接杀线程：Python 没有安全的"杀线程"；这里只是立一块牌子，
+#   长活儿（下载 / 装包）在每个块之间看一眼，Agent 循环在每步开头看一眼。
+#   牌子立起来之后要 clear()，否则下一次任务一开工就"已中断"。
+cancel_event = threading.Event()
+
+
+def request_cancel() -> None:
+    """立牌子：请求中断当前这一轮。"""
+    cancel_event.set()
+
+
+def clear_cancel() -> None:
+    """开工前把牌子摘掉（每个新任务开始时调）。"""
+    cancel_event.clear()
+
+
+def is_cancelled() -> bool:
+    return cancel_event.is_set()
+
+
+__all__ = ["msg_queue", "user_input_queue", "input_event", "input_holder",
+           "cancel_event", "request_cancel", "clear_cancel", "is_cancelled"]

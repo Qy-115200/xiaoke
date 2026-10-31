@@ -228,6 +228,19 @@ class WindowMixin:
             command=self.on_send,
         ).pack(side=tk.LEFT, padx=(10, 0))
 
+        # ---------- 中断：Agent 干活时才有用 ----------
+        # ★ 装 winget / 装 VSCode 可能要几分钟（下 58MB 甚至 240MB），用户不耐烦时
+        #   得有个明摆着的出口。平时是灰的；一键安装 / 发送之后自动亮起来。
+        #   点了会：立一块牌子（Agent 每步看一眼）+ 掐掉正在跑的子进程 + 停掉下载。
+        self.stop_btn = ctk.CTkButton(
+            self.entry_frame, text="中断", width=64, height=38,
+            font=font(S_BTN),
+            fg_color="#3a3a3a", hover_color="#5a3a3a",
+            state=tk.DISABLED,
+            command=self.on_stop,
+        )
+        self.stop_btn.pack(side=tk.LEFT, padx=(8, 0))
+
         # ---------- 底部大按钮：一键安装 ----------
         self.start_btn = ctk.CTkButton(
             view, text="一键安装 Claude Code", height=50,
@@ -417,6 +430,30 @@ class WindowMixin:
         from server.pow import request_cancel
         request_cancel()
         self.progress_cancel.configure(text="取消中…", state=tk.DISABLED)
+
+    def on_stop(self):
+        """用户点了「中断」：停掉这一轮。
+
+        三件事同时做，缺一不可：
+          1. 立牌子（agent_bus.cancel_event）—— Agent 循环每步、下载每 1MB 都会看；
+          2. 掐掉正在跑的子进程 —— winget / powershell / 安装包，不然它们能跑几分钟；
+          3. 如果正卡在 ask_user 上，把等待叫醒，不然线程还挂在 input_event.wait()。
+
+        ★ 中断**不会**回滚已经做完的事（装了一半的东西还在），话里要说清楚。"""
+        from agent_bus import request_cancel
+        from platform_support.common import kill_active_children
+
+        request_cancel()
+        killed = kill_active_children()
+
+        if self.waiting_for_answer:          # 卡在问用户问题这一步
+            from agent_bus import input_event, input_holder
+            input_holder["value"] = "（用户中断）"
+            input_event.set()
+
+        self.stop_btn.configure(state=tk.DISABLED, text="中断中…")
+        tail = f"（已停掉 {killed} 个子进程）" if killed else ""
+        self.write(f"\n[你] 中断{tail}\n      已经装到一半的东西不会回滚。")
 
     # ---------- 余额显示 ----------
 

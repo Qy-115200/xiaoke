@@ -14,7 +14,7 @@
 import json
 import time
 
-from agent_bus import msg_queue, user_input_queue
+from agent_bus import clear_cancel, is_cancelled, msg_queue, user_input_queue
 from config import MAX_STEPS
 from llm import get_client, insufficient_balance, NoIdentity
 from server.api import query_balance, query_usage
@@ -122,6 +122,13 @@ def run_one_task(messages, task_text, *, tools=None, tool_map=None,
     launched = False        # 真的把用户领进门了：开了终端，或者开了 VSCode
 
     for _step in range(MAX_STEPS):      # 最多循环 MAX_STEPS 次（config.py）
+        # ★ 用户点了「中断」：不再调模型，也不动工具。牌子在 agent_worker 里
+        #   每个新任务开始时摘掉。长活儿（下载 / 装包）自己也会看这块牌子。
+        if is_cancelled():
+            _mark(status, "cancelled", "用户中断")
+            emit(("log", "\n[系统] 已中断。"))
+            return False
+
         messages = _sanitize_messages(messages)   # 每次调用前先清理（防被裁剪破坏结构）
 
         try:
@@ -249,6 +256,12 @@ def run_one_task(messages, task_text, *, tools=None, tool_map=None,
                 "content": str(result),
             })
 
+            # 工具跑完再看一眼：用户可能是在长下载 / 长安装里点的中断
+            if is_cancelled():
+                _mark(status, "cancelled", "用户中断")
+                emit(("log", "\n[系统] 已中断。"))
+                return False
+
     _mark(status, "max_steps", f"跑了 {MAX_STEPS} 步还没结束")
     emit(("log", "\n[系统] 达到最大步数，本轮结束"))
     return False
@@ -302,6 +315,7 @@ def agent_worker():
             break
 
         msg_queue.put(("busy", True))
+        clear_cancel()                   # ★ 新任务开工：把上一轮的中断牌子摘掉
         try:
             run_one_task(messages, task_text)
         except Exception as e:

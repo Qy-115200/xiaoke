@@ -104,5 +104,96 @@ class PollQueueTests(unittest.TestCase):
         self.assertEqual(gui.calls, [])
 
 
+class _Btn:
+    def __init__(self):
+        self.state = None
+        self.text = None
+
+    def configure(self, state=None, text=None):
+        self.state = state
+        self.text = text
+
+
+class _BusyGUI(_FakeGUI):
+    def __init__(self):
+        super().__init__()
+        self.start_btn = _Btn()
+        self.stop_btn = _Btn()
+
+
+class StopButtonTests(unittest.TestCase):
+    """「中断」按钮：Agent 干活的时候才亮，闲着的时候是灰的。"""
+
+    def setUp(self):
+        self._drain()
+        self.addCleanup(self._drain)
+
+    @staticmethod
+    def _drain():
+        while True:
+            try:
+                bus.msg_queue.get_nowait()
+            except Exception:
+                return
+
+    def test_busy_turns_the_stop_button_on(self):
+        import tkinter as tk
+        gui = _BusyGUI()
+        bus.msg_queue.put(("busy", True))
+        bus.poll_queue(gui)
+        self.assertEqual(gui.stop_btn.state, tk.NORMAL)
+        self.assertEqual(gui.stop_btn.text, "中断")
+        self.assertEqual(gui.start_btn.state, tk.DISABLED)
+
+    def test_idle_turns_it_off(self):
+        import tkinter as tk
+        gui = _BusyGUI()
+        bus.msg_queue.put(("busy", False))
+        bus.poll_queue(gui)
+        self.assertEqual(gui.stop_btn.state, tk.DISABLED)
+
+
+class OnStopTests(unittest.TestCase):
+    """点「中断」之后：立牌子、掐子进程、叫醒正在等回答的线程。"""
+
+    def setUp(self):
+        import agent_bus
+        agent_bus.clear_cancel()
+        agent_bus.input_holder["value"] = None
+        agent_bus.input_event.clear()
+        self.addCleanup(agent_bus.clear_cancel)
+
+    def _gui(self, waiting=False):
+        from ui.window import WindowMixin
+        gui = object.__new__(WindowMixin)       # 不建真窗口
+        gui.waiting_for_answer = waiting
+        gui.stop_btn = _Btn()
+        gui.written = []
+        gui.write = gui.written.append
+        return gui
+
+    def test_sets_the_flag_and_reports(self):
+        import agent_bus
+        from unittest import mock
+        gui = self._gui()
+        with mock.patch("platform_support.common.kill_active_children",
+                        return_value=2):
+            gui.on_stop()
+        self.assertTrue(agent_bus.is_cancelled())
+        self.assertIn("已停掉 2 个子进程", gui.written[0])
+        self.assertIn("不会回滚", gui.written[0])
+        self.assertEqual(gui.stop_btn.state, "disabled")
+
+    def test_wakes_up_ask_user(self):
+        import agent_bus
+        from unittest import mock
+        gui = self._gui(waiting=True)
+        with mock.patch("platform_support.common.kill_active_children",
+                        return_value=0):
+            gui.on_stop()
+        self.assertTrue(agent_bus.input_event.is_set())
+        self.assertEqual(agent_bus.input_holder["value"], "（用户中断）")
+
+
 if __name__ == "__main__":
     unittest.main()

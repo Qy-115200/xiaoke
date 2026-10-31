@@ -22,6 +22,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import agent_bus                                               # noqa: E402
 import agent_core                                              # noqa: E402
 from bus import msg_queue                                      # noqa: E402
 
@@ -200,6 +201,78 @@ class InstallDoneTests(unittest.TestCase):
         ]
         self._run(responses, tool_map)
         self.assertNotIn("install_done", self._kinds())
+
+
+class CancelTests(unittest.TestCase):
+    """用户点了「中断」之后，这一轮就不能再往下跑。
+
+    ★ 牌子由调用方摘（agent_worker / 服务器版每轮开工调 clear_cancel），
+      run_one_task 只负责"看见牌子就停"——它不该自己拆牌子，否则
+      长下载里立的那一下会被下一步顺手抹掉。
+    """
+
+    def setUp(self):
+        _drain()
+        agent_bus.clear_cancel()
+        self.addCleanup(agent_bus.clear_cancel)
+        self.addCleanup(_drain)
+
+    def _run(self, responses, tool_map, status=None):
+        with mock.patch.object(agent_core, "get_client",
+                               return_value=(_FakeClient(responses), "fake-model")), \
+             mock.patch.object(agent_core, "tool_map", tool_map), \
+             mock.patch.object(agent_core, "tools", []):
+            return agent_core.run_one_task(
+                [{"role": "system", "content": "s"}], "帮我装", status=status)
+
+    def test_cancelled_before_starting_never_calls_the_model(self):
+        status = {}
+        agent_bus.request_cancel()
+        with mock.patch.object(agent_core, "get_client") as get_client:
+            ok = self._run([_tool_response(_FakeToolCall("bash"))], {}, status)
+        self.assertFalse(ok)
+        get_client.assert_not_called()
+        self.assertEqual(status["error"], "cancelled")
+
+    def test_cancelled_during_a_long_tool_stops_after_it(self):
+        """下载 / 装包是在工具里点的中断：工具跑完就得停，别再调下一次模型。"""
+        status = {}
+
+        def slow_tool(**kwargs):
+            agent_bus.request_cancel()          # 用「按钮」的同一套 API
+            return "下到一半被中断"
+
+        responses = [
+            _tool_response(_FakeToolCall("bash", '{"command": "x"}', "call_1")),
+            _tool_response(_FakeToolCall("bash", '{"command": "y"}', "call_2")),
+        ]
+        calls = []
+
+        class _CountingCompletions(_FakeCompletions):
+            def create(self, **kw):
+                calls.append(1)
+                return super().create(**kw)
+
+        class _CountingClient:
+            def __init__(self, resp):
+                self.chat = type("_Chat", (), {
+                    "completions": _CountingCompletions(resp)})()
+
+        with mock.patch.object(agent_core, "get_client",
+                               return_value=(_CountingClient(responses), "fake-model")), \
+             mock.patch.object(agent_core, "tool_map", {"bash": slow_tool}), \
+             mock.patch.object(agent_core, "tools", []):
+            ok = agent_core.run_one_task(
+                [{"role": "system", "content": "s"}], "帮我装", status=status)
+        self.assertFalse(ok)
+        self.assertEqual(status["error"], "cancelled")
+        self.assertEqual(len(calls), 1, "第二次模型调用根本不该发生")
+
+    def test_the_flag_is_not_cleared_by_run_one_task(self):
+        agent_bus.request_cancel()
+        self._run([_tool_response(_FakeToolCall("bash"))], {})
+        self.assertTrue(agent_bus.is_cancelled(),
+                        "摘牌子是下一轮开工的事，run_one_task 不能替用户做主")
 
 
 if __name__ == "__main__":

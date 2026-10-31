@@ -153,6 +153,11 @@ class EnsureWingetTests(unittest.TestCase):
         self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
         self.msix = self.tmp / "AppInstaller_x64.msix"
         self.msix.write_bytes(b"fake-msix")
+        # 依赖包默认"已经下过"（空列表）：别的用例不该因为要下 12MB 而走网络
+        patcher = mock.patch.object(win_backend, "_fetch_winget_deps",
+                                    return_value=([], ""))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_existing_short_circuits(self):
         with mock.patch.object(win_backend, "find_winget", return_value=r"C:\w\winget.exe"), \
@@ -234,6 +239,145 @@ class EnsureWingetTests(unittest.TestCase):
             self.assertEqual(win_backend._install_appx(self.msix), "")
 
 
+class AppxPackageTests(unittest.TestCase):
+    """Add-AppxPackage 的那些"其实已经在了"的返回码，不能当成失败。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        self.pkg = self.tmp / "x.appx"
+        self.pkg.write_bytes(b"pkg")
+
+    def _run_with(self, rc, err=b""):
+        return mock.patch.object(win_backend, "run_capture",
+                                 return_value=(b"", err, False, rc))
+
+    def test_same_version_already_installed_is_success(self):
+        err = (b"Add-AppxPackage : Deployment failed with HRESULT: 0x80073CFB, "
+               b"The package is already installed.")
+        with self._run_with(1, err):
+            self.assertEqual(win_backend._add_appx_package(self.pkg), "")
+
+    def test_resource_package_already_registered_is_success(self):
+        err = b"error 0x80073D02: Unable to install because the packages are in use."
+        with self._run_with(1, err):
+            self.assertEqual(win_backend._add_appx_package(self.pkg), "")
+
+    def test_failure_keeps_the_last_lines(self):
+        """用户 2026-10-30 的日志只剩「返回 1: and」，什么都看不出来。"""
+        err = (b"Add-AppxPackage : Deployment failed with HRESULT: 0x80073CFF\r\n"
+               b"App package deployment failed with the following error\r\n"
+               b"0x80073CFF: To install this application you need either a "
+               b"Windows Developer license or a sideloading-enabled system.")
+        with self._run_with(1, err):
+            why = win_backend._add_appx_package(self.pkg)
+        self.assertIn("返回 1", why)
+        self.assertIn("0x80073CFF", why)
+        self.assertIn("sideloading", why)
+
+    def test_deps_are_installed_before_the_main_package(self):
+        seen = []
+        with mock.patch.object(win_backend, "_add_appx_package",
+                               side_effect=lambda p: seen.append(p.name) or ""):
+            self.assertEqual(win_backend._install_appx(
+                self.pkg, [self.tmp / "dep1.appx", self.tmp / "dep2.appx"]), "")
+        self.assertEqual(seen, ["dep1.appx", "dep2.appx", "x.appx"])
+
+    def test_dep_failure_does_not_block_the_main_package(self):
+        """依赖可能本来就在；主包装上了就算成功，但原因要带出去。"""
+        calls = []
+
+        def fake_add(path):
+            calls.append(path.name)
+            return "依赖装不上" if path.name.startswith("dep") else ""
+
+        with mock.patch.object(win_backend, "_add_appx_package", side_effect=fake_add):
+            why = win_backend._install_appx(self.pkg, [self.tmp / "dep1.appx"])
+        self.assertEqual(why, "")
+        self.assertIn("x.appx", calls)
+
+    def test_both_failing_reports_both(self):
+        with mock.patch.object(win_backend, "_add_appx_package",
+                               side_effect=lambda p: f"{p.name} 不行"):
+            why = win_backend._install_appx(self.pkg, [self.tmp / "dep1.appx"])
+        self.assertIn("x.appx 不行", why)
+        self.assertIn("dep1.appx 不行", why)
+
+
+class WingetDepsTests(unittest.TestCase):
+    """主包依赖 UI.Xaml / VCLibs 两个框架包，漏了 Add-AppxPackage 只回一个干巴巴的 1。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        self.payload = b"MZfake"
+        import hashlib
+        self.sha = hashlib.sha256(self.payload).hexdigest()
+        self.deps = (("dep1.appx", len(self.payload), self.sha),)
+        self.deps_dir = self.tmp / "deps"
+
+    def _patch_env(self):
+        return [
+            mock.patch.object(win_backend, "WINGET_DEPS", self.deps),
+            mock.patch.object(win_backend.tempfile, "gettempdir",
+                              return_value=str(self.tmp)),
+        ]
+
+    def test_downloads_and_verifies(self):
+        def fake_download(url, dest, on_progress=None, **kw):
+            Path(dest).write_bytes(self.payload)
+            return ""
+
+        p = self._patch_env()
+        with p[0], p[1], \
+             mock.patch.object(win_backend, "_download",
+                               side_effect=fake_download) as dl:
+            files, why = win_backend._fetch_winget_deps()
+        self.assertEqual(why, "")
+        self.assertEqual([f.name for f in files], ["dep1.appx"])
+        self.assertTrue(files[0].is_file())
+        self.assertIn("dep1.appx", dl.call_args.args[0])
+        self.assertEqual(dl.call_args.kwargs["sha256"], self.sha)
+
+    def test_reuses_a_verified_copy_without_touching_the_network(self):
+        target = self.tmp / "aikaui-winget-deps"
+        target.mkdir()
+        (target / "dep1.appx").write_bytes(self.payload)
+        p = self._patch_env()
+        with p[0], p[1], mock.patch.object(win_backend, "_download") as dl:
+            files, why = win_backend._fetch_winget_deps()
+        dl.assert_not_called()
+        self.assertEqual(why, "")
+        self.assertEqual(len(files), 1)
+
+    def test_a_corrupt_copy_is_downloaded_again(self):
+        target = self.tmp / "aikaui-winget-deps"
+        target.mkdir()
+        (target / "dep1.appx").write_bytes(b"half")       # 大小对不上
+
+        def fake_download(url, dest, on_progress=None, **kw):
+            Path(dest).write_bytes(self.payload)
+            return ""
+
+        p = self._patch_env()
+        with p[0], p[1], \
+             mock.patch.object(win_backend, "_download",
+                               side_effect=fake_download) as dl:
+            files, why = win_backend._fetch_winget_deps()
+        self.assertEqual(dl.call_count, 1)
+        self.assertEqual(why, "")
+
+    def test_download_failure_is_a_reason_not_an_exception(self):
+        p = self._patch_env()
+        with p[0], p[1], \
+             mock.patch.object(win_backend, "_download",
+                               return_value="HTTP 500"):
+            files, why = win_backend._fetch_winget_deps()
+        self.assertEqual(files, [])
+        self.assertIn("dep1.appx", why)
+        self.assertIn("HTTP 500", why)
+
+
 class PortableTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -285,7 +429,8 @@ class InstallVscodeUsesWingetTests(unittest.TestCase):
              mock.patch.object(win_backend, "find_winget", return_value=None), \
              mock.patch.object(win_backend, "ensure_winget",
                                return_value={"ok": True, "exe": r"C:\p\winget.exe",
-                                             "mode": "portable", "note": ""}) as ensure, \
+                                             "mode": "appx", "note": ""}) as ensure, \
+             mock.patch.object(win_backend, "_install_from_setup") as setup, \
              mock.patch.object(win_backend, "run_capture",
                                return_value=(b"", b"", False, 0)) as run:
             text = win_backend.install_vscode()
@@ -293,7 +438,31 @@ class InstallVscodeUsesWingetTests(unittest.TestCase):
             self.assertEqual(text, f"已安装 VSCode（{info['exe']}）")
             argv = run.call_args.args[0]
         ensure.assert_called_once()
+        setup.assert_not_called()               # 正式装上了就不用下 240MB
         self.assertEqual(argv[0], r"C:\p\winget.exe")
+
+    def test_portable_winget_skips_straight_to_the_installer(self):
+        """便携版 winget 没注册成 AppX，源索引永远打不开 —— 别再让它试一次。
+
+        2026-10-30 用户那次：先花时间下 58MB、解压出便携版，再用它 install，
+        必然返回 0x8A15004B，最后还是得下 240MB。这里把中间那步直接砍掉。"""
+        info = {"exe": r"D:\Code.exe"}
+        notes = []
+        with mock.patch.object(win_backend, "find_vscode",
+                               side_effect=[None, info]), \
+             mock.patch.object(win_backend, "find_winget", return_value=None), \
+             mock.patch.object(win_backend, "ensure_winget",
+                               return_value={"ok": True, "exe": r"C:\p\winget.exe",
+                                             "mode": "portable", "note": ""}), \
+             mock.patch.object(win_backend, "run_capture") as run, \
+             mock.patch.object(win_backend, "_install_from_setup",
+                               return_value=(f"已安装 VSCode（{info['exe']}）", "")) as setup:
+            text = win_backend.install_vscode(on_note=notes.append)
+
+        self.assertEqual(text, f"已安装 VSCode（{info['exe']}）")
+        setup.assert_called_once()
+        run.assert_not_called()                 # 便携版 winget 一次都没跑
+        self.assertTrue(any("便携版" in n for n in notes), notes)
 
     def test_bootstrap_failure_still_tries_the_official_installer(self):
         """连 winget 都没装成，不能就此放弃 —— 直接下微软的安装包。"""
@@ -326,7 +495,7 @@ class InstallVscodeUsesWingetTests(unittest.TestCase):
 
         def fake_ensure(on_progress=None, on_note=None):
             on_progress(10, 100, "winget")
-            return {"ok": True, "exe": r"C:\p\winget.exe", "mode": "portable", "note": ""}
+            return {"ok": True, "exe": r"C:\p\winget.exe", "mode": "appx", "note": ""}
 
         with mock.patch.object(win_backend, "find_vscode",
                                side_effect=[None, {"exe": r"D:\Code.exe"}]), \
