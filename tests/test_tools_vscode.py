@@ -231,8 +231,18 @@ class OpenVscodeToolTests(unittest.TestCase):
 
     def test_forwards_directory(self):
         text, open_fn, _uri = self._run()
-        open_fn.assert_called_once_with(r"C:\Users\me\Desktop\claude-projects", False)
+        open_fn.assert_called_once_with(r"C:\Users\me\Desktop\claude-projects", False,
+                                        trust=True)
         self.assertTrue(text.startswith("已打开 VSCode"))
+
+    def test_always_disables_workspace_trust(self):
+        """★ 工作目录是助手替用户新建的，VSCode 一定当成"未信任"，弹
+        「是否信任这个文件夹的作者」。不点信任，插件跑在受限模式里：面板开不出来、
+        终端也开不了 —— 用户看到的就是"插件没装上"（2026-10-31）。
+        所以打开时一律带 trust=True，不管是不是刚装完插件。"""
+        for just in (False, True):
+            _text, open_fn, _uri = self._run(just_installed=just)
+            self.assertIs(open_fn.call_args.kwargs.get("trust"), True, just)
 
     def test_default_directory(self):
         with mock.patch.object(platform_support, "find_vscode", return_value=INFO), \

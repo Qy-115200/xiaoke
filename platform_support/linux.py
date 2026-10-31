@@ -282,14 +282,15 @@ def install_vscode(on_progress=None, on_note=None) -> str:
     return download_page_fallback("Linux 上装 VSCode 需要管理员权限，助手不替你提权")
 
 
-def open_vscode(directory: str = "", new_window: bool = False) -> str:
+def open_vscode(directory: str = "", new_window: bool = False,
+                trust: bool = False) -> str:
     info = find_vscode()
     if not info:
         return "找不到 VSCode，无法打开"
     cwd, note = safe_cwd(directory)
     try:
         subprocess.Popen(
-            launch_argv_for(info, new_window, cwd),
+            launch_argv_for(info, new_window, cwd, trust=trust),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             env=clean_env(),               # 挡掉从 VSCode 终端继承来的 ELECTRON_RUN_AS_NODE

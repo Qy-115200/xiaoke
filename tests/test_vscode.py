@@ -333,6 +333,27 @@ class LaunchArgvTests(unittest.TestCase):
         self.assertEqual(common.launch_argv_for(info, True, "/home/x"),
                          ["/usr/share/code/code", "/home/x"])
 
+    def test_trust_flag_goes_through_the_cli(self):
+        """★ 要带 `--disable-workspace-trust` 就得走 CLI：直接起 Code.exe 时
+        参数是转手给已运行实例的，开关不生效。"""
+        info = {"launch_argv": [r"D:\vs code\Code.exe"], "cli_argv": [r"D:\vs code\bin\code.cmd"]}
+        self.assertEqual(common.launch_argv_for(info, False, r"C:\work", trust=True),
+                         [r"D:\vs code\bin\code.cmd",
+                          common.VSCODE_NO_TRUST_FLAG, r"C:\work"])
+        self.assertEqual(common.launch_argv_for(info, True, r"C:\work", trust=True),
+                         [r"D:\vs code\bin\code.cmd", "-n",
+                          common.VSCODE_NO_TRUST_FLAG, r"C:\work"])
+
+    def test_trust_without_cli_still_passes_the_flag(self):
+        info = {"launch_argv": ["/usr/share/code/code"], "cli_argv": []}
+        self.assertEqual(common.launch_argv_for(info, False, "/home/x", trust=True),
+                         ["/usr/share/code/code", common.VSCODE_NO_TRUST_FLAG, "/home/x"])
+
+    def test_no_trust_by_default(self):
+        info = {"launch_argv": [r"D:\vs code\Code.exe"], "cli_argv": [r"D:\vs code\bin\code.cmd"]}
+        argv = common.launch_argv_for(info, False, r"C:\work")
+        self.assertNotIn(common.VSCODE_NO_TRUST_FLAG, argv)
+
 
 class WindowsOpenTests(unittest.TestCase):
     def _run(self, info, directory="", new_window=False):

@@ -62,7 +62,7 @@ def _marks_install_complete(name, result) -> bool:
     """这个工具调用算不算"真的把用户领进门了"。
 
     抽成纯函数是为了能离线测：失败时（找不到 claude / 找不到 VSCode）返回的文字
-    不以这两个前缀开头，自然就不算完成，也就不会触发自动退出。"""
+    不以这两个前缀开头，自然就不算完成，也就不会发 install_done。"""
     text = str(result)
     if name == "launch_claude":
         return text.startswith(_OPENED_TERMINAL_PREFIX)
@@ -94,9 +94,11 @@ def run_one_task(messages, task_text, *, tools=None, tool_map=None,
     """跑一轮任务：从用户输入开始，直到模型不再调工具为止
 
     ★ 这一轮如果**完整走完了安装流程**（register_device → … → 打开 VSCode 或终端），
-      最后会给界面发一条 ("install_done", …)：让助手在用户看完收尾说明后自动退出。
+      最后会给界面发一条 ("install_done", …)。界面拿到它**什么都不做**（2026-10-31
+      用户明确说装完不要自动退出）；它留着是因为"这一轮真把用户领进门了"这个判据
+      别的地方也要用，而且它挡得住误判。
       单独再调一次 launch_claude / open_vscode（用户只是说"再帮我打开一次"）不算安装流程，
-      因为这一轮没有 register_device，installing 是 False，不会退出。
+      因为这一轮没有 register_device，installing 是 False，不会发。
 
     五个关键字参数都是"给别的界面用"的注入缝，默认值在**调用时**才解析。
     桌面版一个都不传，行为和以前完全一样（测试也是靠 patch 这里的全局变量工作的）：
@@ -209,8 +211,10 @@ def run_one_task(messages, task_text, *, tools=None, tool_map=None,
 
         if not msg.tool_calls:           # 模型没调工具 = 任务完成
             emit(("log", f"\nAgent: {msg.content}"))
-            # ★ 安装流程真的走完了 → 让界面过几秒自动退出（别一直占着托盘）。
-            #   放在最后一条 Agent 消息之后发，用户才有时间看完收尾说明。
+            # ★ 安装流程真的走完了 → 发个 install_done。放在最后一条 Agent 消息
+            #   之后发，界面能在"总结已经说完"这个时刻做后续动作。
+            #   ★ 现在没有界面会因此退出（用户要求装完别自动关），但这是
+            #     "这一轮领进门了"的权威判据，别随手删掉。
             if installing and launched:
                 emit(("install_done", {}))
             return True
@@ -232,7 +236,7 @@ def run_one_task(messages, task_text, *, tools=None, tool_map=None,
             except Exception as e:
                 result = f"错误: {e}"             # 工具执行出错，把错误当结果返回
 
-            # 记录安装流程走到哪了（只用于收尾时判断要不要自动退出）。
+            # 记录安装流程走到哪了（只用于收尾时判断要不要发 install_done）。
             # register_device 成功时回的是 JSON（带 note/api_base），失败回"领取失败…"。
             if name == "register_device" and str(result).startswith("{"):
                 installing = True

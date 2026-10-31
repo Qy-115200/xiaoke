@@ -231,6 +231,41 @@ class EnsureWingetTests(unittest.TestCase):
         self.assertIn("Add-AppxPackage", seen["argv"][-1])
         self.assertIn(str(self.msix), seen["argv"][-1])
 
+    def test_install_appx_uses_path_never_literalpath(self):
+        """★ 参数名只能是 `-Path`。Add-AppxPackage 根本没有 `-LiteralPath`，
+        写上它 PowerShell 当场抛 ParameterBindingException /
+        NamedParameterNotFound，一句都不执行 —— 表现就是"返回 1，什么都没装"。
+        2026-10-30 到 10-31 用户机器上一直是这个原因。"""
+        seen = {}
+
+        def fake_run(argv, **kw):
+            seen["cmd"] = argv[-1]
+            return b"", b"", False, 0
+
+        with mock.patch.object(win_backend, "run_capture", side_effect=fake_run):
+            win_backend._install_appx(self.msix)
+        self.assertIn("-Path ", seen["cmd"])
+        self.assertNotIn("LiteralPath", seen["cmd"])
+
+    def test_wildcard_chars_go_through_set_location(self):
+        """路径里有 `[` `]` 时 -Path 会当成通配模式：先 Set-Location 进目录，
+        再只传文件名。文件名是我们自己起的，可控。"""
+        weird = self.tmp / "[x]"
+        weird.mkdir(parents=True, exist_ok=True)
+        pkg = weird / "y.appx"
+        pkg.write_bytes(b"pkg")
+
+        seen = {}
+
+        def fake_run(argv, **kw):
+            seen["cmd"] = argv[-1]
+            return b"", b"", False, 0
+
+        with mock.patch.object(win_backend, "run_capture", side_effect=fake_run):
+            win_backend._install_appx(pkg)
+        self.assertIn("Set-Location -LiteralPath", seen["cmd"])
+        self.assertIn("-Path 'y.appx'", seen["cmd"])
+
     def test_newer_version_already_installed_is_not_a_failure(self):
         err = ("Add-AppxPackage : Deployment failed with HRESULT: 0x80073D06, "
                "A newer version is already installed").encode()

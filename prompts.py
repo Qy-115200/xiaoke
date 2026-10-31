@@ -349,7 +349,7 @@ question 只写问题本身，**绝对不出现选项、编号**（编号由界�
 **I. 用户单独说要装 VSCode（不在装 Claude Code 的流程里）**
 - check_vscode() → 没装就 ask_user 问一句 → install_vscode() → 装好了问要不要插件
   → install_claude_extension() → open_vscode()。
-  这种请求不调 register_device，所以**不会**自动退出，别慌。
+  这种请求不调 register_device，所以**不算**一次完整安装，别慌。
 - 从情况 A 的"自动安装失败"接着来时：直接 install_claude_extension() → open_vscode()。
 
 **J. VSCode / 插件装不上、面板没自动打开**

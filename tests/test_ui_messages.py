@@ -103,6 +103,19 @@ class PollQueueTests(unittest.TestCase):
         bus.poll_queue(gui)          # 不该抛
         self.assertEqual(gui.calls, [])
 
+    def test_install_done_does_not_start_any_quit(self):
+        """★ 2026-10-31 用户明确要求「安装完后不用自动退出」。
+        装完正是最想回头问两句的时候，助手自己关掉最招人烦。
+        这条盯的是回归：谁把自动退出加回来，这里就红。"""
+        class _QuitGUI(_FakeGUI):
+            def schedule_auto_quit(self, *_a, **_k):
+                self.calls.append(("schedule_auto_quit",))
+
+        gui = _QuitGUI()
+        bus.msg_queue.put(("install_done", {}))
+        bus.poll_queue(gui)          # 不该抛、也不该调任何界面动作
+        self.assertEqual(gui.calls, [])
+
 
 class _Btn:
     def __init__(self):

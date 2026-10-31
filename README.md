@@ -30,6 +30,13 @@ Agent —— 它会自己检测环境、装 Node、装 Claude Code、写好配�
 （`agent_worker` / 服务器版每轮调 `clear_cancel()`）。服务器版对应的是**连按两次 Ctrl-C**
 （第一次只是「上膛」），同一个牌子、同一套收尾。
 
+**装完不自动关窗口**（2026-10-31）。以前安装流程走完会留 10 秒，然后助手自己退出；
+用户明确说不要 —— 装完正是最想回头问两句的时候（"这个面板怎么用""项目放哪"），
+助手自己关掉最招人烦。`install_done` 这个事件还在（它仍然是"这一轮真把用户领进门了"
+的唯一判据），只是界面拿到它什么都不做。关窗口只有两个办法：点右上角 X，或直接说再见。
+顺带的好处：助手常驻之后，PyInstaller 报的
+`Failed to remove temporary directory: …\_MEI…` 也不会再被"自己先退出、VSCode 还占着目录"触发。
+
 **先定工作目录，再启动**
 
 Claude Code 只看得到你给它的**一个**文件夹。所以启动之前 Agent 必须先问清楚"以后在哪个
@@ -52,6 +59,14 @@ Claude Code 只看得到你给它的**一个**文件夹。所以启动之前 Age
 用户说"不用"，就退回 `launch_claude()` 开终端，**之后任何一轮都不再提 VSCode**。
 两个入口只能开一个，绝不都开。
 
+**打开 VSCode 时关掉「工作区信任」门禁**（2026-10-31）。助手是替用户**新建**的目录，
+VSCode 一定把它当成"未信任"，先弹一个「Do you trust the authors of the files in this
+folder? … Creating a terminal process requires executing code」。在用户点「信任」之前，
+扩展跑在受限模式里：Claude 面板出不来、连终端都开不了 —— 用户看到的现象是"插件装了却没开"。
+所以 `open_vscode()` 一律带 `--disable-workspace-trust`（`VSCODE_NO_TRUST_FLAG`）：
+**只对这一次打开的那个窗口**生效，不改任何全局设置，用户之后自己打开别的文件夹照样会被问。
+带开关就得走 CLI（直接起 `Code.exe` 时参数会被转手给已运行的实例，开关不生效）。
+
 装 VSCode 本身：Windows 走 `winget --scope user`（不弹 UAC），macOS 走 `brew install --cask`，
 Linux 只打开官网下载页（apt/snap 要 sudo，助手不替你提权）。**装不上就打开下载页**并如实说明；
 插件市场连不上也一样，照样用 VSCode 打开，让用户在扩展面板里手动装。
@@ -66,13 +81,20 @@ Windows 10/11 的家庭版精简镜像、老 LTSC、服务器版都可能不带 
   这里只取 bundle 里 x64 的那一份，内容与微软发布的完全一致，没有做任何改动。
 - 先装**依赖框架包**再装主包（2026-10-31 加）：App Installer 依赖
   `Microsoft.UI.Xaml.2.8` 和 `Microsoft.VCLibs.140.00.UWPDesktop`，微软把它们单独放在
-  `DesktopAppInstaller_Dependencies.zip` 里。漏了这一步，`Add-AppxPackage` 只回一个
-  干巴巴的 `返回 1`（2026-10-30 用户日志里就是「Add-AppxPackage 返回 1： and」）。
+  `DesktopAppInstaller_Dependencies.zip` 里。漏了这一步，主包可能装不上。
   两个包（6.7MB + 5.1MB，sha256 钉在 `WINGET_DEPS` 里）下到
   `%TEMP%\aikaui-winget-deps\`，大小和 sha256 都对得上就复用、不再走网络。
   依赖装不上不直接放弃（机器上可能本来就有），主包照样试；两个都失败才报两句。
   `Add-AppxPackage` 的 `0x80073D06 / 0x80073CFB / 0x80073D02`（更高版本已装 / 同版本
   已装 / 资源包已注册）都算成功 —— 重装依赖时天天撞见，不认它就是误报。
+- **`Add-AppxPackage` 的参数名只能是 `-Path`**（2026-10-31 查清，这是那个老 bug 的真正原因）。
+  它**没有** `-LiteralPath`；写上它 PowerShell 当场抛
+  `ParameterBindingException` / `NamedParameterNotFound,
+  Microsoft.Windows.Appx.PackageManager.Commands.AddAppxPackageCommand`，整条命令一句都没执行。
+  表现就是用户日志里的「Add-AppxPackage 返回 1」，然后一路退到 240MB 的官方安装包 ——
+  走得通，但慢得多。`-Path` 认通配符，所以路径里真带 `[` `]` `` ` `` 时会先
+  `Set-Location -LiteralPath <目录>` 再只传文件名。失败时保留最后三行错误
+  （只留一行时正文正好被截成「返回 1： and」，什么都看不出来）。
 - 先 `Add-AppxPackage`（用户级、不弹 UAC、不改系统策略）；装不上（老系统 / 没有商店 /
   组策略禁了 AppX）就**解压即用**：把 msix 里的 `winget.exe` 解到
   `%LOCALAPPDATA%\aikaui\winget\<版本>\`，下次直接用它，不再下载。
@@ -645,7 +667,7 @@ agent_demo/
 ├── platform_support/                  三平台差异（调用方只 import 这个包）
 │   ├── __init__.py               160   按 sys.platform 延迟加载并转发
 │   ├── common.py                 230   safe_cwd（HOME 越界检查）、find_claude、clean_env、跑子进程抓输出、VSCode 值解析
-│   ├── windows.py               1040   注册表协议 / .lnk / cmd / WinRT toast / VSCode 探测 + winget 安装（含"没 winget 就装一个"）
+│   ├── windows.py               1066   注册表协议 / .lnk / cmd / WinRT toast / VSCode 探测 + winget 安装（含"没 winget 就装一个"）
 │   ├── macos.py                  425   Info.plist 协议 + Apple Event / .command 快捷方式 / Terminal.app / VSCode 探测 + brew 安装
 │   └── linux.py                  314   .desktop + xdg-mime / 终端探测 / notify-send / VSCode 探测（安装只开下载页）
 │
@@ -671,7 +693,7 @@ agent_demo/
 ├── ui/                                界面层
 │   ├── fonts.py                  179   全界面字体表：按平台选字体 + 字号常量 + 画布缩放
 │   ├── gui.py                     31   class GUI(WindowMixin, OptionsMixin, RechargeMixin, UsageMixin, LoginMixin, AccountMixin, GateMixin)
-│   ├── window.py                 551   WindowMixin：窗口壳、左侧导航、对话页、底部询问条、余额回流
+│   ├── window.py                 521   WindowMixin：窗口壳、左侧导航、对话页、底部询问条、余额回流
 │   ├── usage.py                  625   UsageMixin：用量信息页（余额卡 + 两张按模型的时间分布图 + 充值入口）
 │   ├── account.py                272   AccountMixin：账户信息页（账户码 / 密钥打码、眼睛、复制、防泄露红字）
 │   ├── options.py                219   OptionsMixin：ask_user 选项面板（点击 / ↑↓ / 回车 / Esc）
@@ -701,7 +723,7 @@ agent_demo/
 │   ├── test_winget.py                 没 winget 时自动装：sha256 校验、依赖包先装、便携版跳过、临时包删干净
 │   ├── test_cancel.py                 「中断」：牌子语义、子进程登记/清理、下载到一半能停
 │   ├── test_tools_vscode.py           四个 VSCode 工具的返回值、失败归类、Claude 面板什么时候发链接
-│   ├── test_agent_core.py             install_done 什么时候触发（自动退出的判定）
+│   ├── test_agent_core.py             install_done 什么时候触发（"这一轮真装完了"的判定）
 │   ├── test_tool_specs.py             tools[] 和 tool_map 一一对上
 │   ├── test_server_cli.py             服务器版：参数、退出码、--dry-run 不落地、无 TTY 不阻塞、不重复注册、密钥不进报错
 │   ├── test_billing_console.py        余额/充值措辞：读不懂的余额不编成 0、二维码每行等宽、没装 segno 就退回链接、密钥不出现
@@ -978,11 +1000,13 @@ Windows 上用一次 PowerShell 的 `Get-CimInstance` 读，非 Windows 或取�
   `winget.exe` 能跑（`--version`、`search` 都正常）、分支逻辑全有离线测试。
   没验到的是 `Add-AppxPackage` 那一步真的落到一台没有 App Installer 的机器上 ——
   手上没有这样的机器。装不上也不会卡住：会退到便携版，再不行才打开下载页。
-- **`Add-AppxPackage 返回 1` 那次没抓到原因，现在是按最可能的原因修**（2026-10-31）。
-  用户日志里只剩一句「Add-AppxPackage 返回 1： and」，没有 HRESULT —— 判断是缺
-  `Microsoft.UI.Xaml.2.8` / `Microsoft.VCLibs.140.00.UWPDesktop` 两个框架包，
-  于是加了「先装依赖再装主包」这一步，并且失败时把最后三行错误留下来（以前被截没了，
-  下次能看出到底缺什么）。这台机器装不了 App Installer，**没复现过**。
+- **`Add-AppxPackage 返回 1` 的原因查清了**（2026-10-31）。不是缺依赖，是**参数名写错**：
+  `Add-AppxPackage` 没有 `-LiteralPath`，写上它 PowerShell 抛 `ParameterBindingException`、
+  一句都不执行。10-30 那次的日志只剩「返回 1： and」，所以当时猜成了缺框架包；
+  10-31 的日志留了三行，`FullyQualifiedErrorId: NamedParameterNotFound,…AddAppxPackageCommand`
+  才把它点破。现在用 `-Path`（带通配符字符时先 `Set-Location -LiteralPath` 再传文件名），
+  并且失败时保留最后三行。**这台机器还是没能复现"真的装一遍"**（本机的 App Installer
+  本来就是装好的），验到的是参数绑定不再报错、走到"找不到路径"这一步。
 - **便携版 winget 装不了东西**（2026-10-31 确认）。它不是 AppX 包，源索引永远打不开，
   `winget install` 必然 `0x8A15004B`。所以 `install_vscode()` 拿到 `mode == "portable"`
   就直接跳过 winget，去走官方安装包那条路 —— 以前会白跑一次、白等一个 900 秒的上限。

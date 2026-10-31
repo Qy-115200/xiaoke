@@ -137,15 +137,18 @@ def install_vscode(on_progress=None, on_note=None) -> str:
     return fn(on_progress, on_note)
 
 
-def open_vscode(directory: str = "", new_window: bool = False) -> str:
+def open_vscode(directory: str = "", new_window: bool = False,
+                trust: bool = False) -> str:
     """打开 VSCode 并带上工作目录。
 
-    new_window=True 用于"刚装完插件"：已开的窗口是装插件之前加载的，里面没有它。"""
+    new_window=True 用于"刚装完插件"：已开的窗口是装插件之前加载的，里面没有它。
+    trust=True 带上 `--disable-workspace-trust`：我们替用户新开的目录一定是
+    "未信任"的，不关掉这道门禁，扩展在受限模式里连终端都开不了（2026-10-31）。"""
     m = _impl()
     fn = getattr(m, "open_vscode", None)
     if fn is None:
         return "打开 VSCode 失败：这个平台没有打开 VSCode 的实现"
-    return fn(directory, new_window)
+    return fn(directory, new_window, trust=trust)
 
 
 def open_uri(uri: str) -> str:

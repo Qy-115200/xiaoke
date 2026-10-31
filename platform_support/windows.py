@@ -408,13 +408,36 @@ _ALREADY_THERE = (
 _ALREADY_THERE_WORDS = ("newer version", "already installed", "已安装", "已存在")
 
 
+_PS_WILDCARD_CHARS = ("[", "]", "`")
+
+
+def _add_appx_command(path: Path) -> str:
+    """拼出 Add-AppxPackage 那条 PowerShell 命令。
+
+    ★ 参数名只能是 `-Path`（2026-10-31 才查清）。`Add-AppxPackage` **没有**
+      `-LiteralPath`，写上它会当场抛
+        ParameterBindingException / NamedParameterNotFound
+        Microsoft.Windows.Appx.PackageManager.Commands.AddAppxPackageCommand
+      整条命令一句都没执行 —— 表现就是"返回 1，什么都没装"。
+      2026-10-30 用户机器上一直是这个原因，只是那时错误正文被截成「返回 1： and」，
+      看不出来。现在正文留三行，一眼能认出来。
+
+    ★ `-Path` 认通配符，路径里有 `[` `]` `` ` `` 会被当成模式。常见的临时目录
+      不会带这些字符；真带了就 `Set-Location -LiteralPath` 进目录，再只传文件名
+      （文件名是我们自己起的，可控）。"""
+    path = Path(path)
+    if any(c in str(path) for c in _PS_WILDCARD_CHARS):
+        where = str(path.parent).replace("'", "''")
+        name = path.name.replace("'", "''")
+        return (f"Set-Location -LiteralPath '{where}'; "
+                f"Add-AppxPackage -Path '{name}' -ErrorAction Stop")
+    return "Add-AppxPackage -Path '" + str(path).replace("'", "''") + "' -ErrorAction Stop"
+
+
 def _add_appx_package(path: Path) -> str:
     """Add-AppxPackage 一个包。成功（含"本来就在"）返回空串，失败返回一句原因。"""
-    ps = ("Add-AppxPackage -LiteralPath '"
-          + str(path).replace("'", "''")
-          + "' -ErrorAction Stop")
     argv = ["powershell", "-NoProfile", "-NonInteractive",
-            "-ExecutionPolicy", "Bypass", "-Command", ps]
+            "-ExecutionPolicy", "Bypass", "-Command", _add_appx_command(path)]
     try:
         out, err, timed_out, rc = run_capture(
             argv, timeout=WINGET_INSTALL_TIMEOUT, env=clean_env(),
@@ -852,18 +875,21 @@ def install_vscode(on_progress=None, on_note=None) -> str:
     return download_page_fallback("；".join(r for r in reasons if r))
 
 
-def open_vscode(directory: str = "", new_window: bool = False) -> str:
+def open_vscode(directory: str = "", new_window: bool = False,
+                trust: bool = False) -> str:
     """用 VSCode 打开指定目录（目录规则跟 launch_claude 一样：只在用户主目录里）。
 
     new_window=True 时强制开新窗口 —— 刚装完插件必须这样：已开的窗口是在装插件
-    之前加载的，里面没有这个插件。"""
+    之前加载的，里面没有这个插件。
+    trust=True 带上 `--disable-workspace-trust`：见 common.VSCODE_NO_TRUST_FLAG
+    的说明（我们新建的工作目录一定是"未信任"的，不关掉门禁插件就等于没装）。"""
     info = find_vscode()
     if not info:
         return "找不到 VSCode，无法打开"
     cwd, note = safe_cwd(directory)
     try:
         subprocess.Popen(
-            launch_argv_for(info, new_window, cwd),
+            launch_argv_for(info, new_window, cwd, trust=trust),
             stdin=subprocess.DEVNULL,          # 别让子进程抢走终端的标准输入
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             # ★ clean_env 不能省：带着 ELECTRON_RUN_AS_NODE 会让 Code.exe 变成

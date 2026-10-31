@@ -20,6 +20,15 @@ from config import HOME
 
 VSCODE_DOWNLOAD_URL = "https://code.visualstudio.com/download"
 
+# VSCode 的「工作区信任」对助手来说是个陷阱（2026-10-31 用户撞上）：
+# 我们替他新建的工作目录**一定是"未信任"的**，打开时 VSCode 会弹
+# 「Do you trust the authors of the files in this folder? … Creating a terminal
+#  process requires executing code」。没点「信任」之前，扩展跑在受限模式里：
+# Claude 面板开不出来，连终端都开不了 —— 用户看到的就是"插件没装上"。
+# 带上这个开关，**只对这一次打开的那个窗口**关闭信任门禁，不改任何全局设置，
+# 也不影响用户之后自己打开别的目录（那里照旧会问）。
+VSCODE_NO_TRUST_FLAG = "--disable-workspace-trust"
+
 
 def safe_cwd(directory: str) -> tuple[Path, str]:
     """把用户给的目录变成可用的工作目录，并返回一句要转告用户的话。
@@ -209,17 +218,23 @@ def open_url(url: str) -> bool:
         return False
 
 
-def launch_argv_for(info: dict, new_window: bool, directory) -> list[str]:
+def launch_argv_for(info: dict, new_window: bool, directory,
+                    trust: bool = False) -> list[str]:
     """拼出"用 VSCode 打开这个目录"的完整 argv。
 
     ★ 要带参数（比如 -n 开新窗口）时**必须走 CLI**：Windows 上 `Code.exe` 收到参数
       会转手给已运行的实例，不按命令行语义处理（本机实测 `Code.exe --list-extensions`
       是空输出，`code.cmd` 才正常）。所以有 CLI 就用 CLI，没有才退回 launch_argv
-      —— 那种情况下只是开不出新窗口，照样能打开。"""
+      —— 那种情况下只是开不出新窗口，照样能打开。
+
+    trust=True 带上 `--disable-workspace-trust`（下文的 VSCODE_NO_TRUST_FLAG）。"""
     cli = list(info.get("cli_argv") or [])
+    extra = [VSCODE_NO_TRUST_FLAG] if trust else []
     if new_window and cli:
-        return cli + ["-n", str(directory)]
-    return list(info.get("launch_argv") or []) + [str(directory)]
+        return cli + ["-n"] + extra + [str(directory)]
+    if trust and cli:                       # 要带开关，就得走 CLI
+        return cli + extra + [str(directory)]
+    return list(info.get("launch_argv") or []) + extra + [str(directory)]
 
 
 def download_page_fallback(reason: str) -> str:

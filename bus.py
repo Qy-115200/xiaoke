@@ -40,9 +40,12 @@ def poll_queue(gui):
             elif kind == "balance":
                 gui.update_balance(data)
             elif kind == "install_done":
-                # 安装流程完整走完（… → 打开 VSCode 或终端成功）→ 给用户几秒看完
-                # 收尾说明，然后助手自己退出，别一直占着托盘。
-                gui.schedule_auto_quit()
+                # 安装流程完整走完（… → 打开 VSCode 或终端成功）。
+                # ★ 这里**故意什么都不做**：2026-10-31 用户明确说「安装完后不用自动
+                #   退出」——装完正是最想回头问两句的时候，助手自己关掉最招人烦。
+                #   事件本身留着，它仍然是"这一轮真把用户领进门了"的唯一判据
+                #   （agent_core 那边有一组测试盯着它），以后再挂别的界面行为也用它。
+                pass
             elif kind == "busy":
                 if data:                 # 忙碌
                     gui.start_btn.configure(state=tk.DISABLED, text="处理中...")

@@ -55,10 +55,6 @@ from ui.fonts import (
     font,
 )
 
-# 安装流程完整走完后，助手留多少秒让用户看收尾说明，然后自动退出。
-# 改这里就行——别在 schedule_auto_quit 里写死数字。
-AUTO_QUIT_SECONDS = 10
-
 
 class WindowMixin:
     def __init__(self, root):
@@ -75,8 +71,7 @@ class WindowMixin:
         self._qr_image = None                    # 二维码图片对象（得留着，不然会被回收）
         self._qr_box = None                      # 显示二维码的控件
         self._recharge_only = False              # 这次启动只办充值，不起 Agent
-        self._auto_quit_id = None                # 安装完成后"几秒后自动退出"的 after id
-        self._quitting = False                   # 防止连点 X / 自动退出重复 destroy
+        self._quitting = False                   # 防止连点 X 重复 destroy
 
         root.title(APP_NAME)
         root.geometry("960x780")
@@ -511,39 +506,14 @@ class WindowMixin:
 
     # ---------- 退出 ----------
 
-    def schedule_auto_quit(self, seconds=None):
-        """安装流程走完 → 留一点时间给用户看收尾说明，然后助手自己退出。
-
-        为什么不是立刻退：最后那条 Agent 消息里写了工作目录和怎么用（VSCode 或终端），
-        秒退用户根本来不及看。为什么只在这个时机退：用户只是让助手"再打开一次
-        Claude Code"时也调 launch_claude / open_vscode，那种情况不该把助手关掉——
-        所以触发条件是**这一轮完整走过安装流程**，见 agent_core.run_one_task。"""
-        if getattr(self, "_recharge_only", False):
-            return                               # 只办充值的启动方式没有安装流程
-        if self._auto_quit_id is not None:
-            return                               # 已经排过了，别重复排
-        if seconds is None:
-            seconds = AUTO_QUIT_SECONDS
-        # ★ 这里不能写"已经在终端里打开了"：走 VSCode 分支时根本没开终端，
-        #   那种文案是假的。两种收尾都适用的话只能这么写。
-        self.write(f"[系统] 安装完成，{seconds} 秒后自动退出。"
-                   " Claude Code 已经可以用了，以后从桌面图标启动就行。")
-        self._auto_quit_id = self.root.after(int(seconds * 1000), self.quit_app)
-
     def quit_app(self):
-        """真的退出：取消排队的自动退出，然后关窗口。
+        """真的退出：关窗口。
 
-        ★ _quitting 防重入：X 按钮、安装完成的自动退出、充值窗关闭都可能走到这里，
+        ★ _quitting 防重入：X 按钮、充值窗关闭都可能走到这里，
           重复 destroy 会抛 TclError（已经销毁的窗口不能再操作）。"""
         if self._quitting:
             return
         self._quitting = True
-        if self._auto_quit_id is not None:
-            try:
-                self.root.after_cancel(self._auto_quit_id)
-            except Exception:
-                pass
-            self._auto_quit_id = None
         try:
             self.root.quit()
             self.root.destroy()

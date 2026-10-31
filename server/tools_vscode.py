@@ -263,13 +263,17 @@ def open_vscode(directory: str = "") -> str:
     """用 VSCode 打开工作目录，**并把里面的 Claude 面板亮出来**。
 
     ★ 返回值必须以「已打开 VSCode」开头（agent_core 靠它判断安装完成）。
-    ★ 和 launch_claude 二选一：走了 VSCode 就不要再开终端。"""
+    ★ 和 launch_claude 二选一：走了 VSCode 就不要再开终端。
+    ★ trust=True：工作目录是助手替用户新建的，VSCode 一定把它当"未信任"，
+      弹「是否信任这个文件夹的作者」。不点信任，插件就在受限模式里 ——
+      面板开不出来、终端也开不了，用户看到的就是"插件没装上"。
+      这个开关只影响**这一个窗口**，不改任何全局设置。"""
     global _extension_just_installed
     new_window = _extension_just_installed
     _extension_just_installed = False
 
     info = platform_support.find_vscode()
-    text = platform_support.open_vscode(directory, new_window)
+    text = platform_support.open_vscode(directory, new_window, trust=True)
     if not text.startswith(_OPENED_PREFIX):
         return text                      # 没打开就别再谈面板了
     return text + _open_claude_panel(info)
