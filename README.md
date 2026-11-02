@@ -706,7 +706,7 @@ agent_demo/
 ├── platform_support/                  三平台差异（调用方只 import 这个包）
 │   ├── __init__.py               181   按 sys.platform 延迟加载并转发
 │   ├── common.py                 230   safe_cwd（HOME 越界检查）、find_claude、clean_env、跑子进程抓输出、VSCode 值解析
-│   ├── windows.py               1475   注册表协议 / .lnk / cmd / WinRT toast / VSCode 探测 + winget 安装（含"没 winget 就装一个"、问 AppX 注册表定位、240MB 安装包 6 路分段下）/ 指纹原始值（主板+CPU、MachineGuid）
+│   ├── windows.py               1524   注册表协议 / .lnk / cmd / WinRT toast / VSCode 探测 + winget 安装（含"没 winget 就装一个"、问 AppX 注册表定位、240MB 安装包 6 路分段下）/ 指纹原始值（主板+CPU、MachineGuid）/ claude 探测（含便携 Node 的 %USERPROFILE%\nodejs 和 npm 全局前缀）
 │   ├── macos.py                  467   Info.plist 协议 + Apple Event / .command 快捷方式 / Terminal.app / VSCode 探测 + brew 安装 / 指纹原始值（IOPlatformUUID）
 │   └── linux.py                  387   .desktop + xdg-mime / 终端探测 / notify-send / VSCode 探测（安装只开下载页）/ 指纹原始值（machine-id + DMI，容器里带 hostname）
 │

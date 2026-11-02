@@ -28,7 +28,12 @@ if _IS_WIN:
      bash('curl -L --connect-timeout 20 --max-time 300 -o "%TEMP%\\node.msi" "https://npmmirror.com/mirrors/node/latest-v24.x/<上一步挑出的文件名>"', timeout=360, show_progress=True)
      bash('msiexec /i "%TEMP%\\node.msi" /qn', timeout=600, show_progress=True)
 
-  ③ 两条都不通，才把 https://nodejs.org 的 LTS 安装包链接发给用户，让他在浏览器里自己下。"""
+  ③ 两条都不通（`msiexec` 1603 = 没权限）→ 下便携版 zip 解到 **%USERPROFILE%\\nodejs**，用它跑 npm：
+     bash('curl -L --connect-timeout 20 --max-time 300 -o "%TEMP%\\node.zip" "https://npmmirror.com/mirrors/node/latest-v24.x/<选中的 node-vX.Y.Z-win-x64.zip>"', timeout=360, show_progress=True)
+     bash('powershell -NoProfile -Command "Expand-Archive -Path \\"%TEMP%\\node.zip\\" -DestinationPath \\"%USERPROFILE%\\nodejs\\" -Force"', timeout=300, show_progress=True)
+     bash('set "PATH=%USERPROFILE%\\nodejs;%PATH%" && npm install -g @anthropic-ai/claude-code', timeout=900, show_progress=True)
+     ★ **必须解到这个目录**：助手在那里找 claude.cmd，换个地方解压后面就报"找不到 claude"。
+  ④ ①②③ 都不行，才把 https://nodejs.org 的链接给用户自己下。"""
     _CMD_NOT_FOUND = '"不是内部或外部命令" / "not recognized" / "not found"'
     _NODE_FULLPATH = '`bash("C:\\\\Program Files\\\\nodejs\\\\node.exe -v")`'
     _DESKTOP_DIR = "%USERPROFILE%\\\\Desktop\\\\claude-projects"

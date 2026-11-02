@@ -154,5 +154,63 @@ class FingerprintPartsTests(unittest.TestCase):
             self.assertEqual(platform_support.fingerprint_parts(), {})
 
 
+class WindowsClaudePathTests(unittest.TestCase):
+    """便携版 Node 那次的真机故障（2026-11-02）。
+
+    msiexec 装不上 → 助手把 Node 解到 %USERPROFILE%\\nodejs、用临时的 `set PATH=`
+    跑 npm install -g ⇒ claude.cmd 落在 %USERPROFILE%\\nodejs 里，既不在标准目录
+    也不在 PATH。原来 find_claude_path() 三处都落空，装好的 claude 被判"没装好"。
+    """
+
+    def setUp(self):
+        from platform_support import windows
+        self.windows = windows
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _claude_in(self, *parts) -> Path:
+        p = self.home.joinpath(*parts)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("@echo off\n", encoding="utf-8")
+        return p
+
+    def test_portable_node_dir_is_found(self):
+        want = self._claude_in("nodejs", "claude.cmd")
+        with mock.patch.object(self.windows, "HOME", self.home), \
+                mock.patch("platform_support.common.shutil.which", return_value=None):
+            self.assertEqual(self.windows.find_claude_path(), str(want))
+
+    def test_portable_node_dir_is_on_the_child_path(self):
+        # 不补进 PATH 的话，装完 Node 之后模型每条命令都得自己 set PATH=
+        with mock.patch.object(self.windows, "HOME", self.home):
+            self.assertIn(self.home / "nodejs", self.windows.path_dirs())
+
+    def test_npm_prefix_is_the_last_resort(self):
+        npm = self._claude_in("nodejs", "npm.cmd")
+        prefix = self.home / "elsewhere"
+        want = self._claude_in("elsewhere", "claude.cmd")
+
+        def fake_run_capture(argv, **kwargs):
+            self.assertEqual(argv[0], str(npm))
+            self.assertEqual(argv[1:], ["prefix", "-g"])
+            return str(prefix).encode() + b"\r\n", b"", False, 0
+
+        with mock.patch.object(self.windows, "HOME", self.home), \
+                mock.patch.object(self.windows, "run_capture", side_effect=fake_run_capture), \
+                mock.patch("platform_support.common.shutil.which", return_value=None):
+            self.assertEqual(self.windows.find_claude_path(), str(want))
+
+    def test_npm_prefix_failure_is_silent(self):
+        self._claude_in("nodejs", "npm.cmd")
+        with mock.patch.object(self.windows, "HOME", self.home), \
+                mock.patch.object(self.windows, "run_capture",
+                                  side_effect=OSError("no npm")), \
+                mock.patch("platform_support.common.shutil.which", return_value=None):
+            self.assertIsNone(self.windows.find_claude_path())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

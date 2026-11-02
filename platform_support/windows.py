@@ -72,6 +72,7 @@ def path_dirs() -> list[Path]:
     """刚装完 Node 时需要手动补进 PATH 的目录。"""
     return [
         Path(r"C:\Program Files\nodejs"),
+        HOME / "nodejs",                        # 便携版 Node（见 find_claude_path 的注释）
         HOME / "AppData" / "Roaming" / "npm",
     ]
 
@@ -94,12 +95,60 @@ def desktop_dir() -> Path:
         return HOME / "Desktop"
 
 
+def _node_dirs() -> list[Path]:
+    """Node / npm 全局目录可能在哪 —— `claude.cmd` 就落在其中某一个里。
+
+    ★ 2026-11-02 真机上撞到的：`msiexec` 装 Node 直接返回 1603（没有管理员权限 /
+      Windows Installer 服务有问题），助手于是下了便携版 zip 解到
+      `%USERPROFILE%\\nodejs`，再用 `set PATH=...` **只在那一条命令里**前置 PATH
+      跑 `npm install -g @anthropic-ai/claude-code`。npm 的全局前缀默认就是 Node
+      自己的安装目录，于是 `claude.cmd` 落在 `%USERPROFILE%\\nodejs` 里：
+        · 不在下面那三个"标准"位置；
+        · 也不在系统/用户 PATH 里（`set PATH=` 是临时的，没写进注册表）；
+      ⇒ 原来的 find_claude_path() 一样都找不到，装好的 claude 被判成"没装好"。
+
+    第一个就是那条便携路径 —— 提示词里也钉了同一个目录，两边必须保持一致。
+    """
+    dirs = [
+        HOME / "nodejs",                                    # 助手自己解出来的便携 Node
+        Path(r"C:\Program Files\nodejs"),                   # 系统级安装器的默认目录
+        HOME / "AppData" / "Roaming" / "npm",               # npm 默认的全局前缀
+        HOME / "AppData" / "Local" / "npm",
+        HOME / "AppData" / "Local" / "Programs" / "nodejs",
+    ]
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)"):
+        value = os.environ.get(env_name)
+        if value:
+            dirs.append(Path(value) / "nodejs")
+    return dirs
+
+
+def _claude_from_npm_prefix() -> str | None:
+    """最后再问一次 npm 自己的全局前缀（便携版放在哪都能问出来）。
+
+    只在前面所有候选都落空时才跑，所以慢一点（1~3 秒）没关系 —— 调用方是
+    "建快捷方式 / 启动终端"这种用户点一下的动作。失败一律返回 None。"""
+    npm = next((str(d / "npm.cmd") for d in _node_dirs() if (d / "npm.cmd").exists()), "")
+    if not npm:
+        return None
+    try:
+        out, _err, timed_out, code = run_capture(
+            [npm, "prefix", "-g"], timeout=8, env=clean_env())
+        if timed_out or code != 0:
+            return None
+        prefix = smart_decode(out).strip().splitlines()[-1].strip()
+        cand = Path(prefix) / "claude.cmd"
+        return str(cand) if prefix and cand.exists() else None
+    except Exception:
+        return None
+
+
 def find_claude_path() -> str | None:
-    return find_claude([
-        HOME / "AppData" / "Roaming" / "npm" / "claude.cmd",                # npm 装的
-        HOME / "AppData" / "Local" / "Programs" / "claude" / "claude.exe",  # 官方原生装的
-        Path("C:/Program Files/claude/claude.exe"),                          # 系统级装的
-    ])
+    return (find_claude(
+        [d / "claude.cmd" for d in _node_dirs()] + [
+            HOME / "AppData" / "Local" / "Programs" / "claude" / "claude.exe",  # 官方原生装的
+            Path("C:/Program Files/claude/claude.exe"),                          # 系统级装的
+        ]) or _claude_from_npm_prefix())
 
 
 # ================= VSCode =================
