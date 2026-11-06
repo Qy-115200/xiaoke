@@ -355,8 +355,8 @@ def _winget_from_appx_registration() -> str | None:
       为什么找不到：上面那几个候选全靠"猜"——
         · PATH 最前面那条 WindowsApps 属于**另一个账户**（Administrator），
           那是个空壳别名，一创建进程就 WinError 3；
-        · `%USERPROFILE%` 也不一定对：这台机器用户名是 `瞿毅`，
-          而 profile 目录叫 `C:\\Users\\QY`，两者的 WindowsApps 不是同一份。
+        · `%USERPROFILE%` 也不一定对：这台机器用户名是中文，
+          而 profile 目录是 ASCII 的 `C:\\Users\\abc`，两者的 WindowsApps 不是同一份。
       问 AppX 注册表就没有"猜"这回事 —— 系统自己知道包装在哪。"""
     ps = ("$ErrorActionPreference='SilentlyContinue';"
           "(Get-AppxPackage Microsoft.DesktopAppInstaller).InstallLocation")
@@ -693,7 +693,7 @@ def _ascii_copy(path: Path) -> Path | None:
     """把包复制到一个**纯 ASCII** 的目录，供重试时用。做不到就返回 None。
 
     ★ 为什么值得一试：AppX 部署服务内部有几段走的是 ANSI 路径，用户目录名带中文
-      （用户机器是 `C:\\Users\\瞿毅\\…`）时，个别 Windows 版本会以 `IOException`
+      （用户机器是 `C:\\Users\\张三\\…`）时，个别 Windows 版本会以 `IOException`
       失败，而错误正文里看不出跟路径有关（2026-10-31）。`C:\\Users\\Public` 是
       系统固定名字，永远是 ASCII。
     ★ 放公共目录不怕别人塞东西：包有大小 + sha256 双重校验，塞进来的过不了。

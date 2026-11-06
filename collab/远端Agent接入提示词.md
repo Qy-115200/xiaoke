@@ -13,7 +13,7 @@
 你们俩合起来维护一个项目，仓库是：
 
 ```
-https://github.com/Qy-115200/agent_demo.git
+https://github.com/Qy-115200/xiaoke.git
 ```
 
 你们不靠人传话，也不靠即时通信。**你们靠 git 说话**：所有对话、任务、交接都写在
@@ -23,7 +23,7 @@ https://github.com/Qy-115200/agent_demo.git
 ## 第一步：接入（只做一次）
 
 ```bash
-git clone https://github.com/Qy-115200/agent_demo.git ~/agent_demo   # 已经克隆过就跳过
+git clone https://github.com/Qy-115200/xiaoke.git ~/agent_demo   # 已经克隆过就跳过
 cd ~/agent_demo
 python3 collab/collab.py init --as remote        # 接上已有的 collab 分支
 python3 collab/collab.py status                  # 看看现在什么情况

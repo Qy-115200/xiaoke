@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Qy-115200/agent_demo/releases/latest"><img src="https://img.shields.io/github/v/release/Qy-115200/agent_demo?color=3b8ed0&label=release" alt="Release"></a>
+  <a href="https://github.com/Qy-115200/xiaoke/releases/latest"><img src="https://img.shields.io/github/v/release/Qy-115200/xiaoke?color=3b8ed0&label=release" alt="Release"></a>
   <img src="https://img.shields.io/badge/平台-Windows%20%7C%20macOS%20%7C%20Linux-3b8ed0" alt="平台">
   <img src="https://img.shields.io/badge/离线测试-841%20个全过-brightgreen" alt="离线测试">
   <a href="LICENSE"><img src="https://img.shields.io/badge/许可证-MIT-green" alt="许可证"></a>
@@ -19,7 +19,7 @@
 <p align="center">
   <a href="https://aikaui.com/downloads"><b>Windows 下载</b></a> ·
   <a href="https://aikaui.com/downloads">macOS（Apple 芯片 / Intel）</a> ·
-  <a href="https://github.com/Qy-115200/agent_demo/releases/latest">GitHub Releases</a> ·
+  <a href="https://github.com/Qy-115200/xiaoke/releases/latest">GitHub Releases</a> ·
   <a href="https://aikaui.com">官网</a>
 </p>
 
@@ -146,7 +146,7 @@ Windows 10/11 的家庭版精简镜像、老 LTSC、服务器版都可能不带 
 - **失败时要留下能看的错误**（2026-10-31 重写）。原来是「取最后三行」—— 取到的正好
   是 PowerShell 的 `+ ~~~~` 位置标记，真正有信息的第一行
   `Deployment failed with HRESULT: 0x8007…` 反被丢了；而且硬按 UTF-8 解码，
-  中文路径 `瞿毅` 在用户日志里变成 `????`（中文 Windows 的 PowerShell 写 GBK）。
+  中文路径 `张三` 在用户日志里变成 `????`（中文 Windows 的 PowerShell 写 GBK）。
   现在 `_summarize_powershell_error()`：先去掉纯装饰行，保留第一行，再补一条带
   `0x8…` 的、一条 `CategoryInfo`、一条 `FullyQualifiedErrorId`；解码走
   `smart_decode()`（UTF-8 → 本地编码）。
@@ -207,8 +207,8 @@ Windows 10/11 的家庭版精简镜像、老 LTSC、服务器版都可能不带 
 （`Get-AppxPackage` 报 1.29.380 / Ok，别名跑 `--version` 回 `v1.29.380`），我们却判定
 「没有 winget」，于是白下 58MB、白装一遍（还失败）、再白下 240MB。上面那些候选全靠猜：
 PATH 最前面那条 `WindowsApps` 可能属于**另一个账户**（本机就是，Administrator 的空壳），
-`%USERPROFILE%` 也可能不是你以为的那个目录（本机 `USERNAME` 是 `瞿毅`，profile 却是
-`C:\Users\QY`）。问 AppX 注册表则没有「猜」这回事。
+`%USERPROFILE%` 也可能不是你以为的那个目录（本机 `USERNAME` 是中文名，profile 却是
+`C:\Users\abc`）。问 AppX 注册表则没有「猜」这回事。
 
 
 `open_vscode()` 不只是开窗：它**把 Claude 面板也一起打开**。VSCode 命令行没有 `--command`
@@ -1173,7 +1173,7 @@ CPU 是常量（CPUID 特性位 + 型号签名，不是序列号）；不少 OEM
   `ensure_winget()` 装不上就返回失败原因，`install_vscode()` 直接走官方安装包。
 - **`find_winget` 不再靠猜路径**（2026-10-31）。用户机器上 winget 是好的，我们却报了
   「没有 winget」：PATH 里第一条 `WindowsApps` 属于别的账户（空壳别名），`%USERPROFILE%`
-  和实际 profile 目录也可能不是一个（本机 `USERNAME=瞿毅`，profile 是 `C:\Users\QY`）。
+  和实际 profile 目录也可能不是一个（本机 `USERNAME` 是中文名，profile 是 `C:\Users\abc`）。
   现在最后一道是问 `Get-AppxPackage Microsoft.DesktopAppInstaller` 的 `InstallLocation`。
   这条**在这台机器上验证过**（能准确拿到 1.29.380 的包目录），但它依赖 PowerShell 能起得来；
   起不来就当没有，行为退回以前。

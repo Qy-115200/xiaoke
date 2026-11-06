@@ -465,11 +465,11 @@ class AppxPackageTests(unittest.TestCase):
     def test_chinese_path_in_the_error_is_decoded(self):
         """中文 Windows 上 PowerShell 按 GBK 写输出。按 UTF-8 硬解会把路径里的
         中文变成 `????`，用户截图就是这样 —— 连发生在哪个文件上都看不出来。"""
-        err = ("Add-AppxPackage : 部署失败：找不到 C:\\Users\\瞿毅\\a.msix"
+        err = ("Add-AppxPackage : 部署失败：找不到 C:\\Users\\张三\\a.msix"
                .encode("gbk"))
         with self._run_with(1, err):
             why = win_backend._add_appx_package(self.pkg)
-        self.assertIn("瞿毅", why)
+        self.assertIn("张三", why)
         self.assertNotIn("????", why)
 
     def test_failure_is_retried_once_after_a_pause(self):
