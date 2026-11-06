@@ -1,10 +1,59 @@
-# 小克 · Claude Code 一键配置
+<p align="center">
+  <img src="agent.png" width="96" alt="小克">
+</p>
 
-一个 Windows / macOS / Linux 桌面小程序：把「装 Claude Code」这件折腾半天的事，变成跟 AI 说一句话。
+<h1 align="center">小克 · Claude Code 一键配置</h1>
 
-窗口左边一条导航栏，右边三个页面：**💬 对话**、**📊 用量信息** 和 **🔐 账户信息**。对话页背后是一个能调工具的
-Agent —— 它会自己检测环境、装 Node、装 Claude Code、写好配置、问清楚工作目录、在桌面放个图标，
-然后把 Claude Code 打开。它也是个能聊的「小克」：能陪你聊天、答疑、查余额、扫码充值。
+<p align="center">
+  <b>跟 AI 说一句话，Claude Code 就装好了。</b><br>
+  Windows / macOS / Linux · 国内网络直接可用 · 客户端代码全在这里
+</p>
+
+<p align="center">
+  <a href="https://github.com/Qy-115200/agent_demo/releases/latest"><img src="https://img.shields.io/github/v/release/Qy-115200/agent_demo?color=3b8ed0&label=release" alt="Release"></a>
+  <img src="https://img.shields.io/badge/平台-Windows%20%7C%20macOS%20%7C%20Linux-3b8ed0" alt="平台">
+  <img src="https://img.shields.io/badge/离线测试-841%20个全过-brightgreen" alt="离线测试">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/许可证-MIT-green" alt="许可证"></a>
+</p>
+
+<p align="center">
+  <a href="https://aikaui.com/downloads"><b>Windows 下载</b></a> ·
+  <a href="https://aikaui.com/downloads">macOS（Apple 芯片 / Intel）</a> ·
+  <a href="https://github.com/Qy-115200/agent_demo/releases/latest">GitHub Releases</a> ·
+  <a href="https://aikaui.com">官网</a>
+</p>
+
+![小克主界面](docs/screenshot.png)
+
+Linux / 服务器没有图形界面，也是一行装完：
+
+```bash
+curl -fsSL https://aikaui.com/install.sh | sh
+```
+
+---
+
+## 为什么做这个
+
+装 Claude Code 本可以五分钟结束，但国内用户实际要过这几关：装 Node（MSI 安装包还经常
+以 1603 失败）、npm 全局目录不在 PATH 里、地区限制、中转地址写在哪、VSCode 插件、
+第一次启动该用哪个工作目录……每一步都能卡住一个不太折腾电脑的人。
+
+小克把这件事交给一个会自己看环境、会调工具的 Agent：它检测、它下载、它写配置、它问你
+「以后在哪个文件夹里干活」，装完把 VSCode 或终端打开。每一步都用大白话解释一句，要装东西
+之前先问过你，装到一半不耐烦了可以点「中断」。
+
+它同时是个能聊的助手：查余额、看用量图表、扫码充值，都在同一个窗口里。窗口左边一条导航栏，
+右边三个页面：**💬 对话**、**📊 用量信息** 和 **🔐 账户信息**。
+
+## 为什么可以放心装
+
+- **客户端代码全在这里** —— 它怎么找到 `claude`、怎么写 `settings.json`、凭证存在哪，
+  都能在仓库里读到，没有藏在安装包里的黑盒步骤。
+- **凭证只落在你自己机器上**：注册拿到的 `api_key` 存本机（Windows 走 DPAPI，POSIX 是 0600
+  文件），本机密钥和设备指纹一起做「同一台机器找回同一个号」的双验证。
+- **841 个离线单元测试**，不联网、不需要图形界面就能跑。
+- **不做托盘、不留后台**：关窗口就是退出程序。
 
 ## 功能
 
@@ -778,6 +827,8 @@ agent_demo/
 ├── packaging/
 │   ├── install.sh               322   官网那一行 `curl … | sh` 拉的就是它（POSIX sh，上线前 sh -n 校验）
 │   └── claude-code-assistant.desktop   Linux 桌面启动器（服务器版不再发它，留着给手动装桌面版的人）
+├── collab/                            两台机器上两个 Agent 的协作规约与实现（PROTOCOL.md / collab.py）
+├── docs/                              公共文档用的截图（README 顶部那张）
 ├── .github/workflows/build.yml        四平台 CI 构建 + tag 时发布
 │
 ├── agent.spec                          PyInstaller 打包配置（Windows / macOS，入口 main.py）
@@ -785,6 +836,7 @@ agent_demo/
 ├── requirements.txt                    第三方依赖（按平台带 marker）
 ├── agent.ico / agent.png / agent.icns  窗口 / 应用图标
 ├── 文件执行或调用顺序.md                一次对话里各模块的出场顺序
+├── LICENSE                             MIT
 └── README.md
 ```
 
@@ -1079,6 +1131,15 @@ CPU 是常量（CPUID 特性位 + 型号签名，不是序列号）；不少 OEM
 （`series_by_model` 里的每一段也走它）。**按模型序列缺失时那两张图退回每个模型一根
 总量柱子并注明"服务器暂未按模型拆分时间"；连模型数据都没有时退回总量的单根柱子 +
 "暂无数据"，不会白屏**。
+
+## 这个仓库是怎么维护的
+
+顺带一提：这里有两个 Agent 在干活 —— 一个在作者的 Windows 电脑上，一个在服务器上。
+它们不共享会话记忆，靠 git 当共享外存：认领任务、开自己的分支、推上去、用 `ask` / `done`
+交接。规约写在 [collab/PROTOCOL.md](collab/PROTOCOL.md)，实现是
+[collab/collab.py](collab/collab.py)，连"每次开工自动看一眼对端有没有新消息"的 hook
+都配好了。这套东西本身就是个可以抄的样本：让两个不会互相记得的 Agent 不靠自觉、
+靠机制把活接上。
 
 ## 已知限制
 

@@ -116,9 +116,14 @@ class SwitchTests(unittest.TestCase):
             self.assertTrue(bak.exists(), "换之前必须留一份原样")
 
     def test_registers_when_there_is_no_identity_yet(self):
+        # ★ check() 必须一起 mock：不 mock 的话它会去读**这台机器上真实的**
+        #   ~/.claude/settings.json —— 谁本机指着别家中转，这条用例就红给他看，
+        #   跟他改的东西一点关系没有。apply() 在这里是假的，文件没被改写，
+        #   所以"写完再判一次"那步只会看到真实配置里的别人的中转。
         with mock.patch("server.identity.load_identity",
                         side_effect=[None, {"api_key": "sk-new", "api_base": OURS}]), \
              mock.patch("server.identity.ensure_identity", return_value=True), \
+             mock.patch("server.relay_gate.check", return_value=relay_gate.Gate()), \
              mock.patch("server.claude_config.apply", return_value=(True, "已更新")) as ap:
             ok, message = relay_gate.switch_to_ours()
         self.assertTrue(ok)
